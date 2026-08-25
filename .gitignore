@@ -1,0 +1,53 @@
+# Dependencies and build output
+node_modules/
+dist/
+build/
+*.zip
+*.7z
+
+# Machine-local settings and runtime state
+data/
+祈福运行数据/
+tmp/
+runtime/
+workdays/
+browser-profile/
+playwright-profile/
+
+# Credentials, environment files and browser/session material
+.env
+.env.*
+!.env.example
+*.cookie*
+*storage-state*.json
+*auth-state*.json
+
+# Business data and generated evidence must never enter source control
+*.log
+timing.json
+timing-audit.json
+photo-*-receipt.json
+scene-*-receipt.json
+order-manifest.json
+*.crdownload
+*.pdf
+
+# Local diagnostics and screenshots
+diagnostics/
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# The compressed OCR model in ocr-data is an intentional source asset.
+!ocr-data/
+!ocr-data/eng.traineddata.gz
+eng.traineddata
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
