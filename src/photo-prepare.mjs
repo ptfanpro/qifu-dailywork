@@ -1697,6 +1697,15 @@ export function isLikelyScene(item) {
   const sprawlingLights = geometry.score > 0.12
     && geometry.width > 0.90
     && (geometry.fill < 0.40 || geometry.top >= 0.58);
+  // 近景灯阵的金色灯架可能被纸色连通域误认为一张大黄纸，但灯阵整幅画面
+  // 的结构非常稳定：没有矩形纸张、连通区域接近全宽、文字边缘极少且背景
+  // 高度均匀。该证据必须先于“大色块即纸张”的兜底，避免场景图进入 OCR。
+  const strongFullFrameScene = geometry.rectangularPaper === false
+    && geometry.width >= 0.75
+    && geometry.height >= 0.45
+    && metrics.uniformity >= 0.62
+    && metrics.upperEdgeDensity <= 0.025
+    && metrics.edgeDensity <= 0.055;
   // 供水全景有时只在画面最底部留下一个很浅、横跨全宽的红色托盘/桌沿色带。
   const shallowBottomSceneBand = !geometry.usablePaper
     && geometry.width > 0.80
@@ -1705,7 +1714,7 @@ export function isLikelyScene(item) {
     && geometry.boxArea <= 0.16
     && geometry.score <= 0.14;
   // 灯阵或供水全景会在画面底部形成横跨全宽的红/黄连通块；它不是纸张。
-  if (sprawlingLights || shallowBottomSceneBand) return true;
+  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene) return true;
   // 纸张偶尔与画面右边缘相接，严格矩形条件会失败；足够大的连续红/黄纸色块仍应判为纸张。
   if (geometry.rectangularPaper || (geometry.score >= 0.085
     && geometry.boxArea >= 0.14
@@ -1716,7 +1725,7 @@ export function isLikelyScene(item) {
   const visualScene = metrics.uniformity > 0.47
     && metrics.upperEdgeDensity < 0.08
     && metrics.edgeDensity < 0.16;
-  return Boolean(sprawlingLights || shallowBottomSceneBand || visualScene);
+  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || visualScene);
 }
 
 // 只返回匿名视觉结构指标，供真实照片回归测试使用；不运行 OCR，也不读取
@@ -2219,7 +2228,7 @@ async function applyExactRemainingPortraitOrderEvidence(recognized, pdfPages) {
   }
 }
 
-async function classifyScenes(files, occupiedNames) {
+export async function classifyScenes(files, occupiedNames) {
   if (!files.length) return { assignments: [], issues: [] };
   const availableLamp = ['2.1.jpg', '2.2.jpg'].filter((name) => !occupiedNames.has(name));
   const availableWater = ['2.5.jpg', '2.6.jpg'].filter((name) => !occupiedNames.has(name));
@@ -2233,7 +2242,11 @@ async function classifyScenes(files, occupiedNames) {
   // 该独立证据分类，避免因为平均亮度差不足 25 而全部留给人工。
   const explicitWater = scored.filter((item) => item.darkRatio < 0.28 && item.warmBrightRatio < 0.08);
   const explicitLamp = scored.filter((item) => item.darkRatio > 0.32 && item.warmBrightRatio > 0.10);
-  if (explicitWater.length && explicitLamp.length && explicitWater.length + explicitLamp.length === scored.length
+  // 补图经常只收到某一类场景。只要每张候选都独立满足强供灯/供水特征，
+  // 不要求两类必须同时出现；缺少的另一类继续作为待补项，不得把同类图片
+  // 强拆成一灯一水。
+  if (explicitWater.length + explicitLamp.length > 0
+    && explicitWater.length + explicitLamp.length === scored.length
     && explicitWater.length <= availableWater.length && explicitLamp.length <= availableLamp.length) {
     return {
       assignments: [

@@ -7,7 +7,7 @@ import { calculateQuantities, venueMessage, normalizeText } from '../src/quantit
 import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
-import { applyPhotoPreparation, dominantPaperColor, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, isLikelyScene, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseWindowsOcrTail, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder } from '../src/photo-prepare.mjs';
+import { applyPhotoPreparation, classifyScenes, dominantPaperColor, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, isLikelyScene, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseWindowsOcrTail, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { PrayerSite, chooseReusablePage, isClosedBrowserError, isNavigationRaceError, isTransientAutomationPage, resolveBlessingUploadCount, resolveRenewalTerminalDialog, scheduleSiteClick } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
@@ -333,8 +333,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.65/);
-assert.match(uiSource,/编号消歧统一回归版/);
+assert.match(uiSource,/V9\.5\.66/);
+assert.match(uiSource,/场景同类补图回归版/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);
@@ -536,7 +536,22 @@ unsafeHighConfidenceZeroOne[1].evidence={method:'ocr',votes:2,maxConfidence:65};
 assert.deepEqual(reconcileDuplicatePhotoNumbers(unsafeHighConfidenceZeroOne,new Set(Array.from({length:14},(_,index)=>503+index)),occupiedZeroOneNumbers),[]);
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,score:0.045,width:0.844,top:0.842,height:0.079,boxArea:0.067},visualMetrics:{uniformity:0.288,upperEdgeDensity:0.175,edgeDensity:0.227}}),true);
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,score:0.0812,width:1,top:0.875,height:0.125,boxArea:0.125},visualMetrics:{uniformity:0.294,upperEdgeDensity:0.177,edgeDensity:0.229}}),true);
+// 2026-08-25 真实故障的脱敏结构回归：近景灯阵被金色灯架连通块误判为
+// 大张黄纸。该照片没有矩形纸张，且全画面极低边缘密度、高均匀度，应归为场景图。
+assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.3311979,width:0.809375,top:0.42917,height:0.57083,fill:0.71685,boxArea:0.4620},visualMetrics:{uniformity:0.67035,upperEdgeDensity:0.01207,edgeDensity:0.03483}}),true);
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:true,width:0.72,top:0.20,height:0.60,boxArea:0.43},visualMetrics:{uniformity:0.30,upperEdgeDensity:0.17,edgeDensity:0.22}}),false);
+const sameKindSceneRoot=fs.mkdtempSync(path.join(os.tmpdir(),'prayer-same-kind-scene-test-'));
+const createLampScene=async(name,warmWidth)=>{
+  const file=path.join(sameKindSceneRoot,name);
+  const warm=Buffer.from(`<svg width="160" height="120" xmlns="http://www.w3.org/2000/svg"><rect width="160" height="120" fill="#201408"/><rect x="8" y="38" width="${warmWidth}" height="70" fill="#f2b13c"/></svg>`);
+  await sharp(warm).jpeg({quality:92}).toFile(file);
+  return file;
+};
+const sameKindLampScenes=[await createLampScene('lamp-a.jpg',34),await createLampScene('lamp-b.jpg',42)];
+const sameKindSceneResult=await classifyScenes(sameKindLampScenes,new Set());
+assert.equal(sameKindSceneResult.issues.length,0);
+assert.deepEqual(sameKindSceneResult.assignments.map((item)=>[item.targetName,item.kind]),[['2.1.jpg','scene-lamp'],['2.2.jpg','scene-lamp']]);
+fs.rmSync(sameKindSceneRoot,{recursive:true,force:true});
 const globallyAmbiguousPhotos=[
   {file:'actual-466.jpg',reliable:false,number:null,paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},candidates:[{number:466,votes:2,prefixDistance:2.2},{number:468,votes:2,prefixDistance:2.3}]},
   {file:'actual-468.jpg',reliable:true,number:468,paperGeometry:{usablePaper:true},visualMetrics:{},candidates:[]},
