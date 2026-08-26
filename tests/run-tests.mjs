@@ -7,7 +7,7 @@ import { calculateQuantities, venueMessage, normalizeText } from '../src/quantit
 import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
-import { applyPhotoPreparation, classifyScenes, dominantPaperColor, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, isLikelyScene, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseWindowsOcrTail, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder } from '../src/photo-prepare.mjs';
+import { applyPhotoPreparation, classifyScenes, dominantPaperColor, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, isLikelyScene, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseWindowsOcrTail, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { PrayerSite, chooseReusablePage, isClosedBrowserError, isNavigationRaceError, isTransientAutomationPage, resolveBlessingUploadCount, resolveRenewalTerminalDialog, scheduleSiteClick } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
@@ -369,8 +369,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.67/);
-assert.match(uiSource,/部分批次场景范围修正版/);
+assert.match(uiSource,/V9\.5\.68/);
+assert.match(uiSource,/补图编号与供水场景修正版/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);
@@ -577,6 +577,23 @@ assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,score:0.0812,width:
 // 大张黄纸。该照片没有矩形纸张，且全画面极低边缘密度、高均匀度，应归为场景图。
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.3311979,width:0.809375,top:0.42917,height:0.57083,fill:0.71685,boxArea:0.4620},visualMetrics:{uniformity:0.67035,upperEdgeDensity:0.01207,edgeDensity:0.03483}}),true);
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:true,width:0.72,top:0.20,height:0.60,boxArea:0.43},visualMetrics:{uniformity:0.30,upperEdgeDensity:0.17,edgeDensity:0.22}}),false);
+// 2026-08-25 供水全景：金色台阶会形成一个横跨整幅图的巨大“黄纸”色块，
+// 但它没有矩形纸张边界，必须进入场景图而不是福单 OCR。
+assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.4971875,left:0,top:0.3,width:1,height:0.7,right:1,bottom:1,fill:0.710267857,boxArea:0.7},visualMetrics:{edgeDensity:0.176145833,upperEdgeDensity:0.164973958,uniformity:0.4201041667}}),true);
+
+// 同批清晰福单的纸色连通域会把木架也包进去，旧版据此误选“竖版”裁框，
+// 并在 y=47.5% 处截到神像底座。新构图的编号实际位于约 y=50%~53%。
+const august25Layouts = prioritizedPhotoLayouts({ width: 0.65625, height: 0.875, top: 0.125 }, []);
+assert.equal(august25Layouts[0].name, 'current-temple-code-line');
+assert.ok(august25Layouts[0].top <= 0.50 && august25Layouts[0].top + august25Layouts[0].height >= 0.53);
+// 即使纸色检测误判为窄竖纸，也必须复核 temple 编号行，不能只跑第一种构图。
+const falsePortraitLayouts = prioritizedPhotoLayouts({ width: 0.55, height: 0.78, top: 0.12 }, []);
+assert.equal(falsePortraitLayouts[0].name, 'current-portrait-code-line');
+assert.deepEqual(targetedCurrentCodeLayouts(falsePortraitLayouts).map((layout) => layout.name), [
+  'current-portrait-code-line',
+  'current-temple-code-line',
+  'current-outdoor-code-line',
+]);
 const sameKindSceneRoot=fs.mkdtempSync(path.join(os.tmpdir(),'prayer-same-kind-scene-test-'));
 const createLampScene=async(name,warmWidth)=>{
   const file=path.join(sameKindSceneRoot,name);

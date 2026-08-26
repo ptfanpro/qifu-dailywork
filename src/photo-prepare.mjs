@@ -43,8 +43,10 @@ const OCR_LAYOUTS = [
 // 四个小框未命中时才进入动态纸张布局和有限兜底。
 const CURRENT_CAMERA_CODE_LAYOUTS = {
   temple: [
-    { name: 'current-temple-code-line', left: 0.64, top: 0.475, width: 0.20, height: 0.075 },
-    { name: 'current-temple-code-wide', left: 0.56, top: 0.44, width: 0.32, height: 0.14, sparse: true },
+    // 2026-08-25 起的新一批 4:3 原图把纸张整体下移，编号稳定落在
+    // y=50%~53%。旧 top=47.5% 会只截到神像底座，清晰编号也会全部漏掉。
+    { name: 'current-temple-code-line', left: 0.60, top: 0.495, width: 0.25, height: 0.075 },
+    { name: 'current-temple-code-wide', left: 0.54, top: 0.47, width: 0.36, height: 0.16, sparse: true },
   ],
   outdoor: [
     { name: 'current-outdoor-code-line', left: 0.69, top: 0.33, width: 0.20, height: 0.080 },
@@ -58,8 +60,13 @@ const CURRENT_CAMERA_CODE_LAYOUTS = {
   ],
 };
 
-function prioritizedPhotoLayouts(geometry, dynamicLayouts) {
-  const looksPortrait = Number(geometry?.height || 0) > Number(geometry?.width || 0) * 1.25;
+export function prioritizedPhotoLayouts(geometry, dynamicLayouts) {
+  const geometryWidth = Number(geometry?.width || 0);
+  const geometryHeight = Number(geometry?.height || 0);
+  // 木架、红纸和背景色相连时，连通域会变成“略高于宽”的假竖版框。
+  // 只有纸块本身较窄，或长宽比非常明显时才优先使用竖版裁框。
+  const looksPortrait = geometryHeight > geometryWidth * 1.25
+    && (geometryWidth < 0.60 || geometryHeight > geometryWidth * 1.50);
   const looksTemple = Number(geometry?.top || 0) >= 0.40;
   const looksOutdoor = Number(geometry?.width || 0) >= 0.72 && Number(geometry?.top || 0) < 0.35;
   const fixed = looksPortrait
@@ -72,6 +79,27 @@ function prioritizedPhotoLayouts(geometry, dynamicLayouts) {
   const ordered = [...fixed, ...(dynamicLayouts || []), ...OCR_LAYOUTS];
   const seen = new Set();
   return ordered.filter((layout) => !seen.has(layout.name) && seen.add(layout.name));
+}
+
+// 纸色连通域只用于决定尝试顺序，不能决定“只尝试哪一种构图”。木架、桌布
+// 或灯座与纸张连色时，geometry 可能把横版福单误报成竖版。每种当前相机
+// 构图各取一个窄编号行做有限复核，既避免恢复旧版全图穷举，也不会因单一
+// 错误布局把清晰补图留在人工队列。
+export function targetedCurrentCodeLayouts(layouts) {
+  const seenModes = new Set();
+  const selected = [];
+  for (const layout of layouts || []) {
+    const match = /^current-(temple|outdoor|portrait)-code-line$/.exec(layout.name);
+    if (!match || seenModes.has(match[1])) continue;
+    seenModes.add(match[1]);
+    selected.push(layout);
+  }
+  for (const mode of ['portrait', 'temple', 'outdoor']) {
+    if (seenModes.has(mode)) continue;
+    seenModes.add(mode);
+    selected.push(CURRENT_CAMERA_CODE_LAYOUTS[mode][0]);
+  }
+  return selected.slice(0, 3);
 }
 
 // PDF 模板既有横版福单，也有竖版牌位。竖版右上角编号的位置会随模板宽度
@@ -796,7 +824,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   // 误读成 8。先对紧贴编号行的专用裁框运行两次 SINGLE_LINE 二值化；
   // 只有两个独立阈值都读出相同的完整业务前缀和当天编号，才提前采信。
   // 这样既修复清晰照片误识别，也不会靠“缺哪个号码就填哪个”进行猜测。
-  const landscapeCodeLayouts = layouts.filter((layout) => /current-(?:temple|outdoor|portrait)-code-line/.test(layout.name)).slice(0, 1);
+  const landscapeCodeLayouts = targetedCurrentCodeLayouts(layouts);
   for (const landscapeCodeLayout of landscapeCodeLayouts) {
     const extract = cropFromRatios(metadata, landscapeCodeLayout);
     const focusedObservations = [];
@@ -861,7 +889,10 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
       .sharpen({ sigma: 1 })
       .png()
       .toFile(diagnostic);
-    if (/^current-/.test(layout.name) && windowsFallbackFiles.length < 2) windowsFallbackFiles.push(diagnostic);
+    // 保存两种最可能构图的窄框和宽框供 Windows OCR 兜底。旧版只保存前
+    // 两个文件；一旦 geometry 把横版误排成竖版，真正的 temple 裁框虽已
+    // 生成却永远不会进入 Windows OCR。
+    if (/^current-/.test(layout.name) && windowsFallbackFiles.length < 4) windowsFallbackFiles.push(diagnostic);
     if (layout.sparse) await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
     const result = await worker.recognize(diagnostic);
     if (layout.sparse) await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
@@ -1713,8 +1744,16 @@ export function isLikelyScene(item) {
     && geometry.height <= 0.15
     && geometry.boxArea <= 0.16
     && geometry.score <= 0.14;
+  // 供水全景的金色阶梯会被黄色连通域识别为从画面 30% 一直延伸到底部的
+  // 巨大“纸张”。真实福单不会横跨整幅画面且覆盖 60% 以上画幅；利用这一
+  // 结构证据可在 OCR 前安全排除供水场景，而不依赖文件名或正文。
+  const fullWidthSteppedScene = geometry.rectangularPaper === false
+    && geometry.width >= 0.96
+    && geometry.height >= 0.60
+    && geometry.boxArea >= 0.60
+    && geometry.fill >= 0.60;
   // 灯阵或供水全景会在画面底部形成横跨全宽的红/黄连通块；它不是纸张。
-  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene) return true;
+  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene) return true;
   // 纸张偶尔与画面右边缘相接，严格矩形条件会失败；足够大的连续红/黄纸色块仍应判为纸张。
   if (geometry.rectangularPaper || (geometry.score >= 0.085
     && geometry.boxArea >= 0.14
@@ -1725,7 +1764,7 @@ export function isLikelyScene(item) {
   const visualScene = metrics.uniformity > 0.47
     && metrics.upperEdgeDensity < 0.08
     && metrics.edgeDensity < 0.16;
-  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || visualScene);
+  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || visualScene);
 }
 
 // 只返回匿名视觉结构指标，供真实照片回归测试使用；不运行 OCR，也不读取
