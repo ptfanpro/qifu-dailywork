@@ -13,7 +13,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.5.70',
+        '祈福本地执行器 V9.5.71',
         'OK',
         'Information'
     ) | Out-Null
@@ -36,48 +36,16 @@ if (Test-Path -LiteralPath $settingsPath) {
     try { $settings = Get-Content -Raw -Encoding UTF8 -LiteralPath $legacySettingsPath | ConvertFrom-Json } catch { $settings = @{} }
 }
 $businessRoot = Find-PrayerBusinessRoot -SavedRoot $settings.businessRoot
-$today = [DateTime]::Today
+$beijingTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
+$today = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$beijingTimeZone).Date
 
-function Resolve-SavedBusinessDate($savedValue, [DateTime]$fallback, [string]$branch) {
-    if (-not [string]::IsNullOrWhiteSpace([string]$savedValue)) {
-        try {
-            $parsed = [DateTime]::ParseExact([string]$savedValue,'yyyy-MM-dd',[Globalization.CultureInfo]::InvariantCulture)
-            return [pscustomobject]@{ Date=$parsed; Remembered=$true; Source='settings' }
-        } catch {}
-    }
-    # 一次性兼容旧版本：旧 settings 没有保存日期时，取最后一次真正运行过的
-    # 对应业务分支，而不是回到“昨天”或最早历史失败断点。
-    $workdays = Join-Path $script:localStateRoot 'workdays'
-    if (Test-Path -LiteralPath $workdays -PathType Container) {
-        $candidates = foreach ($workday in Get-ChildItem -LiteralPath $workdays -Directory -ErrorAction SilentlyContinue) {
-            if ($workday.Name -notmatch '^\d{4}-\d{2}-\d{2}$') { continue }
-            $stateFile = if ($branch -eq 'photo') {
-                Join-Path $workday.FullName 'photos\ui-workflow-state.json'
-            } else {
-                Join-Path $workday.FullName 'ui-workflow-state.json'
-            }
-            if (Test-Path -LiteralPath $stateFile -PathType Leaf) {
-                [pscustomobject]@{ DateText=$workday.Name; LastWriteTime=(Get-Item -LiteralPath $stateFile).LastWriteTime }
-            }
-        }
-        $latest = @($candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
-        if ($latest.Count -gt 0) {
-            try {
-                $parsed = [DateTime]::ParseExact($latest[0].DateText,'yyyy-MM-dd',[Globalization.CultureInfo]::InvariantCulture)
-                return [pscustomobject]@{ Date=$parsed; Remembered=$true; Source='last-run' }
-            } catch {}
-        }
-    }
-    return [pscustomobject]@{ Date=$fallback; Remembered=$false; Source='fallback' }
-}
-
-$photoDateDefault = Resolve-SavedBusinessDate $settings.photoBusinessDate ($today.AddDays(-1)) 'photo'
-$pdfDateDefault = Resolve-SavedBusinessDate $settings.pdfBusinessDate $today 'pdf'
-$script:hasRememberedPhotoDate = [bool]$photoDateDefault.Remembered
-$script:hasRememberedPdfDate = [bool]$pdfDateDefault.Remembered
+# 启动默认值是固定业务约定，不读取上次手动选择，也不读取历史断点：
+# 照片默认昨天，PDF 默认今天。历史未闭环日期只在独立任务栏提示。
+$photoDateDefault = $today.AddDays(-1)
+$pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.5.70（单张场景补图闭环版）'
+$form.Text = '祈福本地执行器 V9.5.71（固定启动日期回归版）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -123,7 +91,7 @@ Add-Label $photoGroup '业务日期' 18 30 75 | Out-Null
 $photoDate = New-Object System.Windows.Forms.DateTimePicker
 $photoDate.Format = 'Custom'
 $photoDate.CustomFormat = 'yyyy-MM-dd'
-$photoDate.Value = $photoDateDefault.Date
+$photoDate.Value = $photoDateDefault
 $photoDate.Location = New-Object System.Drawing.Point(92,27)
 $photoDate.Size = New-Object System.Drawing.Size(150,30)
 $photoGroup.Controls.Add($photoDate)
@@ -161,7 +129,7 @@ Add-Label $pdfGroup '业务日期' 18 30 75 | Out-Null
 $pdfDate = New-Object System.Windows.Forms.DateTimePicker
 $pdfDate.Format = 'Custom'
 $pdfDate.CustomFormat = 'yyyy-MM-dd'
-$pdfDate.Value = $pdfDateDefault.Date
+$pdfDate.Value = $pdfDateDefault
 $pdfDate.Location = New-Object System.Drawing.Point(92,27)
 $pdfDate.Size = New-Object System.Drawing.Size(150,30)
 $pdfGroup.Controls.Add($pdfDate)
@@ -243,15 +211,8 @@ $script:processTimer = New-Object System.Windows.Forms.Timer
 $script:processTimer.Interval = 250
 
 function Save-Settings {
-    $savedPhotoDate = if ($null -ne $script:backlogOriginalPhotoDate) {
-        ([DateTime]$script:backlogOriginalPhotoDate).ToString('yyyy-MM-dd')
-    } else {
-        $photoDate.Value.ToString('yyyy-MM-dd')
-    }
     Write-PrayerAtomicJson -Path $settingsPath -Value @{
         businessRoot = $rootBox.Text.Trim()
-        photoBusinessDate = $savedPhotoDate
-        pdfBusinessDate = $pdfDate.Value.ToString('yyyy-MM-dd')
     }
 }
 function Validate-Root([bool]$showMessage = $true) {
@@ -935,14 +896,12 @@ $manualState.Add_Click({ Start-Runner 'state-change' $true 'manual' $true })
 
 $photoDate.Add_ValueChanged({
     if (-not $script:running) {
-        $script:hasRememberedPhotoDate = $true
         Save-Settings
         Start-Initialization 'photo'
     }
 })
 $pdfDate.Add_ValueChanged({
     if (-not $script:running) {
-        $script:hasRememberedPdfDate = $true
         Save-Settings
         Start-Initialization 'pdf'
     }

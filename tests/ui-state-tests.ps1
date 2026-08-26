@@ -10,6 +10,11 @@ function Write-TestJson([string]$file, $value) {
     $value | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 -LiteralPath $file
 }
 
+$testBeijingTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
+$testBeijingToday = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$testBeijingTimeZone).Date
+Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.AddDays(-1).ToString('yyyy-MM-dd') '软件启动时照片业务日期必须固定为北京时间昨天'
+Assert-Equal $pdfDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.ToString('yyyy-MM-dd') '软件启动时 PDF 业务日期必须固定为北京时间今天'
+
 $originalRoot = $rootBox.Text
 $originalLocalStateRoot = $script:localStateRoot
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("prayer-ui-state-{0}" -f [Guid]::NewGuid().ToString('N'))
