@@ -7,7 +7,7 @@ import { calculateQuantities, venueMessage, normalizeText } from '../src/quantit
 import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
-import { applyPhotoPreparation, classifyScenes, dominantPaperColor, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, isLikelyScene, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseWindowsOcrTail, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
+import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, isLikelyScene, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseWindowsOcrTail, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { PrayerSite, chooseReusablePage, isClosedBrowserError, isNavigationRaceError, isTransientAutomationPage, resolveBlessingUploadCount, resolveRenewalTerminalDialog, scheduleSiteClick } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
@@ -395,8 +395,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.69/);
-assert.match(uiSource,/上传确认竞态闭环版/);
+assert.match(uiSource,/V9\.5\.70/);
+assert.match(uiSource,/单张场景补图闭环版/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);
@@ -633,6 +633,27 @@ const sameKindLampScenes=[await createLampScene('lamp-a.jpg',34),await createLam
 const sameKindSceneResult=await classifyScenes(sameKindLampScenes,new Set());
 assert.equal(sameKindSceneResult.issues.length,0);
 assert.deepEqual(sameKindSceneResult.assignments.map((item)=>[item.targetName,item.kind]),[['2.1.jpg','scene-lamp'],['2.2.jpg','scene-lamp']]);
+// 2026-08-26 单张场景补图回归：旧版在视觉分类前硬性要求至少两张，导致
+// 清晰供水补图永远停在人工队列。以下匿名指标来自当天真实供水/供灯画面。
+assert.equal(classifySceneVisualScore({luminance:133.0394,warmBrightRatio:0.2260,darkRatio:0.0750}),'scene-water');
+assert.equal(classifySceneVisualScore({luminance:92.7817,warmBrightRatio:0.1807,darkRatio:0.3788}),'scene-lamp');
+assert.equal(classifySceneVisualScore({luminance:102,warmBrightRatio:0.04,darkRatio:0.20}),null);
+const singleWaterFile=path.join(sameKindSceneRoot,'single-water.jpg');
+await sharp(Buffer.from('<svg width="160" height="120" xmlns="http://www.w3.org/2000/svg"><rect width="160" height="120" fill="#d8c7a0"/><g fill="#d7a536"><circle cx="30" cy="70" r="12"/><circle cx="70" cy="70" r="12"/><circle cx="110" cy="70" r="12"/></g></svg>')).jpeg({quality:92}).toFile(singleWaterFile);
+const singleWaterResult=await classifyScenes([singleWaterFile],new Set());
+assert.equal(singleWaterResult.issues.length,0);
+assert.deepEqual(singleWaterResult.assignments.map((item)=>[item.targetName,item.kind]),[['2.5.jpg','scene-water']]);
+const singleLampResult=await classifyScenes([sameKindLampScenes[0]],new Set());
+assert.equal(singleLampResult.issues.length,0);
+assert.deepEqual(singleLampResult.assignments.map((item)=>[item.targetName,item.kind]),[['2.1.jpg','scene-lamp']]);
+const ambiguousSceneFile=path.join(sameKindSceneRoot,'single-ambiguous.jpg');
+await sharp(Buffer.from('<svg width="160" height="120" xmlns="http://www.w3.org/2000/svg"><rect width="160" height="120" fill="#666666"/></svg>')).jpeg({quality:92}).toFile(ambiguousSceneFile);
+const ambiguousSingleResult=await classifyScenes([ambiguousSceneFile],new Set());
+assert.equal(ambiguousSingleResult.assignments.length,0);
+assert.match(ambiguousSingleResult.issues[0],/单图视觉证据不足/);
+const occupiedLampResult=await classifyScenes([ambiguousSceneFile],new Set(['2.1.jpg','2.2.jpg']));
+assert.equal(occupiedLampResult.issues.length,0);
+assert.deepEqual(occupiedLampResult.assignments.map((item)=>[item.targetName,item.kind]),[['2.5.jpg','scene-water']]);
 fs.rmSync(sameKindSceneRoot,{recursive:true,force:true});
 const globallyAmbiguousPhotos=[
   {file:'actual-466.jpg',reliable:false,number:null,paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},candidates:[{number:466,votes:2,prefixDistance:2.2},{number:468,votes:2,prefixDistance:2.3}]},

@@ -1656,6 +1656,15 @@ async function sceneVisualScore(file) {
   return { luminance: luminance / pixels, warmBrightRatio: warmBright / pixels, darkRatio: dark / pixels };
 }
 
+// 场景补图可能一次只回传一张，不能依赖同批图片之间的相对明暗。这里保留
+// 一条可单图判定的绝对证据路径：白天供水全景暗像素极少且整体亮度较高；
+// 夜间供灯图暗像素和暖色高光同时明显。处在两者之间的图片保持未决。
+export function classifySceneVisualScore(item) {
+  if (item.darkRatio <= 0.18 && item.luminance >= 110) return 'scene-water';
+  if (item.darkRatio >= 0.32 && item.warmBrightRatio >= 0.10) return 'scene-lamp';
+  return null;
+}
+
 async function largePaperScore(file) {
   const { data, info } = await sharpFile(file).rotate().resize({ width: 320, height: 240, fit: 'fill' }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
   const width = info.width;
@@ -2271,7 +2280,7 @@ export async function classifyScenes(files, occupiedNames) {
   if (!files.length) return { assignments: [], issues: [] };
   const availableLamp = ['2.1.jpg', '2.2.jpg'].filter((name) => !occupiedNames.has(name));
   const availableWater = ['2.5.jpg', '2.6.jpg'].filter((name) => !occupiedNames.has(name));
-  if (files.length < 2 || files.length > 4) return { assignments: [], issues: [`剩余 ${files.length} 张场景候选，无法安全自动区分供灯和供水。`] };
+  if (files.length > 4) return { assignments: [], issues: [`剩余 ${files.length} 张场景候选，超过四个场景命名位置，已停止自动归类。`] };
   const scored = [];
   for (const file of files) scored.push({ file, ...(await sceneVisualScore(file)) });
   scored.sort((a, b) => b.luminance - a.luminance || path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }));
@@ -2279,8 +2288,8 @@ export async function classifyScenes(files, occupiedNames) {
   // 白天供水全景和暗场灯阵的结构差异远强于单纯平均亮度：供水图暗像素少、
   // 暖色高光少；灯阵图恰好相反。三张标准场景图满足 1 水 + 2 灯时直接按
   // 该独立证据分类，避免因为平均亮度差不足 25 而全部留给人工。
-  const explicitWater = scored.filter((item) => item.darkRatio < 0.28 && item.warmBrightRatio < 0.08);
-  const explicitLamp = scored.filter((item) => item.darkRatio > 0.32 && item.warmBrightRatio > 0.10);
+  const explicitWater = scored.filter((item) => classifySceneVisualScore(item) === 'scene-water');
+  const explicitLamp = scored.filter((item) => classifySceneVisualScore(item) === 'scene-lamp');
   // 补图经常只收到某一类场景。只要每张候选都独立满足强供灯/供水特征，
   // 不要求两类必须同时出现；缺少的另一类继续作为待补项，不得把同类图片
   // 强拆成一灯一水。
@@ -2296,6 +2305,30 @@ export async function classifyScenes(files, occupiedNames) {
       ],
       issues: [],
     };
+  }
+
+  // 历史补图经常发生在另一类场景已经占满命名位置之后。候选在进入这里前
+  // 已通过场景结构检测，因此当仅剩一类可用位置时，可按剩余业务槽位归类，
+  // 不再要求用户为了满足“至少两张”而重复发送已上传的场景图。
+  if (!availableLamp.length && files.length <= availableWater.length) {
+    return {
+      assignments: scored
+        .sort((a, b) => path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }))
+        .map((item, index) => ({ source: item.file, targetName: availableWater[index], kind: 'scene-water', evidence: { method: 'remaining-water-scene-slots' } })),
+      issues: [],
+    };
+  }
+  if (!availableWater.length && files.length <= availableLamp.length) {
+    return {
+      assignments: scored
+        .sort((a, b) => path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }))
+        .map((item, index) => ({ source: item.file, targetName: availableLamp[index], kind: 'scene-lamp', evidence: { method: 'remaining-lamp-scene-slots' } })),
+      issues: [],
+    };
+  }
+
+  if (files.length === 1) {
+    return { assignments: [], issues: ['剩余 1 张场景候选，但单图视觉证据不足且供灯、供水位置均可用，已保留等待人工确认。'] };
   }
 
   // 文件名只表示微信保存顺序，不表示供灯/供水。寻找最强明暗断层决定实际分组，
