@@ -8,13 +8,30 @@ import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
 import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, isLikelyScene, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseWindowsOcrTail, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
-import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
+import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { PrayerSite, chooseReusablePage, isClosedBrowserError, isNavigationRaceError, isTransientAutomationPage, resolveBlessingUploadCount, resolveRenewalTerminalDialog, scheduleSiteClick } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
 
 const require = createRequire(import.meta.url);
 const { PDFDocument } = require('pdf-lib');
 const sharp = require('sharp');
+
+const completeLegacyManifest={
+  fileSetHash:'legacy-file-set',blessingReady:true,uploadReady:true,batchCompleteReady:true,
+  counts:{blessing:15,pdfPages:15,missingBlessing:0,extraBlessing:0},
+  files:{blessing:Array.from({length:15},(_,index)=>`${index+1}.jpg`)},
+  pdfs:['810红纸1.pdf','810黄纸1.pdf'],blockingErrors:[],manualIssues:[],
+  fileHashes:Object.fromEntries(Array.from({length:15},(_,index)=>[`${index+1}.jpg`,`hash-${index+1}`])),
+};
+assert.deepEqual(resolveHistoricalPhotoClosureEvidence({historicalManifest:{orderCount:164},manifest:null}),{
+  proven:true,source:'historical-order-manifest',historicalOrderCount:164,legacyPdfPageCount:0,
+});
+assert.deepEqual(resolveHistoricalPhotoClosureEvidence({manifest:completeLegacyManifest}),{
+  proven:true,source:'verified-legacy-pdf-photo-manifest',historicalOrderCount:0,legacyPdfPageCount:15,
+});
+assert.equal(resolveHistoricalPhotoClosureEvidence({manifest:{...completeLegacyManifest,batchCompleteReady:false}}).proven,false);
+assert.equal(resolveHistoricalPhotoClosureEvidence({manifest:{...completeLegacyManifest,counts:{...completeLegacyManifest.counts,missingBlessing:1}}}).proven,false);
+assert.equal(resolveHistoricalPhotoClosureEvidence({manifest:{...completeLegacyManifest,pdfs:[]}}).proven,false);
 
 const cloudVisionItems=[{file:'opaque-local-file.jpg',reliable:false,number:null,paperGeometry:{},visualMetrics:{},candidates:[]}];
 const cloudVisionResult=await resolvePhotoNumbersWithCloudVision({items:cloudVisionItems});
@@ -395,8 +412,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.71/);
-assert.match(uiSource,/固定启动日期回归版/);
+assert.match(uiSource,/V9\.5\.72/);
+assert.match(uiSource,/历史零待办闭环修正版/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);
@@ -471,7 +488,8 @@ assert.match(siteSource,/const monthText = `\$\{year\}\$\{String\(month\)\.padSt
 assert.doesNotMatch(siteSource,/const monthText = `\$\{year\}\//);
 const runnerSource=fs.readFileSync(new URL('../src/runner.mjs',import.meta.url),'utf8');
 assert.match(runnerSource,/manual-online-closure-reconciled/);
-assert.match(runnerSource,/historical-orders-positive-and-all-online-pending-zero/);
+assert.match(runnerSource,/resolveHistoricalPhotoClosureEvidence/);
+assert.match(runnerSource,/当前福单已上传、福单未上传、供灯待祈福和牌位待祈福均为 0/);
 assert.match(runnerSource,/reconcile-manual-photo-closure/);
 assert.match(runnerSource,/verificationAgeMs > 30 \* 60 \* 1000/);
 assert.match(runnerSource,/未连接上传入口，未修改平台/);

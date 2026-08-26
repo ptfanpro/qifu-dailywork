@@ -31,7 +31,8 @@ try {
     ) -join [Environment]::NewLine
     $mutexProbeText = $mutexProbeText.Replace('__HELPER__',$escapedHelper).Replace('__NAME__',$escapedName).Replace('__RESULT__',$escapedResult)
     $mutexProbeText | Set-Content -LiteralPath $mutexProbe -Encoding UTF8
-    $probeProcess = Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$mutexProbe) -WindowStyle Hidden -Wait -PassThru
+    $mutexProbeEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($mutexProbeText))
+    $probeProcess = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $mutexProbeEncoded" -WindowStyle Hidden -Wait -PassThru
     Assert-True ($probeProcess.ExitCode -eq 0) '单实例探针进程执行失败'
     Assert-True ((Get-Content -LiteralPath $mutexResult -Raw).Trim() -eq 'False') '第二个进程不应取得单实例锁'
     Exit-PrayerSingleInstance $owner
@@ -61,7 +62,8 @@ try {
     ) -join [Environment]::NewLine
     $writeProbeText = $writeProbeText.Replace('__HELPER__',$escapedSettingsHelper).Replace('__READY__',$escapedWriteReady).Replace('__SETTINGS__',$escapedSettingsPath).Replace('__RESULT__',$escapedWriteResult)
     $writeProbeText | Set-Content -LiteralPath $writeProbe -Encoding UTF8
-    $writer = Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$writeProbe) -WindowStyle Hidden -PassThru
+    $writeProbeEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($writeProbeText))
+    $writer = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $writeProbeEncoded" -WindowStyle Hidden -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while (-not (Test-Path -LiteralPath $writeReady)) {
         if ([DateTime]::UtcNow -ge $deadline) { throw '配置写入探针未及时启动' }

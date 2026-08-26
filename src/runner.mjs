@@ -6,7 +6,7 @@ import { Timing } from './timing.mjs';
 import { calculateQuantities, normalizeText, venueMessage } from './quantity.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolder as photoDayFolder, scanPhotoWorkday, splitUploadBatches } from './photos.mjs';
 import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs';
-import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, upsertPhotoCompletionBatch } from './workflow-state.mjs';
+import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
 
@@ -224,15 +224,16 @@ if (args.action === 'reconcile-manual-photo-closure') {
   const manifestFile = path.join(photoRunDir,'photo-manifest.json');
   const historicalManifestFile = path.join(dayRunDir,'order-manifest.json');
   const verificationFile = path.join(dayRunDir,'online-verification.json');
-  if (!fs.existsSync(manifestFile) || !fs.existsSync(historicalManifestFile) || !fs.existsSync(verificationFile)) throw new Error('缺少照片清单、历史订单清单或平台只读验证凭据，不能补记闭环。');
+  if (!fs.existsSync(manifestFile) || !fs.existsSync(verificationFile)) throw new Error('缺少照片清单或平台只读验证凭据，不能补记闭环。');
   const manifest = JSON.parse(fs.readFileSync(manifestFile,'utf8'));
-  const historicalManifest = JSON.parse(fs.readFileSync(historicalManifestFile,'utf8'));
+  const historicalManifest = fs.existsSync(historicalManifestFile) ? JSON.parse(fs.readFileSync(historicalManifestFile,'utf8')) : null;
   const verification = JSON.parse(fs.readFileSync(verificationFile,'utf8'));
+  const closureEvidence = resolveHistoricalPhotoClosureEvidence({ historicalManifest, manifest });
   assertUnchangedManifest(manifest);
   const verificationAgeMs = Date.now() - Date.parse(verification.checkedAt || '');
   if (verification.businessDate !== photoDate || verification.complete !== true || Number(verification.blessingPendingCount) !== 0 || Number(verification.tabletPendingCount) !== 0 || Number(verification.localPdfCount) < 1) throw new Error('平台验证尚不能证明该日期全部待办为 0，不能补记闭环。');
   if (!Number.isFinite(verificationAgeMs) || verificationAgeMs < 0 || verificationAgeMs > 30 * 60 * 1000) throw new Error('平台只读验证已超过 30 分钟，请先重新检测 PDF。');
-  if (Number(historicalManifest.orderCount || 0) < 1) throw new Error('历史订单清单为空，不能把无订单日期误记为人工闭环。');
+  if (!closureEvidence.proven) throw new Error('缺少历史订单清单或完整的旧版 PDF/照片对应凭据，不能把无订单日期误记为人工闭环。');
   const reconciledAt = new Date().toISOString();
   const uploadedFiles = Object.fromEntries(manifest.files.blessing.map((file) => {
     const name = path.basename(file);
@@ -243,17 +244,22 @@ if (args.action === 'reconcile-manual-photo-closure') {
     expectedBlessingCount:manifest.counts.pdfPages,missingBlessingCount:manifest.counts.missingBlessing,
     complete:true,batchCompleteReady:true,onlineClosureCheckReady:true,
     uploadedCount:manifest.counts.blessing,uploadedFiles,stage:'manual-online-closure-reconciled',
-    onlineMatchedOrderCount:Number(historicalManifest.orderCount),manualBusinessCompletionDetected:true,
+    onlineMatchedOrderCount:closureEvidence.historicalOrderCount,manualBusinessCompletionDetected:true,
+    closureEvidenceSource:closureEvidence.source,legacyPdfPageCount:closureEvidence.legacyPdfPageCount,
     reconciledAt,completedAt:reconciledAt,batches:[],
   });
   atomic(path.join(photoRunDir,'scene-upload-receipt.json'),{
     schemaVersion:3,businessDate:photoDate,fileSetHash:manifest.fileSetHash,
     complete:true,partialComplete:false,stage:'manual-online-closure-reconciled',tabletCompletionVerified:true,
     regularCompletedOrderCount:0,tabletCompletedOrderCount:0,completedOrderCount:0,
-    historicalOrderCount:Number(historicalManifest.orderCount),manualBusinessCompletionDetected:true,
+    historicalOrderCount:closureEvidence.historicalOrderCount,manualBusinessCompletionDetected:true,
+    closureEvidenceSource:closureEvidence.source,legacyPdfPageCount:closureEvidence.legacyPdfPageCount,
     reconciledAt,completedAt:reconciledAt,
   });
-  log(`纯本地补记完成：平台只读凭据确认供灯与牌位待办均为 0，历史清单有 ${historicalManifest.orderCount} 条订单；${photoDate} 已记为人工闭环。未连接上传入口，未修改平台。`);
+  const closureLabel = closureEvidence.source === 'historical-order-manifest'
+    ? `历史清单有 ${closureEvidence.historicalOrderCount} 条订单`
+    : `旧版完整 PDF/照片对应凭据有 ${closureEvidence.legacyPdfPageCount} 页`;
+  log(`纯本地补记完成：平台只读凭据确认供灯与牌位待办均为 0，${closureLabel}；${photoDate} 已记为人工闭环。未连接上传入口，未修改平台。`);
   process.exit(0);
 }
 
@@ -517,14 +523,17 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
         if (alreadyUploaded.length === 0 && notUploaded.length === 0) {
           const pendingRegular = await photoSite.queryLamp(photoDate);
           const pendingTablet = await photoSite.queryDailyTablet(photoDate);
-          if (Number(historicalManifest?.orderCount || 0) > 0 && pendingRegular.length === 0 && pendingTablet.length === 0) {
+          const closureEvidence = resolveHistoricalPhotoClosureEvidence({ historicalManifest, manifest });
+          if (closureEvidence.proven && pendingRegular.length === 0 && pendingTablet.length === 0) {
             const reconciledAt = new Date().toISOString();
             receipt.complete = true;
             receipt.batchCompleteReady = true;
             receipt.onlineClosureCheckReady = true;
             receipt.stage = 'manual-online-closure-reconciled';
             receipt.uploadedCount = manifest.counts.blessing;
-            receipt.onlineMatchedOrderCount = Number(historicalManifest.orderCount);
+            receipt.onlineMatchedOrderCount = closureEvidence.historicalOrderCount;
+            receipt.closureEvidenceSource = closureEvidence.source;
+            receipt.legacyPdfPageCount = closureEvidence.legacyPdfPageCount;
             receipt.reconciledAt = reconciledAt;
             receipt.manualBusinessCompletionDetected = true;
             for (const file of manifest.files.blessing) {
@@ -534,8 +543,9 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
             receipt.batches = [{
               uploadedCount:manifest.counts.blessing,
               files:manifest.files.blessing.map((file)=>path.basename(file)),
-              evidence:'historical-orders-positive-and-all-online-pending-zero',
-              historicalOrderCount:Number(historicalManifest.orderCount),
+              evidence:`${closureEvidence.source}-and-all-online-pending-zero`,
+              historicalOrderCount:closureEvidence.historicalOrderCount,
+              legacyPdfPageCount:closureEvidence.legacyPdfPageCount,
             }];
             atomic(receiptFile,receipt);
             atomic(path.join(photoRunDir,'scene-upload-receipt.json'),{
@@ -549,18 +559,24 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
               regularCompletedOrderCount:0,
               tabletCompletedOrderCount:0,
               completedOrderCount:0,
-              historicalOrderCount:Number(historicalManifest.orderCount),
+              historicalOrderCount:closureEvidence.historicalOrderCount,
+              closureEvidenceSource:closureEvidence.source,
+              legacyPdfPageCount:closureEvidence.legacyPdfPageCount,
               manualBusinessCompletionDetected:true,
               reconciledAt,
               completedAt:reconciledAt,
             });
             photoTiming.end();
-            log(`平台闭环复核通过：历史清单有 ${historicalManifest.orderCount} 条订单，当前供灯与牌位待祈福均为 0；判定该日期已由人工完成，已补记本地闭环凭据，不会重复上传或修改订单。`);
+            const closureLabel = closureEvidence.source === 'historical-order-manifest'
+              ? `历史清单有 ${closureEvidence.historicalOrderCount} 条订单`
+              : `旧版完整 PDF/照片对应凭据有 ${closureEvidence.legacyPdfPageCount} 页`;
+            log(`平台闭环复核通过：${closureLabel}，当前福单已上传、福单未上传、供灯待祈福和牌位待祈福均为 0；判定该日期已由人工完成，已补记本地闭环凭据，不会重复上传或修改订单。`);
             await photoSite.close();
             photoTiming.finish();
             process.exit(0);
           }
-          throw new Error(`该日期线上“福单已上传”和“福单未上传”均为 0，但仍有供灯 ${pendingRegular.length} 条或牌位 ${pendingTablet.length} 条待祈福，无法判定闭环，已停止。`);
+          const evidenceReason = closureEvidence.proven ? '' : '，但缺少历史订单清单或完整的旧版 PDF/照片对应凭据';
+          throw new Error(`该日期线上“福单已上传”和“福单未上传”均为 0，供灯待祈福 ${pendingRegular.length} 条、牌位待祈福 ${pendingTablet.length} 条${evidenceReason}，无法安全判定闭环，已停止。`);
         }
         log(`线上复核为0条“福单已上传”、${notUploaded.length} 条“福单未上传”订单，确认上次没有产生有效上传；允许安全重试。`);
       }

@@ -46,6 +46,47 @@ export function evaluatePhotoOrderClosure({ missingBlessingCount = 0, onlineNotU
   };
 }
 
+export function resolveHistoricalPhotoClosureEvidence({ historicalManifest = null, manifest = null } = {}) {
+  const historicalOrderCount = Number(historicalManifest?.orderCount || 0);
+  if (historicalOrderCount > 0) {
+    return {
+      proven: true,
+      source: 'historical-order-manifest',
+      historicalOrderCount,
+      legacyPdfPageCount: 0,
+    };
+  }
+
+  const counts = manifest?.counts || {};
+  const blessingCount = Number(counts.blessing || 0);
+  const pdfPageCount = Number(counts.pdfPages || 0);
+  const blessingFiles = Array.isArray(manifest?.files?.blessing) ? manifest.files.blessing : [];
+  const pdfFiles = Array.isArray(manifest?.pdfs) ? manifest.pdfs : [];
+  const blockingErrors = Array.isArray(manifest?.blockingErrors) ? manifest.blockingErrors : [];
+  const manualIssues = Array.isArray(manifest?.manualIssues) ? manifest.manualIssues : [];
+  const hashes = manifest?.fileHashes && typeof manifest.fileHashes === 'object' ? manifest.fileHashes : {};
+  const allBlessingFilesHashed = blessingFiles.length === blessingCount && blessingFiles.every((file) => Boolean(hashes[path.basename(file)]));
+  const legacyPdfBacked = Boolean(manifest?.fileSetHash)
+    && manifest?.blessingReady === true
+    && manifest?.uploadReady === true
+    && manifest?.batchCompleteReady === true
+    && blessingCount > 0
+    && pdfPageCount === blessingCount
+    && Number(counts.missingBlessing || 0) === 0
+    && Number(counts.extraBlessing || 0) === 0
+    && pdfFiles.length > 0
+    && blockingErrors.length === 0
+    && manualIssues.length === 0
+    && allBlessingFilesHashed;
+
+  return {
+    proven: legacyPdfBacked,
+    source: legacyPdfBacked ? 'verified-legacy-pdf-photo-manifest' : 'none',
+    historicalOrderCount: 0,
+    legacyPdfPageCount: legacyPdfBacked ? pdfPageCount : 0,
+  };
+}
+
 export function upsertPhotoCompletionBatch(batches, batch) {
   if (!batch?.fileSetHash) throw new Error('照片订单分批完成回执缺少图片集合哈希。');
   const result = Array.isArray(batches) ? batches.filter((item) => item?.fileSetHash !== batch.fileSetHash) : [];
