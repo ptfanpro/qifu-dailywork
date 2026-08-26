@@ -13,7 +13,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.5.68',
+        '祈福本地执行器 V9.5.69',
         'OK',
         'Information'
     ) | Out-Null
@@ -77,7 +77,7 @@ $script:hasRememberedPhotoDate = [bool]$photoDateDefault.Remembered
 $script:hasRememberedPdfDate = [bool]$pdfDateDefault.Remembered
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.5.68（补图编号与供水场景修正版）'
+$form.Text = '祈福本地执行器 V9.5.69（上传确认竞态闭环版）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)

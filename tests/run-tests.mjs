@@ -28,10 +28,13 @@ let consumedClickToken='';
 const originalSetTimeout=globalThis.setTimeout;
 globalThis.setTimeout=(callback)=>{ callback(); return 1; };
 try {
-  const result=await scheduleSiteClick({evaluate:async(callback,token)=>callback({
-    click:()=>{scheduledClickCount+=1;},
-    setAttribute:(name,value)=>{ if (name === 'data-prayer-confirm-consumed') consumedClickToken=value; },
-  },token)},{markConsumed:true});
+  const result=await scheduleSiteClick({elementHandle:async()=>({
+    evaluate:async(callback,token)=>callback({
+      click:()=>{scheduledClickCount+=1;},
+      setAttribute:(name,value)=>{ if (name === 'data-prayer-confirm-consumed') consumedClickToken=value; },
+    },token),
+    dispose:async()=>{},
+  })},{markConsumed:true});
   scheduleReturned=result==='scheduled';
 } finally {
   globalThis.setTimeout=originalSetTimeout;
@@ -39,6 +42,29 @@ try {
 assert.equal(scheduleReturned,true);
 assert.equal(scheduledClickCount,1);
 assert.match(consumedClickToken,/^prayer-/);
+const missingTransientClick=await scheduleSiteClick({
+  elementHandle:async()=>{ throw new Error('locator.elementHandle: Timeout 750ms exceeded. waiting for locator'); },
+},{markConsumed:true,timeoutMs:750,allowMissing:true});
+assert.equal(missingTransientClick,'skipped');
+await assert.rejects(
+  scheduleSiteClick({elementHandle:async()=>{ throw new Error('locator.elementHandle: Timeout 750ms exceeded.'); }},{timeoutMs:750}),
+  /Timeout 750ms exceeded/,
+);
+const vanishedConfirmCandidate={
+  getAttribute:async()=>null,
+  isVisible:async()=>true,
+  elementHandle:async()=>{ throw new Error('locator.elementHandle: Timeout 750ms exceeded. waiting for locator'); },
+};
+const transientConfirmSite=Object.create(PrayerSite.prototype);
+transientConfirmSite.page={
+  locator:(selector)=>selector.includes('layui-layer-msg')
+    ? {allTextContents:async()=>[]}
+    : {count:async()=>1,nth:()=>vanishedConfirmCandidate},
+};
+transientConfirmSite.layerMessages=[];
+transientConfirmSite.timing={count:()=>{ throw new Error('消失的确认层不应计为浏览器点击'); }};
+transientConfirmSite.log=()=>{};
+assert.equal(await transientConfirmSite.autoSiteConfirm(5),0);
 
 const localShapeRoot=fs.mkdtempSync(path.join(os.tmpdir(),'prayer-local-shape-test-'));
 const shapeSvg=(variant)=>Buffer.from(`<svg width="960" height="640" xmlns="http://www.w3.org/2000/svg"><rect width="960" height="640" fill="#d72f58"/><rect x="36" y="34" width="888" height="570" fill="none" stroke="#111" stroke-width="9"/><rect x="${variant===1?130:540}" y="190" width="170" height="28" fill="#111"/><rect x="${variant===1?510:180}" y="370" width="230" height="24" fill="#111"/></svg>`);
@@ -369,8 +395,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.68/);
-assert.match(uiSource,/补图编号与供水场景修正版/);
+assert.match(uiSource,/V9\.5\.69/);
+assert.match(uiSource,/上传确认竞态闭环版/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);
@@ -431,7 +457,9 @@ assert.match(siteSource,/chooser\.setFiles\(files, \{ noWaitAfter:true, timeout:
 assert.match(siteSource,/scheduleSiteClick\(chooseButton, \{ markConsumed:true \}\)/);
 assert.match(siteSource,/getAttribute\(CONSUMED_CONFIRM_ATTRIBUTE\)/);
 assert.doesNotMatch(siteSource,/excludeElements: \[monthButtonHandle\]/);
-assert.match(siteSource,/await scheduleSiteClick\(candidate, \{ markConsumed:true \}\)/);
+assert.match(siteSource,/scheduleSiteClick\(candidate, \{[\s\S]*timeoutMs:750,[\s\S]*allowMissing:true/);
+assert.match(siteSource,/locator\.elementHandle\(\{ timeout: timeoutMs \}\)/);
+assert.doesNotMatch(siteSource,/return locator\.evaluate\(\(element, token\)/);
 assert.doesNotMatch(siteSource,/if \(!confirmed\) throw new Error\('没有识别到“确认要上传吗”窗口/);
 assert.match(siteSource,/scheduleSiteClick\(camera\)/);
 assert.match(siteSource,/const monthText = `\$\{year\}\$\{String\(month\)\.padStart\(2, '0'\)\}`/);

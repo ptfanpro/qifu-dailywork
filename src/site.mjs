@@ -45,18 +45,38 @@ export function isNavigationRaceError(error) {
   return /execution context was destroyed|cannot find context with specified id|interrupted by another navigation|ERR_ABORTED|navigation/i.test(String(error?.message || error || ''));
 }
 const CONSUMED_CONFIRM_ATTRIBUTE = 'data-prayer-confirm-consumed';
-export async function scheduleSiteClick(locator, { markConsumed = false } = {}) {
+export async function scheduleSiteClick(locator, { markConsumed = false, timeoutMs = 3000, allowMissing = false } = {}) {
   // Some site onclick handlers synchronously open another layer, submit a form, or
   // navigate. Waiting for element.click() inside locator.evaluate() therefore keeps
   // the CDP call open until Playwright's 30-second timeout, even when the business
   // action has already started. Schedule the click for the next browser task and
   // return immediately; callers must verify the resulting dialog/online state.
   const clickToken = markConsumed ? `prayer-${Date.now()}-${Math.random().toString(16).slice(2)}` : '';
-  return locator.evaluate((element, token) => {
-    if (token) element.setAttribute('data-prayer-confirm-consumed', token);
-    globalThis.setTimeout(() => element.click(), 0);
-    return 'scheduled';
-  }, clickToken);
+  let handle = null;
+  try {
+    // Do not call locator.evaluate() here. A Layui layer can disappear between
+    // the visibility check and evaluate(); Locator then waits its full default
+    // 30 seconds for a replacement element even though another handler has
+    // already accepted the dialog. Resolve one short-lived handle instead so a
+    // disappearing confirmation is a bounded race, not a false upload failure.
+    handle = await locator.elementHandle({ timeout: timeoutMs });
+    if (!handle) {
+      if (allowMissing) return 'skipped';
+      throw new Error('要点击的网页按钮已经消失。');
+    }
+    return await handle.evaluate((element, token) => {
+      if (token) element.setAttribute('data-prayer-confirm-consumed', token);
+      globalThis.setTimeout(() => element.click(), 0);
+      return 'scheduled';
+    }, clickToken);
+  } catch (error) {
+    if (allowMissing && /timeout|waiting for locator|not attached|detached|execution context was destroyed/i.test(String(error?.message || error || ''))) {
+      return 'skipped';
+    }
+    throw error;
+  } finally {
+    await handle?.dispose?.().catch(() => {});
+  }
 }
 export function isTransientAutomationPage(url, title = '') {
   const normalizedUrl = String(url || '').trim();
@@ -562,10 +582,22 @@ export class PrayerSite {
         // 页面按钮可能同步弹出下一层 alert/confirm。普通 Playwright click 会等待
         // 整个处理链返回并在 CDP 复用 Edge 中超时；DOM click 能立即交还控制权，
         // 原生 dialog 仍由全局监听器自动接受。
-        await scheduleSiteClick(candidate, { markConsumed:true });
-        this.timing.count('browser_action_count');
-        handled += 1;
-        await sleep(250);
+        const clickResult = await scheduleSiteClick(candidate, {
+          markConsumed:true,
+          timeoutMs:750,
+          allowMissing:true,
+        });
+        if (clickResult === 'scheduled') {
+          this.timing.count('browser_action_count');
+          handled += 1;
+          await sleep(250);
+        } else {
+          // Native dialog listeners or a previous layer callback may have
+          // already closed this transient button. Continue polling for the
+          // explicit upload result instead of turning that benign race into a
+          // 30-second failure.
+          await sleep(50);
+        }
       } else {
         await sleep(100);
       }
