@@ -1965,17 +1965,19 @@ export function inferPhotoGapsAroundExistingNumbers(recognized, expectedNumbers,
   return recognized;
 }
 
-function isSingleSixEightConfusion(left, right) {
+function singleDigitConfusionKind(left, right) {
   const a = String(left ?? '');
   const b = String(right ?? '');
-  if (a.length !== b.length) return false;
+  if (a.length !== b.length) return null;
   let differences = 0;
+  let pair = '';
   for (let index = 0; index < a.length; index += 1) {
     if (a[index] === b[index]) continue;
     differences += 1;
-    if (!((a[index] === '6' && b[index] === '8') || (a[index] === '8' && b[index] === '6'))) return false;
+    pair = [a[index], b[index]].sort().join('');
+    if (!['01', '68'].includes(pair)) return null;
   }
-  return differences === 1;
+  return differences === 1 ? pair : null;
 }
 
 function captureSequenceProposal(recognized, sourceIndex, direction) {
@@ -1994,9 +1996,10 @@ function captureSequenceProposal(recognized, sourceIndex, direction) {
   return direction === 1 ? anchors[0].number - firstStep : anchors[0].number + firstStep;
 }
 
-// OCR 的 6/8 混淆可能同时制造“重复号”和“缺号”。只在重复、缺号、连续
-// 三锚点、单一 6/8 混淆四项同时成立时纠正。
-export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers) {
+// OCR 的 6/8、0/1 混淆可能同时制造“重复号”和“缺号”。只在重复、缺号、
+// 连续三锚点、单一字符混淆四项同时成立时纠正。0/1 只接受单票低置信度
+// 结果；这样可修复清晰照片中的 513 -> 503，又不会覆盖高置信度真实编号。
+export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, occupiedNumbers = new Set()) {
   const numberGroups = new Map();
   for (let index = 0; index < recognized.length; index += 1) {
     const item = recognized[index];
@@ -2004,10 +2007,11 @@ export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers) {
     if (!numberGroups.has(item.number)) numberGroups.set(item.number, []);
     numberGroups.get(item.number).push(index);
   }
-  const usedNumbers = new Set(numberGroups.keys());
+  const usedNumbers = new Set([...occupiedNumbers, ...numberGroups.keys()]);
   const corrections = [];
   for (const [duplicateNumber, indices] of numberGroups) {
     if (indices.length < 2) continue;
+    let repaired = false;
     for (const index of indices) {
       const item = recognized[index];
       if (!item.paperGeometry?.usablePaper || isLikelyScene(item)) continue;
@@ -2016,22 +2020,67 @@ export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers) {
       const uniqueProposals = [...new Set(proposals)]
         .filter((number) => expectedNumbers.has(number))
         .filter((number) => !usedNumbers.has(number))
-        .filter((number) => isSingleSixEightConfusion(duplicateNumber, number));
+        .filter((number) => {
+          const confusion = singleDigitConfusionKind(duplicateNumber, number);
+          if (confusion === '68') return true;
+          if (confusion !== '01') return false;
+          return Number(item.evidence?.votes || 0) <= 1
+            && Number(item.evidence?.maxConfidence || 0) < 25;
+        });
       if (uniqueProposals.length !== 1) continue;
       const repairedNumber = uniqueProposals[0];
       item.originalOcrNumber = duplicateNumber;
       item.number = repairedNumber;
       item.evidence = {
         ...(item.evidence || {}),
-        method: 'global-one-to-one-capture-sequence-six-eight-repair',
+        method: singleDigitConfusionKind(duplicateNumber, repairedNumber) === '68'
+          ? 'global-one-to-one-capture-sequence-six-eight-repair'
+          : 'global-one-to-one-capture-sequence-zero-one-repair',
         originalOcrNumber: duplicateNumber,
         repairedNumber,
         sequenceAnchorCount: 3,
       };
       usedNumbers.add(repairedNumber);
       corrections.push({ index, from: duplicateNumber, to: repairedNumber, file: item.file });
+      repaired = true;
       break;
     }
+    if (repaired || indices.length !== 2) continue;
+
+    // 增量补图时，相邻的 514/515/516 可能已经在前一轮改成数字文件，不再
+    // 出现在 recognized 中，三锚点因此不可见。此时仍可利用“PDF 唯一缺号 +
+    // 已有数字文件占用集合 + 两张同号候选的证据强弱”完成一一对应：强候选
+    // 保留原号，且只允许明显更弱的单票候选落到唯一 0/1 或 6/8 混淆缺号。
+    const ranked = indices.map((index) => {
+      const item = recognized[index];
+      const votes = Number(item.evidence?.votes || 0);
+      const confidence = Number(item.evidence?.maxConfidence || 0);
+      return { index, item, votes, confidence, strength:votes * 50 + confidence };
+    }).sort((a, b) => b.strength - a.strength);
+    const [strong, weak] = ranked;
+    if (!strong || !weak || strong.strength - weak.strength < 8) continue;
+    const alternatives = [...expectedNumbers]
+      .filter((number) => !usedNumbers.has(number))
+      .filter((number) => {
+        const confusion = singleDigitConfusionKind(duplicateNumber, number);
+        if (confusion === '68') return true;
+        return confusion === '01' && weak.votes <= 1 && weak.confidence < 25;
+      });
+    if (alternatives.length !== 1) continue;
+    const repairedNumber = alternatives[0];
+    weak.item.originalOcrNumber = duplicateNumber;
+    weak.item.number = repairedNumber;
+    weak.item.evidence = {
+      ...(weak.item.evidence || {}),
+      method: singleDigitConfusionKind(duplicateNumber, repairedNumber) === '68'
+        ? 'global-one-to-one-existing-files-six-eight-repair'
+        : 'global-one-to-one-existing-files-zero-one-repair',
+      originalOcrNumber: duplicateNumber,
+      repairedNumber,
+      occupiedNumberCount: occupiedNumbers.size,
+    };
+    usedNumbers.add(repairedNumber);
+    corrections.push({ index:weak.index, from:duplicateNumber, to:repairedNumber, file:weak.item.file });
   }
   return corrections;
 }
@@ -2335,11 +2384,6 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   const pdfNumberCounts = new Map();
   for (const number of pdfNumbers) pdfNumberCounts.set(number, (pdfNumberCounts.get(number) || 0) + 1);
   const expectedNumbers = new Set([...pdfNumberCounts].filter(([, count]) => count === 1).map(([number]) => number));
-  inferPhotoSequences(recognized, expectedNumbers);
-  const globalNumberCorrections = reconcileDuplicatePhotoNumbers(recognized, expectedNumbers);
-  for (const correction of globalNumberCorrections) {
-    onProgress?.(`全局一一对应纠错：${path.basename(correction.file)} 的 OCR 编号 ${correction.from} 已按 PDF 缺号和连续拍摄顺序修正为 ${correction.to}。`);
-  }
   const repairFromNumbers = new Set(numericCodeRepairs.map((item) => item.from));
   const preassignedNumbers = images
     .map((file) => path.parse(file).name)
@@ -2347,6 +2391,11 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     .map(Number)
     .filter((number) => expectedNumbers.has(number) && !repairFromNumbers.has(number));
   for (const repair of numericCodeRepairs) preassignedNumbers.push(repair.to);
+  inferPhotoSequences(recognized, expectedNumbers);
+  const globalNumberCorrections = reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, new Set(preassignedNumbers));
+  for (const correction of globalNumberCorrections) {
+    onProgress?.(`全局一一对应纠错：${path.basename(correction.file)} 的 OCR 编号 ${correction.from} 已按 PDF 缺号和连续拍摄顺序修正为 ${correction.to}。`);
+  }
   inferPhotoGapsAroundExistingNumbers(recognized, expectedNumbers, new Set(preassignedNumbers));
   // 纸色与唯一缺号只能缩小候选，不能直接定号；折叠会遮住编号，也会扭曲
   // 外框比例。自动定号必须来自 OCR/页面指纹，或经过哈希锁定的人工 PDF 内容复核。

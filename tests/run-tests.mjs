@@ -333,8 +333,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.64/);
-assert.match(uiSource,/识别提速闭环修正版/);
+assert.match(uiSource,/V9\.5\.65/);
+assert.match(uiSource,/编号消歧统一回归版/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);
@@ -518,6 +518,22 @@ assert.deepEqual(reconcileDuplicatePhotoNumbers(duplicatedSixEightPhotos,new Set
 assert.equal(duplicatedSixEightPhotos[0].evidence.method,'global-one-to-one-capture-sequence-six-eight-repair');
 const unsafeDuplicatePhotos=duplicatedSixEightPhotos.slice(0,2).map((item)=>({...item,number:468,evidence:{method:'ocr'}}));
 assert.deepEqual(reconcileDuplicatePhotoNumbers(unsafeDuplicatePhotos,new Set([466,468])),[]);
+// 2026-08-25 真实故障的脱敏回归：清晰的 513 被单票低置信度 OCR 读成
+// 第二张 503。拍摄顺序后方的 514/515/516 是三重锚点，且 PDF 唯一缺号为
+// 513，因此只纠正弱候选；高置信度的真实 503 必须保持不变。
+const duplicatedZeroOnePhotos=[
+  {file:'real-503.jpg',reliable:true,number:503,candidates:[],paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},evidence:{method:'ocr',votes:1,maxConfidence:37}},
+  {file:'actual-513.jpg',reliable:true,number:503,candidates:[{number:503,votes:1,prefixDistance:0,maxConfidence:14}],paperGeometry:{usablePaper:true,rectangularPaper:false},visualMetrics:{},evidence:{method:'ocr',votes:1,maxConfidence:14}},
+];
+const occupiedZeroOneNumbers=new Set([...Array.from({length:9},(_,index)=>504+index),514,515,516]);
+assert.deepEqual(reconcileDuplicatePhotoNumbers(duplicatedZeroOnePhotos,new Set(Array.from({length:14},(_,index)=>503+index)),occupiedZeroOneNumbers).map((item)=>[item.from,item.to]),[[503,513]]);
+assert.equal(duplicatedZeroOnePhotos[0].number,503);
+assert.equal(duplicatedZeroOnePhotos[1].number,513);
+assert.equal(duplicatedZeroOnePhotos[1].evidence.method,'global-one-to-one-existing-files-zero-one-repair');
+const unsafeHighConfidenceZeroOne=duplicatedZeroOnePhotos.map((item)=>({...item,evidence:{...(item.evidence||{})}}));
+unsafeHighConfidenceZeroOne[1].number=503;
+unsafeHighConfidenceZeroOne[1].evidence={method:'ocr',votes:2,maxConfidence:65};
+assert.deepEqual(reconcileDuplicatePhotoNumbers(unsafeHighConfidenceZeroOne,new Set(Array.from({length:14},(_,index)=>503+index)),occupiedZeroOneNumbers),[]);
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,score:0.045,width:0.844,top:0.842,height:0.079,boxArea:0.067},visualMetrics:{uniformity:0.288,upperEdgeDensity:0.175,edgeDensity:0.227}}),true);
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,score:0.0812,width:1,top:0.875,height:0.125,boxArea:0.125},visualMetrics:{uniformity:0.294,upperEdgeDensity:0.177,edgeDensity:0.229}}),true);
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:true,width:0.72,top:0.20,height:0.60,boxArea:0.43},visualMetrics:{uniformity:0.30,upperEdgeDensity:0.17,edgeDensity:0.22}}),false);
