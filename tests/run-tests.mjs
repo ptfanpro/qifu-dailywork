@@ -260,6 +260,42 @@ assert.equal(partialManifest.batchCompleteReady,false);
 assert.equal(partialManifest.counts.missingBlessing,1);
 assert.ok(partialManifest.fileHashes['225.jpg']);
 assert.match(partialManifest.warnings.join('\n'),/现有照片可先上传/);
+
+// 历史/当日缺图批次只应要求“已经到达并可上传的福单”所需场景图。
+// 真实故障：供水 PDF 的全部页面均待补，而现有红黄纸福单和两张供灯场景
+// 已齐；旧逻辑仍因目录中存在供水 PDF 而阻断整批供灯订单。
+const categoryPartialRoot=path.join(dir,'category-partial-business');
+const categoryPartialDay=path.join(categoryPartialRoot,'8月25日');
+const categoryPartialPhotos=path.join(categoryPartialDay,'1');
+fs.mkdirSync(categoryPartialPhotos,{recursive:true});
+const categoryWaterDoc=await PDFDocument.create(); categoryWaterDoc.addPage();
+const categoryLampDoc=await PDFDocument.create(); categoryLampDoc.addPage();
+fs.writeFileSync(path.join(categoryPartialDay,'825供水.pdf'),await categoryWaterDoc.save());
+fs.writeFileSync(path.join(categoryPartialDay,'825红纸1.pdf'),await categoryLampDoc.save());
+await sharp({create:{width:1800,height:1350,channels:3,background:'#bb3344'}}).jpeg({quality:90}).toFile(path.join(categoryPartialPhotos,'503.jpg'));
+await sharp({create:{width:1800,height:1350,channels:3,background:'#202020'}}).jpeg({quality:90}).toFile(path.join(categoryPartialPhotos,'2.1.jpg'));
+await sharp({create:{width:1800,height:1350,channels:3,background:'#303030'}}).jpeg({quality:90}).toFile(path.join(categoryPartialPhotos,'2.2.jpg'));
+const categoryPartialManifest=await scanPhotoWorkday(categoryPartialRoot,'2026-08-25',path.join(dir,'category-partial-run'),{
+  runOcr:false,
+  expectedNumbers:new Set([496,503]),
+  expectedNumberModes:new Map([[496,'water'],[503,'lamp']]),
+});
+assert.equal(categoryPartialManifest.counts.missingBlessing,1);
+assert.equal(categoryPartialManifest.counts.waterScene,0);
+assert.equal(categoryPartialManifest.counts.lampScene,2);
+assert.deepEqual(categoryPartialManifest.requiredSceneModes,['lamp']);
+assert.equal(categoryPartialManifest.sceneManualIssues.length,0);
+assert.equal(categoryPartialManifest.uploadReady,true);
+
+await sharp({create:{width:1800,height:1350,channels:3,background:'#447799'}}).jpeg({quality:90}).toFile(path.join(categoryPartialPhotos,'496.jpg'));
+const categoryWaterArrivedManifest=await scanPhotoWorkday(categoryPartialRoot,'2026-08-25',path.join(dir,'category-water-arrived-run'),{
+  runOcr:false,
+  expectedNumbers:new Set([496,503]),
+  expectedNumberModes:new Map([[496,'water'],[503,'lamp']]),
+});
+assert.deepEqual(categoryWaterArrivedManifest.requiredSceneModes,['water','lamp']);
+assert.match(categoryWaterArrivedManifest.sceneManualIssues.join('\n'),/缺少已确认的供水场景图/);
+
 await sharp({create:{width:1800,height:1350,channels:3,background:'#5d5d5d'}}).jpeg({quality:90}).toFile(path.join(partialPhotos,'待确认原图.jpg'));
 const partialWithManualReview=await scanPhotoWorkday(partialRoot,'2026-08-10',path.join(dir,'partial-run-manual'),{runOcr:false});
 assert.equal(partialWithManualReview.blockingErrors.length,0);
@@ -333,8 +369,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.66/);
-assert.match(uiSource,/场景同类补图回归版/);
+assert.match(uiSource,/V9\.5\.67/);
+assert.match(uiSource,/部分批次场景范围修正版/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);
@@ -450,7 +486,8 @@ assert.match(siteSource,/const selects = dialog\.locator\('select'\)/);
 assert.match(siteSource,/批量修改成\(\?:代理\|延续\)\?已处理状态/);
 assert.match(siteSource,/既没有已处理终态选项，也没有明确的/);
 assert.match(runnerSource,/照片目录快速清点/);
-assert.match(runnerSource,/scanPhotoWorkday\(root,photoDate,photoRunDir,\{runOcr:false,expectedNumbers:allowedBlessingNumbers\}\)/);
+assert.match(runnerSource,/scanPhotoWorkday\(root,photoDate,photoRunDir,\{runOcr:false,expectedNumbers:allowedBlessingNumbers,expectedNumberModes\}\)/);
+assert.match(runnerSource,/const mode = \/供水\//);
 assert.match(runnerSource,/旧版照片断点缺少编号归属索引/);
 assert.match(runnerSource,/standardizedOnly/);
 assert.doesNotMatch(runnerSource,/runOcr:args\.action === 'photo-scan'/);

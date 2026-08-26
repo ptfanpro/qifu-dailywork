@@ -350,7 +350,23 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
       atomic(cachedPlanFile,cachedPhotoPlan);
       allowedBlessingNumbers = new Set((cachedPhotoPlan.allowedBlessingNumbers || []).map(Number).filter(Number.isInteger));
     }
-    const manifest = await scanPhotoWorkday(root,photoDate,photoRunDir,{runOcr:false,expectedNumbers:allowedBlessingNumbers});
+    let expectedNumberModes = null;
+    if (allowedBlessingNumbers && Array.isArray(cachedPhotoPlan?.pdfPages)) {
+      const indexedModes = new Map();
+      let modeIndexComplete = true;
+      for (const page of cachedPhotoPlan.pdfPages) {
+        const number = Number(page.number);
+        if (!Number.isInteger(number) || !allowedBlessingNumbers.has(number)) continue;
+        const pdfName = String(page.pdfName || path.basename(page.pdf || ''));
+        const mode = /供水/.test(pdfName) ? 'water' : page.portrait ? 'tablet' : 'lamp';
+        if (indexedModes.has(number) && indexedModes.get(number) !== mode) modeIndexComplete = false;
+        indexedModes.set(number,mode);
+      }
+      if ([...allowedBlessingNumbers].some((number) => !indexedModes.has(number))) modeIndexComplete = false;
+      if (modeIndexComplete) expectedNumberModes = indexedModes;
+      else log('本地 PDF 编号分类索引不完整，将继续使用整日场景保守校验。');
+    }
+    const manifest = await scanPhotoWorkday(root,photoDate,photoRunDir,{runOcr:false,expectedNumbers:allowedBlessingNumbers,expectedNumberModes});
     photoTiming.setCount('photo_count',manifest.counts.allImages);
     photoTiming.setCount('pdf_page_count',manifest.counts.pdfPages);
     photoTiming.count('manual_review_count',manifest.counts.unexpected);

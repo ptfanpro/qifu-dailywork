@@ -203,7 +203,7 @@ export async function recognizeUnexpectedImages(files, date, workDir) {
   return results;
 }
 
-export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, expectedNumbers = null } = {}) {
+export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, expectedNumbers = null, expectedNumberModes = null } = {}) {
   const folder = dayFolder(root, date);
   const photoDir = path.join(folder, '1');
   if (!fs.existsSync(photoDir)) throw new Error(`没有找到照片目录：${photoDir}`);
@@ -258,8 +258,25 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
   const missingBlessingCount = Math.max(0, pdfPageCount - blessing.length);
   const extraBlessingCount = Math.max(0, blessing.length - pdfPageCount);
   if (pdfFiles.length && extraBlessingCount > 0) manualIssues.push(`本日可用福单图比 PDF 页数多 ${extraBlessingCount} 张；超出项已进入人工清单，唯一确认项仍可继续`);
-  const needsWaterScene = pdfFiles.some((file) => /供水/.test(path.basename(file)));
-  const needsLampScene = pdfFiles.some((file) => !/供水/.test(path.basename(file)));
+  // A day's PDFs can contain categories whose photos have not arrived yet.  Only
+  // require scenes for blessing photos that are actually present in this batch.
+  // Older checkpoints do not have a number-to-category index, so retain the
+  // conservative whole-PDF fallback unless every present blessing is mapped.
+  const presentBlessingNumbers = blessing.map((file) => Number(path.parse(file).name));
+  const modeForNumber = (number) => expectedNumberModes instanceof Map
+    ? expectedNumberModes.get(number)
+    : expectedNumberModes?.[number] ?? expectedNumberModes?.[String(number)];
+  const presentModes = presentBlessingNumbers.map(modeForNumber);
+  const hasCompleteModeIndex = presentBlessingNumbers.length > 0
+    && presentModes.every((mode) => ['water','lamp','tablet'].includes(mode));
+  const requiredSceneModes = hasCompleteModeIndex
+    ? ['water','lamp'].filter((mode) => presentModes.includes(mode))
+    : [
+        ...(pdfFiles.some((file) => /供水/.test(path.basename(file))) ? ['water'] : []),
+        ...(pdfFiles.some((file) => !/供水/.test(path.basename(file))) ? ['lamp'] : []),
+      ];
+  const needsWaterScene = requiredSceneModes.includes('water');
+  const needsLampScene = requiredSceneModes.includes('lamp');
   if (needsWaterScene && waterScenes.length < 1) {
     const message = '当天供水订单缺少已确认的供水场景图（2.5.jpg/2.6.jpg）';
     manualIssues.push(message); sceneManualIssues.push(message);
@@ -301,6 +318,7 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
     blockingErrors,
     manualIssues,
     sceneManualIssues,
+    requiredSceneModes,
     warnings,
     blessingReady: blockingErrors.length === 0,
     uploadReady: blockingErrors.length === 0 && blessing.length > 0,
