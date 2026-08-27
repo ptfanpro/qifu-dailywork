@@ -88,6 +88,21 @@ export function prioritizedPhotoLayouts(geometry, dynamicLayouts) {
 export function targetedCurrentCodeLayouts(layouts) {
   const seenModes = new Set();
   const selected = [];
+  // 纸色连通域能够稳定框住整张福单时，纸张相对编号框比固定相机框更准。
+  // V9.5.65 为提速把首轮限制为四个固定框，导致 2026-08-26 这批清晰
+  // 供水福单右上角编号（529/531/532）完全落在首轮之外。这里只提升两个
+  // 严格位于纸张右上角的窄框；完整业务前缀和当天 PDF 编号范围仍是采信
+  // 前提，不恢复全图 OCR，也不会读取姓名和祈愿正文。
+  for (const layoutName of [
+    // 标准横版福单的编号紧贴纸张顶边。这个框原本只存在于动态布局，
+    // V9.5.73 前却没有进入限量首轮，导致肉眼清晰的 268-1-529 被漏掉。
+    'paper-relative-code-only',
+    'paper-relative-landscape-code-upper-right',
+    'paper-relative-landscape-code-lower-right',
+  ]) {
+    const layout = (layouts || []).find((item) => item.name === layoutName);
+    if (layout) selected.push(layout);
+  }
   for (const layout of layouts || []) {
     const match = /^current-(temple|outdoor|portrait)-code-line$/.exec(layout.name);
     if (!match || seenModes.has(match[1])) continue;
@@ -99,7 +114,7 @@ export function targetedCurrentCodeLayouts(layouts) {
     seenModes.add(mode);
     selected.push(CURRENT_CAMERA_CODE_LAYOUTS[mode][0]);
   }
-  return selected.slice(0, 3);
+  return selected.slice(0, 6);
 }
 
 // PDF 模板既有横版福单，也有竖版牌位。竖版右上角编号的位置会随模板宽度
@@ -326,11 +341,14 @@ function paperCodeLayoutsFromGeometry(geometry) {
   return [
     !portraitPaper ? {
       name: 'paper-relative-landscape-code-upper-right',
-      // 木架中纸张的露出高度会变化。第一条覆盖纸内较高、最靠右的编号行。
-      left: geometry.left + geometry.width * 0.68,
-      top: geometry.top + geometry.height * 0.14,
-      width: geometry.width * 0.18,
-      height: geometry.height * 0.055,
+      // 木架中纸张的露出高度会变化，纸色连通域也可能把木架阴影并入上边界。
+      // 2026-08-26 实拍中编号位于纸张高度约 9%~14%，旧框从 14% 才开始，
+      // 实际只裁到编号下沿的一条纯色红纸。扩大为仍然局限在右上角的编号带，
+      // 既完整覆盖透视倾斜后的编号，也不会进入下方姓名和祈愿正文区域。
+      left: geometry.left + geometry.width * 0.69,
+      top: Math.max(0, geometry.top + geometry.height * 0.10),
+      width: geometry.width * 0.23,
+      height: geometry.height * 0.065,
       sparse: false,
     } : null,
     !portraitPaper ? {
@@ -828,32 +846,67 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   for (const landscapeCodeLayout of landscapeCodeLayouts) {
     const extract = cropFromRatios(metadata, landscapeCodeLayout);
     const focusedObservations = [];
+    // 紧裁后的内容只有一个短业务编码。Tesseract 的 SINGLE_LINE 会在字符
+    // 间距略大时把它当成多个空行并直接返回空；SINGLE_WORD 对数字、连字符
+    // 白名单更稳定，最终仍需完整前缀和当天 PDF 范围双重约束。
     await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
-    for (const threshold of [110, 170]) {
-      const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-focused-g${threshold}.png`);
+    if (appRoot) {
+      const windowsDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-windows-red.png`);
       await sharpFile(file)
         .rotate()
         .extract(extract)
-        .resize({ width: 1200, withoutEnlargement: false })
-        .greyscale()
+        .resize({ width: 1600, withoutEnlargement: false })
+        .extractChannel(0)
         .normalize()
-        .threshold(threshold)
+        .sharpen({ sigma: 1 })
+        .extend({ top: 48, bottom: 48, left: 48, right: 48, background: 'white' })
         .png()
-        .toFile(diagnostic);
-      const result = await worker.recognize(diagnostic);
-      const parsed = parseOcrCandidates(result.data.text, expectedPrefix, expectedNumbers)
-        .filter((item) => item.prefixDistance <= 0.1);
-      for (const item of parsed) focusedObservations.push({
-        ...item,
-        confidence: Number(result.data.confidence || 0),
-        layout: landscapeCodeLayout.name,
-        variant: `focused-gray-${threshold}`,
-      });
+        .toFile(windowsDiagnostic);
+      windowsFallbackFiles.push(windowsDiagnostic);
+    }
+    // 红纸在普通灰度中本身偏暗，会与黑色编号一起被阈值压成整块黑色。
+    // 红通道能把红纸背景抬亮而保留黑字；黄纸/低饱和照片则继续由灰度通道
+    // 负责。两路仍各跑两个阈值，最终必须形成同号共识，不能单次猜号。
+    for (const channel of ['red', 'gray', 'clahe']) {
+      // 木架和高光会拉高整幅裁图的动态范围，红纸主体归一化后通常落在
+      // 50~100。另有局部阴影覆盖编号的照片，使用 CLAHE 局部均衡后再以
+      // 中阈值识别，避免把整片纸纹放大成噪声。
+      const thresholds = channel === 'clahe' ? [105, 125, 145] : [65, 75, 85];
+      for (const threshold of thresholds) {
+        const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-focused-${channel[0]}${threshold}.png`);
+        let pipeline = sharpFile(file)
+          .rotate()
+          .extract(extract)
+          // 编号在 4080px 微信原图中仍只有约 18px 高。1200px 紧裁会把
+          // 连字符和末位数字压成不足 3px 的笔画；1600px 是这批 529
+          // 实图能够稳定读出完整编码、同时仍远小于全图 OCR 的最小尺度。
+          .resize({ width: 1600, withoutEnlargement: false });
+        pipeline = channel === 'red' ? pipeline.extractChannel(0) : pipeline.greyscale();
+        if (channel === 'clahe') pipeline = pipeline.clahe({ width: 3, height: 3, maxSlope: 2 }).median(3);
+        await pipeline
+          .normalize()
+          .threshold(threshold)
+          .png()
+          .toFile(diagnostic);
+        // 将肉眼最清晰的红通道 75 阈值紧裁图同时交给 Windows OCR。
+        // Tesseract 在部分打印字体上会把清晰的短编码分割为空；Windows OCR
+        // 只允许返回当天 PDF 编号集合中的唯一值，因此不会扩大误匹配范围。
+        if (channel === 'red' && threshold === 75 && appRoot) windowsFallbackFiles.push(diagnostic);
+        const result = await worker.recognize(diagnostic);
+        const parsed = parseOcrCandidates(result.data.text, expectedPrefix, expectedNumbers)
+          .filter((item) => item.prefixDistance <= 0.1);
+        for (const item of parsed) focusedObservations.push({
+          ...item,
+          confidence: Number(result.data.confidence || 0),
+          layout: landscapeCodeLayout.name,
+          variant: `focused-${channel}-${threshold}`,
+        });
+      }
     }
     const focusedGroups = groupObservations(focusedObservations);
     const focusedBest = focusedGroups[0] || null;
     const focusedSecond = focusedGroups[1] || null;
-    if (focusedBest?.votes >= 2
+    if ((focusedBest?.votes >= 2 || (focusedBest?.prefixDistance <= 0.1 && focusedBest?.maxConfidence >= 60))
       && focusedBest.maxConfidence >= 35
       && (!focusedSecond || focusedBest.votes > focusedSecond.votes)) {
       return {
@@ -876,6 +929,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   // 第一遍也必须限量。历史版本在没有命中时会把所有动态框和旧固定框全部
   // 跑完，然后二次兜底，清晰批次也会膨胀成数百次 OCR。优先布局已覆盖
   // 当前三种稳定构图；再保留两个动态框兼容旧照片即可。
+  await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
   const firstPassLayouts = layouts.slice(0, 4);
   for (const layout of firstPassLayouts) {
     const extract = cropFromRatios(metadata, layout);
@@ -1403,10 +1457,14 @@ async function photoShapeFingerprints(item) {
   return result;
 }
 
-export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = null) {
+export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = null, claimedNumbers = new Set()) {
   const eligible = recognized.filter((item) => !item.reliable && !isLikelyScene(item)
     && (item.paperGeometry?.usablePaper || item.paperGeometry?.rectangularPaper));
-  const indexedPages = pdfPages.filter((page) => Number.isInteger(page.number) && page._localShapeFingerprint);
+  // 已有数字文件和已由强 OCR 确认的照片已经占用了对应页面。未决照片只应
+  // 在尚缺编号中竞争；若仍拿整本 PDF 比对，模板相近的已占用页面会成为
+  // 假阳性第一名，反而把可以由“缺号 + 页面版式”唯一确认的补图留在人工项。
+  const indexedPages = pdfPages.filter((page) => Number.isInteger(page.number)
+    && page._localShapeFingerprint && !claimedNumbers.has(page.number));
   if (!eligible.length || !indexedPages.length) return { status: 'not-needed', attempted: 0, resolved: 0, unresolved: 0 };
   onProgress?.(`本地 PDF 页面版式匹配：正在复核 ${eligible.length} 张未决纸张照片（不使用云端）。`);
   const rows = [];
@@ -1761,8 +1819,27 @@ export function isLikelyScene(item) {
     && geometry.height >= 0.60
     && geometry.boxArea >= 0.60
     && geometry.fill >= 0.60;
+  // 供水场景中，画面下半部的水碗、供桌和远处红纸可能连成一个宽色块。
+  // 它从画面中部延伸到底边，但高度不到半幅、没有矩形纸边；真实近景福单
+  // 的纸张通常从画面上部开始且高度超过半幅。旧版把这种色块当成福单，
+  // 导致清晰供水场景停在“编号未识别”。
+  const lowerFrameSceneStructure = geometry.rectangularPaper === false
+    && geometry.top >= 0.50
+    && Number(geometry.bottom || geometry.top + geometry.height) >= 0.98
+    && geometry.width >= 0.82
+    && geometry.height <= 0.50
+    && geometry.boxArea <= 0.45;
+  // 近景灯阵只会形成几个小暖色连通块。第二张灯图的上半部边缘密度略高
+  // 于旧阈值 0.08，但仍同时满足“小色块、无可用纸张、高均匀度、低总边缘”。
+  const compactWarmSceneStructure = !geometry.usablePaper
+    && geometry.rectangularPaper === false
+    && geometry.boxArea <= 0.12
+    && metrics.uniformity >= 0.50
+    && metrics.upperEdgeDensity <= 0.10
+    && metrics.edgeDensity <= 0.13;
   // 灯阵或供水全景会在画面底部形成横跨全宽的红/黄连通块；它不是纸张。
-  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene) return true;
+  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene
+    || lowerFrameSceneStructure || compactWarmSceneStructure) return true;
   // 纸张偶尔与画面右边缘相接，严格矩形条件会失败；足够大的连续红/黄纸色块仍应判为纸张。
   if (geometry.rectangularPaper || (geometry.score >= 0.085
     && geometry.boxArea >= 0.14
@@ -1773,7 +1850,8 @@ export function isLikelyScene(item) {
   const visualScene = metrics.uniformity > 0.47
     && metrics.upperEdgeDensity < 0.08
     && metrics.edgeDensity < 0.16;
-  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || visualScene);
+  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene
+    || lowerFrameSceneStructure || compactWarmSceneStructure || visualScene);
 }
 
 // 只返回匿名视觉结构指标，供真实照片回归测试使用；不运行 OCR，也不读取
@@ -1781,9 +1859,11 @@ export function isLikelyScene(item) {
 export async function diagnosePhotoStructure(file) {
   const paperEvidence = await detectPaperEvidence(file);
   const visualMetrics = await imageVisualMetrics(file);
+  const sceneMetrics = await sceneVisualScore(file);
   return {
     paperGeometry: paperEvidence.geometry,
     visualMetrics,
+    sceneMetrics,
     likelyScene: isLikelyScene({ paperGeometry: paperEvidence.geometry, visualMetrics }),
   };
 }
@@ -2437,7 +2517,15 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       // 本地 OCR、纸张几何和场景快速路径全部完成后，以当天 PDF 页面版式
       // 复核仍未决的纸张照片。全程离线；异常也只保留未决结果。
       try {
-        localPageMatch = await matchPdfPagesLocally(recognized, pdfPages, onProgress);
+        const claimedNumbers = new Set(numericByNumber.keys());
+        for (const repair of numericCodeRepairs) {
+          claimedNumbers.delete(repair.from);
+          claimedNumbers.add(repair.to);
+        }
+        for (const item of recognized) {
+          if (item.reliable && Number.isInteger(item.number)) claimedNumbers.add(item.number);
+        }
+        localPageMatch = await matchPdfPagesLocally(recognized, pdfPages, onProgress, claimedNumbers);
         if (localPageMatch.resolved) onProgress?.(`本地 PDF 页面版式已唯一确认 ${localPageMatch.resolved} 张福单图；其余保持未改名。`);
         else if (localPageMatch.attempted) onProgress?.(`本地 PDF 页面版式未能唯一确认 ${localPageMatch.unresolved} 张照片，保持未改名。`);
       } catch {

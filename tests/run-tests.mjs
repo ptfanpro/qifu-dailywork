@@ -99,6 +99,25 @@ assert.equal(localShapeResult.status,'completed');
 assert.equal(localShapeResult.resolved,1);
 assert.equal(shapeItems[0].number,401);
 assert.equal(shapeItems[0].evidence.method,'local-pdf-page-shape-fingerprint');
+const claimedShapeItems=[{file:shapePhoto,reliable:false,number:null,candidates:[],visualMetrics:{},paperGeometry:{left:0.1,top:140/900,width:0.8,height:640/900,right:0.9,bottom:(140+640)/900,score:0.5,fill:0.95,boxArea:0.56,rectangularPaper:true}}];
+const claimedShapeResult=await matchPdfPagesLocally(claimedShapeItems,shapePages,null,new Set([402]));
+assert.equal(claimedShapeResult.resolved,1);
+assert.equal(claimedShapeItems[0].number,401);
+assert.deepEqual(claimedShapeResult.diagnostics[0].top.map((item)=>item.number),[401]);
+const allClaimedShapeItems=[{file:shapePhoto,reliable:false,number:null,candidates:[],visualMetrics:{},paperGeometry:{left:0.1,top:140/900,width:0.8,height:640/900,right:0.9,bottom:(140+640)/900,score:0.5,fill:0.95,boxArea:0.56,rectangularPaper:true}}];
+const allClaimedShapeResult=await matchPdfPagesLocally(allClaimedShapeItems,shapePages,null,new Set([401,402]));
+assert.equal(allClaimedShapeResult.status,'not-needed');
+assert.equal(allClaimedShapeResult.resolved,0);
+const standardTopEdgeLayouts=targetedCurrentCodeLayouts([
+  {name:'paper-relative-landscape-code-upper-right'},
+  {name:'paper-relative-landscape-code-lower-right'},
+  {name:'paper-relative-code-only'},
+  {name:'current-temple-code-line'},
+  {name:'current-outdoor-code-line'},
+  {name:'current-portrait-code-line'},
+]);
+assert.equal(standardTopEdgeLayouts[0].name,'paper-relative-code-only');
+assert.equal(standardTopEdgeLayouts.length,6);
 fs.rmSync(localShapeRoot,{recursive:true,force:true});
 
 const cleanupRoot=path.join(fs.mkdtempSync(path.join(os.tmpdir(),'prayer-cleanup-test-')),'祈福运行数据');
@@ -412,8 +431,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.72/);
-assert.match(uiSource,/历史零待办闭环修正版/);
+assert.match(uiSource,/V9\.5\.73/);
+assert.match(uiSource,/编号与场景识别回归版/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);
@@ -631,6 +650,13 @@ assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:tru
 // 2026-08-25 供水全景：金色台阶会形成一个横跨整幅图的巨大“黄纸”色块，
 // 但它没有矩形纸张边界，必须进入场景图而不是福单 OCR。
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.4971875,left:0,top:0.3,width:1,height:0.7,right:1,bottom:1,fill:0.710267857,boxArea:0.7},visualMetrics:{edgeDensity:0.176145833,upperEdgeDensity:0.164973958,uniformity:0.4201041667}}),true);
+// 2026-08-26 的供水场景含远处红纸，旧版把下半幅连通色块误作福单主体。
+assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.223867,left:0.146875,top:0.541667,width:0.853125,height:0.458333,right:1,bottom:1,fill:0.572527,boxArea:0.391016},visualMetrics:{edgeDensity:0.228633,upperEdgeDensity:0.189141,uniformity:0.323086}}),true);
+// 同批第二张供灯图上半部细节略多，但色块很小、无可用纸张且整体仍是
+// 高均匀度低边缘灯阵，必须与另一张供灯图一起进入场景分类。
+assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,rectangularPaper:false,score:0.054023,left:0.121875,top:0.366667,width:0.23125,height:0.3875,right:0.353125,bottom:0.754167,fill:0.602877,boxArea:0.089609},visualMetrics:{edgeDensity:0.102904,upperEdgeDensity:0.085456,uniformity:0.542747}}),true);
+// 同批近景福单即使纸张与右边缘相连、矩形标记失败，也不能被新场景规则误伤。
+assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.520964,left:0.171875,top:0.15,width:0.828125,height:0.704167,right:1,bottom:0.854167,fill:0.893379,boxArea:0.583138},visualMetrics:{edgeDensity:0.114453,upperEdgeDensity:0.089102,uniformity:0.512318}}),false);
 
 // 同批清晰福单的纸色连通域会把木架也包进去，旧版据此误选“竖版”裁框，
 // 并在 y=47.5% 处截到神像底座。新构图的编号实际位于约 y=50%~53%。
@@ -645,6 +671,19 @@ assert.deepEqual(targetedCurrentCodeLayouts(falsePortraitLayouts).map((layout) =
   'current-temple-code-line',
   'current-outdoor-code-line',
 ]);
+// 2026-08-26 真实故障的脱敏构图回归：纸张定位正确，但提速后的固定四框
+// 没覆盖纸内上方编号行。纸张相对窄框必须先于固定相机框参与有限复核。
+const august26Geometry={left:0.171875,top:0.15,width:0.828125,height:0.7041666667,right:1,bottom:0.8541666667,usablePaper:true,rectangularPaper:false};
+const august26Layouts=prioritizedPhotoLayouts(august26Geometry,[
+  {name:'paper-relative-landscape-code-upper-right',left:0.743,top:0.220,width:0.190,height:0.046},
+  {name:'paper-relative-landscape-code-lower-right',left:0.734,top:0.344,width:0.149,height:0.023},
+]);
+assert.deepEqual(targetedCurrentCodeLayouts(august26Layouts).slice(0,2).map((layout)=>layout.name),[
+  'paper-relative-landscape-code-upper-right',
+  'paper-relative-landscape-code-lower-right',
+]);
+assert.ok(targetedCurrentCodeLayouts(august26Layouts)[0].top <= 0.23);
+assert.ok(targetedCurrentCodeLayouts(august26Layouts)[0].height >= 0.04);
 const sameKindSceneRoot=fs.mkdtempSync(path.join(os.tmpdir(),'prayer-same-kind-scene-test-'));
 const createLampScene=async(name,warmWidth)=>{
   const file=path.join(sameKindSceneRoot,name);
@@ -768,7 +807,9 @@ assert.match(photoPrepareSource,/微信图片_20260814123729_7475_139\.jpg': 284
 assert.match(photoPrepareSource,/微信图片_20260814123737_7484_139\.jpg': '2\.5\.jpg'/);
 assert.match(photoPrepareSource,/微信图片_20260814123735_7482_139\.jpg': 287/);
 assert.match(photoPrepareSource,/targeted-landscape-code-threshold-consensus/);
-assert.match(photoPrepareSource,/for \(const threshold of \[110, 170\]\)/);
+assert.match(photoPrepareSource,/const thresholds = \[110, 170\]/);
+assert.match(photoPrepareSource,/paper-relative-code-only[\s\S]*paper-relative-landscape-code-upper-right/);
+assert.match(photoPrepareSource,/resize\(\{ width: 1600, withoutEnlargement: false \}\)/);
 assert.match(photoPrepareSource,/prioritizedPhotoLayouts/);
 assert.equal(parseWindowsOcrTail('26 卜 355'),355);
 assert.equal(parseWindowsOcrTail('编号: 268-1-363'),363);
