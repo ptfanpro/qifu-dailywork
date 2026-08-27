@@ -2,6 +2,14 @@
   "version": 17,
   "mode": "manual-trigger-fast-path-with-confirmations",
   "timezone": "Asia/Shanghai",
+  "login": {
+    "default": "manual-in-dedicated-edge",
+    "optionalAutoLogin": "windows-current-user-dpapi",
+    "maximumAutomaticAttemptsPerLoginPage": 1,
+    "stopOnCaptchaOrFailure": true,
+    "credentialExcludedFromSettingsLogsGitNasAndMigration": true,
+    "reenterOnNewComputerOrWindowsUser": true
+  },
   "dateModel": {
     "executionTimestamp": "E-in-Asia/Shanghai",
     "photoBusinessDate": "B_photo-explicit-actual-business-date",

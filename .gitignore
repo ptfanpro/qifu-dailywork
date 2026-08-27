@@ -21,6 +21,8 @@ playwright-profile/
 *.cookie*
 *storage-state*.json
 *auth-state*.json
+secure-login.dat
+*credential*.dat
 
 # Business data and generated evidence must never enter source control
 *.log

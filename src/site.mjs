@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { listFilesRecursive, waitForNewPdf, verifyPdf } from './pdf.mjs';
 import { normalizeText } from './quantity.mjs';
@@ -18,6 +18,25 @@ const IMAGE_UPLOAD_URL = 'http://admin.stqifu.com/blessing/mind/toUpload/name';
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const SHARED_EDGE_PORT = 19227;
 const SHARED_EDGE_ENDPOINT = `http://127.0.0.1:${SHARED_EDGE_PORT}`;
+
+export function readEncryptedWindowsCredential(credentialPath, helperPath) {
+  if (!credentialPath || !helperPath || !fs.existsSync(credentialPath) || !fs.existsSync(helperPath)) return null;
+  const result = spawnSync('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', helperPath, '-Path', credentialPath,
+  ], { encoding:'utf8', windowsHide:true, timeout:10000 });
+  if (result.status !== 0) throw new Error('自动登录凭据无法解密；请在高级工具中清除后重新设置。');
+  try {
+    const parsed = JSON.parse(String(result.stdout || '').trim());
+    if (!parsed.usernameBase64 || !parsed.passwordBase64) throw new Error('incomplete');
+    return {
+      username:Buffer.from(String(parsed.usernameBase64),'base64').toString('utf8'),
+      password:Buffer.from(String(parsed.passwordBase64),'base64').toString('utf8'),
+    };
+  } catch {
+    throw new Error('自动登录凭据格式无效；请在高级工具中清除后重新设置。');
+  }
+}
 
 function hashIds(rows) { return crypto.createHash('sha256').update(rows.map((r) => r.id).sort().join('\n')).digest('hex'); }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -119,6 +138,53 @@ export class PrayerSite {
     this.layerMessages = [];
     this.browserRecoveryAttempts = 0;
     this.loginTimeoutMs = Number(options.loginTimeoutMs || 10 * 60 * 1000);
+    this.credentialPath = options.credentialPath || null;
+    this.credentialHelperPath = options.credentialHelperPath || null;
+    this.autoLoginAttempted = false;
+  }
+  async tryStoredLogin() {
+    if (this.autoLoginAttempted || !this.credentialPath || !fs.existsSync(this.credentialPath)) return false;
+    this.autoLoginAttempted = true;
+    const captchaVisible = await this.page.locator('input[name*="captcha" i]:visible, input[name*="verify" i]:visible, input[id*="captcha" i]:visible, input[id*="verify" i]:visible').count().catch(() => 0);
+    if (captchaVisible) throw new Error('登录页面要求验证码，已停止自动登录。请在专用 Edge 手动登录后重试。');
+    let credential = null;
+    try {
+      credential = readEncryptedWindowsCredential(this.credentialPath, this.credentialHelperPath);
+      if (!credential) return false;
+      const password = this.page.locator('input[type="password"]:visible').first();
+      if (!await password.count()) return false;
+      const usernameSelectors = [
+        'input[name="username"]:visible', 'input[name="userName"]:visible',
+        'input[name="account"]:visible', 'input[name="loginName"]:visible',
+        'input[type="email"]:visible', 'input[type="text"]:visible',
+      ];
+      let username = null;
+      for (const selector of usernameSelectors) {
+        const candidate = this.page.locator(selector).first();
+        if (await candidate.count()) { username = candidate; break; }
+      }
+      if (!username) throw new Error('登录页面没有识别到账号输入框，已停止自动登录。');
+      await username.fill(credential.username, { timeout:3000 });
+      await password.fill(credential.password, { timeout:3000 });
+      const submitSelectors = [
+        'button[type="submit"]:visible', 'input[type="submit"]:visible',
+        'button:has-text("登录"):visible', 'input[value="登录"]:visible',
+        '.login-btn:visible', '#loginBtn:visible',
+      ];
+      let submit = null;
+      for (const selector of submitSelectors) {
+        const candidate = this.page.locator(selector).first();
+        if (await candidate.count()) { submit = candidate; break; }
+      }
+      if (!submit) throw new Error('登录页面没有识别到登录按钮，已停止自动登录。');
+      await scheduleSiteClick(submit, { timeoutMs:3000 });
+      this.timing.count('browser_action_count');
+      this.log('已使用 Windows 加密凭据提交登录，正在验证。');
+      return true;
+    } finally {
+      if (credential) { credential.username = ''; credential.password = ''; }
+      credential = null;
+    }
   }
   async connectSharedEdge(timeout = 1500) {
     try {
@@ -243,18 +309,26 @@ export class PrayerSite {
     const deadline = Date.now() + this.loginTimeoutMs;
     let navigationAttempts = 0;
     let loginPromptLogged = false;
+    let autoLoginSubmittedAt = 0;
     while (Date.now() < deadline) {
       try {
         if (!this.browser?.isConnected?.() || !this.page || this.page.isClosed()) {
           await this.recoverClosedBrowser(targetUrl, new Error('Target page, context or browser has been closed'));
         }
         if (await this.page.locator('#startTime, input[value="检索"], #file[type="file"]').count()) { this.log('登录成功。'); await this.cleanupTransientPages(); return; }
-        if (!loginPromptLogged) {
+        const currentUrl = this.page.url();
+        const passwordVisible = await this.page.locator('input[type="password"]').isVisible().catch(() => false);
+        if (passwordVisible && !this.autoLoginAttempted) {
+          const submitted = await this.tryStoredLogin();
+          if (submitted) { autoLoginSubmittedAt = Date.now(); await sleep(750); continue; }
+        }
+        if (passwordVisible && autoLoginSubmittedAt && Date.now() - autoLoginSubmittedAt > 15000) {
+          throw new Error('自动登录未成功。请检查账号密码，或手动处理验证码；程序没有重复尝试。');
+        }
+        if (!loginPromptLogged && (!passwordVisible || !this.credentialPath || !fs.existsSync(this.credentialPath))) {
           this.log('请在 Edge 窗口登录。登录成功后程序会自动继续。');
           loginPromptLogged = true;
         }
-        const currentUrl = this.page.url();
-        const passwordVisible = await this.page.locator('input[type="password"]').isVisible().catch(() => false);
         const authenticatedMarker =
           await this.page.getByText('退出', { exact: true }).count().catch(() => 0) +
           await this.page.getByText('日常管理', { exact: true }).count().catch(() => 0) +

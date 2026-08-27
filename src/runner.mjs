@@ -190,6 +190,8 @@ const appRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // 运行断点、校验凭据、日志和原图备份必须与 NAS 业务目录隔离。
 // 以执行器父目录作为跨版本共享位置，升级到新版本后仍可安全续跑。
 const localStateRoot = path.join(path.dirname(appRoot), '祈福运行数据');
+const credentialPath = path.join(localStateRoot, 'secure-login.dat');
+const credentialHelperPath = path.join(appRoot, 'ui', 'Read-SecureCredential.ps1');
 const workdaysRoot = path.join(localStateRoot, 'workdays');
 fs.mkdirSync(workdaysRoot, { recursive:true });
 if (args.action === 'cleanup-local-state') {
@@ -200,6 +202,7 @@ if (args.action === 'cleanup-local-state') {
 }
 const pdfDate = args['pdf-date']; const photoDate = args['photo-date'];
 const loginTimeoutMs = Number(args['login-timeout-ms'] || 10 * 60 * 1000);
+const siteOptions = { loginTimeoutMs, credentialPath, credentialHelperPath };
 if (!photoDate && ['scan','photo-prepare','photo-scan','photo-upload','photo-scenes'].includes(args.action)) { fail('缺少照片业务日期。'); process.exit(2); }
 if (!pdfDate && ['scan','inspect','export','state-change','renewal-state-change'].includes(args.action)) { fail('缺少 PDF 业务日期。'); process.exit(2); }
 
@@ -469,7 +472,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
       }
       atomic(receiptFile,receipt);
       photoTiming.start('upload');
-      photoSite = new PrayerSite(photoRunDir,photoTiming,log,{loginTimeoutMs});
+      photoSite = new PrayerSite(photoRunDir,photoTiming,log,siteOptions);
       await photoSite.open();
       if (needsOnlineRetryCheck) {
         const alreadyUploaded = await photoSite.queryUploadedOrders(photoDate,{productMode:'all'});
@@ -724,7 +727,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
         sceneSourceEvidence,
       };
       atomic(sceneReceiptFile,sceneReceipt);
-      photoSite = new PrayerSite(photoRunDir,photoTiming,log,{loginTimeoutMs});
+      photoSite = new PrayerSite(photoRunDir,photoTiming,log,siteOptions);
       await photoSite.open();
       photoTiming.start('upload');
       let onlineNotUploadedCount = 0;
@@ -840,7 +843,7 @@ const runDir = path.join(workdaysRoot,pdfDate); fs.mkdirSync(runDir,{recursive:t
 const timing = new Timing(runDir,'pdf-only',pdfDate); let site;
 try {
   timing.start('date-resolution'); log(`PDF业务日期：${pdfDate}，查询区间为当天到次日（不含次日）。`); timing.end();
-  site = new PrayerSite(runDir,timing,log,{loginTimeoutMs}); await site.open();
+  site = new PrayerSite(runDir,timing,log,siteOptions); await site.open();
   if (args.action === 'renewal-state-change') {
     if (args.authorized !== 'yes') throw new Error('续费“代理已处理”缺少本次明确授权。');
     await autoCompleteRenewalState(site,runDir,pdfDate,timing,log);

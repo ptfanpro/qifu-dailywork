@@ -4,6 +4,7 @@ Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'SingleInstance.ps1')
 . (Join-Path $PSScriptRoot 'SettingsStore.ps1')
 . (Join-Path $PSScriptRoot 'Find-Runtime.ps1')
+. (Join-Path $PSScriptRoot 'SecureCredentialStore.ps1')
 
 $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
     [pscustomobject]@{ Name='smoke-test'; Mutex=$null; OwnsLock=$true }
@@ -13,7 +14,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.5.73',
+        '祈福本地执行器 V9.5.74',
         'OK',
         'Information'
     ) | Out-Null
@@ -25,6 +26,7 @@ $appRoot = Split-Path -Parent $PSScriptRoot
 $dataDir = Join-Path $appRoot 'data'
 $script:localStateRoot = Join-Path (Split-Path -Parent $appRoot) '祈福运行数据'
 $settingsPath = Join-Path $script:localStateRoot 'settings.json'
+$script:credentialPath = Join-Path $script:localStateRoot 'secure-login.dat'
 $legacySettingsPath = Join-Path $dataDir 'settings.json'
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 New-Item -ItemType Directory -Force -Path $script:localStateRoot | Out-Null
@@ -45,7 +47,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.5.73（编号与场景识别回归版）'
+$form.Text = '祈福本地执行器 V9.5.74（Windows 加密自动登录版）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -161,6 +163,8 @@ $manualSceneUpload = Add-Button $advancedPanel '照片：只处理场景' 548 8 
 $manualPdfInspect = Add-Button $advancedPanel 'PDF：只检查' 8 49 180 34
 $manualPdfExport = Add-Button $advancedPanel 'PDF：导出并完成' 198 49 195 34
 $manualState = Add-Button $advancedPanel 'PDF：只补状态' 403 49 175 34
+$credentialButton = Add-Button $advancedPanel '设置自动登录' 588 49 120 34
+$clearCredentialButton = Add-Button $advancedPanel '清除凭据' 718 49 105 34
 
 $globalStatus = Add-Label $form '正在初始化本地与线上状态，请稍候……' 20 509 840 30
 $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
@@ -213,6 +217,57 @@ $script:processTimer.Interval = 250
 function Save-Settings {
     Write-PrayerAtomicJson -Path $settingsPath -Value @{
         businessRoot = $rootBox.Text.Trim()
+    }
+}
+function Update-CredentialButtons {
+    $credentialFileExists = Test-Path -LiteralPath $script:credentialPath -PathType Leaf
+    $configured = Test-PrayerCredential -Path $script:credentialPath
+    $credentialButton.Text = if ($configured) { '自动登录：已配置' } elseif ($credentialFileExists) { '凭据需重设' } else { '设置自动登录' }
+    $clearCredentialButton.Enabled = ($credentialFileExists -and -not $script:running)
+}
+function Show-PrayerCredentialDialog {
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = '设置祈福平台自动登录'
+    $dialog.ClientSize = New-Object System.Drawing.Size(430,220)
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.Font = New-Object System.Drawing.Font('Microsoft YaHei UI',10)
+    Add-Label $dialog '账号' 25 25 70 28 | Out-Null
+    $usernameBox = New-Object System.Windows.Forms.TextBox
+    $usernameBox.Location = New-Object System.Drawing.Point(100,22)
+    $usernameBox.Size = New-Object System.Drawing.Size(295,30)
+    $dialog.Controls.Add($usernameBox)
+    Add-Label $dialog '密码' 25 70 70 28 | Out-Null
+    $passwordBox = New-Object System.Windows.Forms.TextBox
+    $passwordBox.Location = New-Object System.Drawing.Point(100,67)
+    $passwordBox.Size = New-Object System.Drawing.Size(295,30)
+    $passwordBox.UseSystemPasswordChar = $true
+    $dialog.Controls.Add($passwordBox)
+    $note = Add-Label $dialog '凭据将由 Windows 当前用户加密，仅本机当前 Windows 用户可解密；不会写入日志、NAS、Git 或迁移包。' 25 112 370 52
+    $note.ForeColor = [System.Drawing.Color]::DimGray
+    $save = Add-Button $dialog '加密保存' 205 170 90 34
+    $cancel = Add-Button $dialog '取消' 305 170 90 34
+    $cancel.Add_Click({ $dialog.DialogResult = 'Cancel'; $dialog.Close() })
+    $save.Add_Click({
+        try {
+            Save-PrayerCredential -Path $script:credentialPath -Username $usernameBox.Text -Password $passwordBox.Text
+            $passwordBox.Clear()
+            $dialog.DialogResult = 'OK'
+            $dialog.Close()
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'无法保存','OK','Warning') | Out-Null
+        }
+    })
+    $dialog.AcceptButton = $save
+    $dialog.CancelButton = $cancel
+    [void]$dialog.ShowDialog($form)
+    $passwordBox.Clear()
+    Update-CredentialButtons
+    if ($dialog.DialogResult -eq 'OK') {
+        $globalStatus.Text = '自动登录凭据已用 Windows 当前用户密钥加密保存。下次遇到登录页会自动登录一次。'
+        $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
     }
 }
 function Validate-Root([bool]$showMessage = $true) {
@@ -378,6 +433,9 @@ function Refresh-UiLog {
             if ($newText -match '请在 Edge 窗口登录') {
                 $globalStatus.Text = '等待平台登录：请在祈福专用 Edge 完成登录，软件会自动继续。'
                 $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
+            } elseif ($newText -match '已使用 Windows 加密凭据提交登录') {
+                $globalStatus.Text = '已安全提交自动登录，正在验证平台登录状态……'
+                $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
             } elseif ($newText -match '登录成功') {
                 $globalStatus.Text = '平台登录成功，正在继续当前业务……'
                 $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
@@ -399,7 +457,8 @@ function Set-Running([bool]$value) {
     $photoRefreshButton.Enabled = -not $value
     $pdfRefreshButton.Enabled = -not $value
     $refreshAllButton.Enabled = -not $value
-    foreach ($button in @($manualPhotoPrepare,$manualPhotoScan,$manualPhotoUpload,$manualSceneUpload,$manualPdfInspect,$manualPdfExport,$manualState)) { $button.Enabled = -not $value }
+    foreach ($button in @($manualPhotoPrepare,$manualPhotoScan,$manualPhotoUpload,$manualSceneUpload,$manualPdfInspect,$manualPdfExport,$manualState,$credentialButton)) { $button.Enabled = -not $value }
+    Update-CredentialButtons
 }
 function Set-PhotoResult([string]$text, [System.Drawing.Color]$color, [int]$progress, [string]$buttonText, [bool]$enabled, [string]$nextAction) {
     $photoStatus.Text = $text
@@ -598,7 +657,10 @@ function Start-Runner([string]$action, [bool]$authorized, [string]$flow, [bool]$
         '--ui-log', ('"' + $script:uiLogPath + '"')
     )
     if ($authorized) { $argsList += @('--authorized','yes') }
-    if ($flow -eq 'initialize') { $argsList += @('--login-timeout-ms','5000') }
+    if ($flow -eq 'initialize') {
+        $initialLoginTimeout = if (Test-PrayerCredential -Path $script:credentialPath) { '20000' } else { '5000' }
+        $argsList += @('--login-timeout-ms',$initialLoginTimeout)
+    }
     $processInfo = New-Object System.Diagnostics.ProcessStartInfo
     $processInfo.FileName = $runtime.Node
     $processInfo.Arguments = ($argsList -join ' ')
@@ -893,6 +955,17 @@ $manualSceneUpload.Add_Click({ Start-Runner 'photo-scenes' $true 'manual' $true 
 $manualPdfInspect.Add_Click({ Start-Runner 'inspect' $false 'manual' $true })
 $manualPdfExport.Add_Click({ Start-Runner 'export' $true 'manual' $true })
 $manualState.Add_Click({ Start-Runner 'state-change' $true 'manual' $true })
+$credentialButton.Add_Click({ if (-not $script:running) { Show-PrayerCredentialDialog } })
+$clearCredentialButton.Add_Click({
+    if ($script:running -or -not (Test-Path -LiteralPath $script:credentialPath -PathType Leaf)) { return }
+    $answer = [System.Windows.Forms.MessageBox]::Show('确定清除本机自动登录凭据吗？清除后需要手动登录或重新设置。','清除自动登录凭据','YesNo','Warning')
+    if ($answer -eq 'Yes') {
+        Remove-PrayerCredential -Path $script:credentialPath
+        Update-CredentialButtons
+        $globalStatus.Text = '本机自动登录凭据已清除。'
+        $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
+    }
+})
 
 $photoDate.Add_ValueChanged({
     if (-not $script:running) {
@@ -915,6 +988,7 @@ $form.Add_FormClosing({
     if (-not $eventArgs.Cancel) { Save-Settings }
 })
 $form.Add_Shown({
+    Update-CredentialButtons
     if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') { $form.Close() }
     else { Start-Initialization 'all' }
 })

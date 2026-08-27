@@ -3,8 +3,10 @@
 $root = Split-Path -Parent $PSScriptRoot
 $singleInstanceHelper = Join-Path $root 'ui\SingleInstance.ps1'
 $settingsHelper = Join-Path $root 'ui\SettingsStore.ps1'
+$credentialHelper = Join-Path $root 'ui\SecureCredentialStore.ps1'
 . $singleInstanceHelper
 . $settingsHelper
+. $credentialHelper
 
 function Assert-True($value, [string]$message) {
     if (-not $value) { throw $message }
@@ -79,6 +81,25 @@ try {
     $saved = Get-Content -LiteralPath $settingsPath -Encoding UTF8 -Raw | ConvertFrom-Json
     Assert-True ($saved.businessRoot -eq 'new') '原子写入后的配置内容错误'
     Assert-True (@(Get-ChildItem -LiteralPath $testRoot -Filter '.settings.json.*.tmp' -File).Count -eq 0) '配置临时文件没有清理'
+
+    $credentialPath = Join-Path $testRoot 'secure-login.dat'
+    try {
+        Save-PrayerCredential -Path $credentialPath -Username 'regression-user' -Password 'regression-password'
+        Assert-True (Test-Path -LiteralPath $credentialPath -PathType Leaf) '加密凭据文件没有建立'
+        $rawCredential = Get-Content -Raw -LiteralPath $credentialPath
+        Assert-True ($rawCredential -notmatch 'regression-user|regression-password') '凭据文件泄漏了账号或密码明文'
+        $roundTrip = Read-PrayerCredential -Path $credentialPath
+        Assert-True ($roundTrip.Username -eq 'regression-user') '加密凭据账号回读错误'
+        Assert-True ($roundTrip.Password -eq 'regression-password') '加密凭据密码回读错误'
+        Remove-PrayerCredential -Path $credentialPath
+        Assert-True (-not (Test-Path -LiteralPath $credentialPath)) '清除凭据后文件仍存在'
+    } catch {
+        if ($_.Exception.Message -match 'user profile loaded|data protection operation was unsuccessful') {
+            Write-Output 'DPAPI round-trip skipped in impersonated test sandbox; elevated desktop test is still required.'
+        } else { throw }
+    } finally {
+        $roundTrip = $null
+    }
 
     'Process safety tests passed'
 } finally {
