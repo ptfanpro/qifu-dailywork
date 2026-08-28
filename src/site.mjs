@@ -136,6 +136,36 @@ export function resolveBlessingUploadCount(messages, expectedCount) {
     numericMessages,
   };
 }
+export function resolveBlessingUploadResponseCount(payload, expectedCount) {
+  let parsed = payload;
+  if (Buffer.isBuffer(parsed)) parsed = parsed.toString('utf8');
+  if (typeof parsed === 'string') {
+    const text = parsed.trim();
+    try { parsed = JSON.parse(text); }
+    catch { parsed = text; }
+  }
+  const candidates = [];
+  const push = (value) => {
+    if (typeof value === 'string' || typeof value === 'number') candidates.push(String(value));
+  };
+  if (parsed && typeof parsed === 'object') {
+    // The current site returns { result: { message: "N" } }. Only inspect
+    // explicitly named receipt fields; never walk arbitrary response numbers
+    // such as order IDs or totals and mistake one of them for this batch.
+    push(parsed.result?.message);
+    push(parsed.result?.uploadedCount);
+    push(parsed.result?.count);
+    push(parsed.data?.result?.message);
+    push(parsed.data?.uploadedCount);
+    push(parsed.data?.count);
+    push(parsed.message);
+    push(parsed.uploadedCount);
+    push(parsed.count);
+  } else {
+    push(parsed);
+  }
+  return resolveBlessingUploadCount(candidates, expectedCount);
+}
 function nextDateToken(date) {
   const [year, month, day] = date.split('-').map(Number);
   const value = new Date(Date.UTC(year, month - 1, day + 1));
@@ -656,7 +686,10 @@ export class PrayerSite {
     const deadline = Date.now() + timeoutMs;
     let handled = 0;
     while (Date.now() < deadline && handled < 2) {
-      const messages = await this.page.locator('.layui-layer-msg:visible, .layui-layer-content:visible').allTextContents().catch(() => []);
+      // innerText deliberately excludes hidden <script> text. The month layer
+      // contains `$('#years').val(...)` inside its visible parent; textContent
+      // used to leak that control script into the upload receipt collector.
+      const messages = await this.page.locator('.layui-layer-msg:visible .layui-layer-content, .layui-layer:visible .layui-layer-content').allInnerTexts().catch(() => []);
       for (const message of messages.map((value) => normalizeText(value)).filter(Boolean)) {
         if (!this.layerMessages.includes(message)) this.layerMessages.push(message);
       }
@@ -1011,6 +1044,21 @@ export class PrayerSite {
     if (!await chooseButton.count()) throw new Error('月份窗口没有识别到确定按钮；未提交上传。');
     try { await chooseButton.waitFor({ state:'visible', timeout:5000 }); }
     catch { throw new Error('月份窗口的确定按钮不可见；未提交上传。'); }
+    // Arm the authoritative AJAX receipt before submitting the month layer.
+    // The site posts the batch to this endpoint and returns
+    // { result: { message: "N" } }. This is more stable than trying to read a
+    // short-lived Layui message after native alerts have already been accepted.
+    const uploadResponsePromise = this.page.waitForResponse((response) => {
+      let pathname = '';
+      try { pathname = new URL(response.url()).pathname; } catch {}
+      return response.request().method() === 'POST' && /\/blessing\/mind\/uploadPic\/name\/?$/i.test(pathname);
+    }, { timeout:65000 }).then(async (response) => {
+      const body = await response.text().catch(() => '');
+      const result = response.ok()
+        ? resolveBlessingUploadResponseCount(body, files.length)
+        : { uploadedCount:undefined, numericMessages:[] };
+      return { ...result, ok:response.ok(), status:response.status() };
+    }).catch((error) => ({ uploadedCount:undefined, numericMessages:[], ok:false, status:0, error }));
     // 这个按钮的处理函数会同步打开下一层确认框。CDP 复用 Edge 时，
     // Playwright 的常规 click 偶尔会一直等待该处理链结束并在 30 秒后超时，
     // 即使 DOM 元素本身已经可用。直接调用元素 click 可立即交还控制权，
@@ -1031,13 +1079,25 @@ export class PrayerSite {
     // 轮询具体结果，避免在确认框已经被全局 dialog 监听器接受时误报“未确认”。
     const resultDeadline = Date.now() + 60000;
     let uploadedCount;
+    let responseReceiptRead = false;
     while (Date.now() < resultDeadline && uploadedCount === undefined) {
-      const resultMessages = await this.page.locator('.layui-layer-msg:visible .layui-layer-content, .layui-layer-msg:visible').allTextContents().catch(() => []);
+      const responseReceipt = await Promise.race([
+        uploadResponsePromise,
+        sleep(100).then(() => null),
+      ]);
+      if (responseReceipt && !responseReceiptRead) {
+        responseReceiptRead = true;
+        uploadedCount = responseReceipt.uploadedCount;
+        if (uploadedCount === files.length) this.log(`已从上传接口回执确认本批 ${uploadedCount} 张。`);
+      }
+      const resultMessages = await this.page.locator('.layui-layer-msg:visible .layui-layer-content').allInnerTexts().catch(() => []);
       for (const message of resultMessages.map((value) => normalizeText(value)).filter(Boolean)) {
         if (!this.layerMessages.includes(message)) this.layerMessages.push(message);
       }
-      const result = resolveBlessingUploadCount([...this.dialogs, ...this.layerMessages], files.length);
-      uploadedCount = result.uploadedCount;
+      if (uploadedCount === undefined) {
+        const result = resolveBlessingUploadCount([...this.dialogs, ...this.layerMessages], files.length);
+        uploadedCount = result.uploadedCount;
+      }
       if (uploadedCount === undefined) await sleep(100);
     }
     if (uploadedCount !== files.length) {

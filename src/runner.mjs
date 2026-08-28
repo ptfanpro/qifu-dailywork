@@ -605,6 +605,8 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
       for (let index=0; index<batches.length; index++) {
         log(`正在上传第 ${index+1}/${batches.length} 批，共 ${batches[index].length} 张。`);
         receipt.currentBatch = index + 1;
+        receipt.currentBatchFiles = batches[index].map((file)=>path.basename(file));
+        receipt.currentBatchStartedAt = new Date().toISOString();
         receipt.stage = 'starting';
         atomic(receiptFile,receipt);
         let result;
@@ -654,6 +656,8 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
         }
         receipt.uploadedCount = manifest.files.blessing.filter((file) => receipt.uploadedFiles[path.basename(file)]?.sha256 === manifest.fileHashes[path.basename(file)]).length;
         receipt.stage = 'batch-verified';
+        receipt.currentBatchFiles = [];
+        receipt.currentBatchCompletedAt = new Date().toISOString();
         atomic(receiptFile,receipt);
       }
       if (receipt.uploadedCount !== manifest.counts.blessing) throw new Error(`上传总数 ${receipt.uploadedCount} 与福单图 ${manifest.counts.blessing} 不一致。`);

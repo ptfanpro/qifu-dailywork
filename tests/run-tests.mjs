@@ -9,7 +9,7 @@ import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
 import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isLikelyScene, isReliableOcrConsensus, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
-import { CAPTCHA_INPUT_SELECTOR, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isTransientAutomationPage, resolveBlessingUploadCount, resolveRenewalTerminalDialog, scheduleSiteClick } from '../src/site.mjs';
+import { CAPTCHA_INPUT_SELECTOR, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isTransientAutomationPage, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
 import { AutomationApiClient, canonicalTokenRequest, createTokenRequest, normalizeAutomationBaseUrl } from '../src/automation-auth.mjs';
 
@@ -106,7 +106,7 @@ const vanishedConfirmCandidate={
 const transientConfirmSite=Object.create(PrayerSite.prototype);
 transientConfirmSite.page={
   locator:(selector)=>selector.includes('layui-layer-msg')
-    ? {allTextContents:async()=>[]}
+    ? {allInnerTexts:async()=>[]}
     : {count:async()=>1,nth:()=>vanishedConfirmCandidate},
 };
 transientConfirmSite.layerMessages=[];
@@ -500,8 +500,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.76/);
-assert.match(uiSource,/编号与场景判定闭环修正版/);
+assert.match(uiSource,/V9\.5\.78/);
+assert.match(uiSource,/上传接口回执闭环版/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);
@@ -595,6 +595,8 @@ assert.match(cleanupSource,/committed-photo-preparation-recovery-window-expired/
 assert.match(cleanupSource,/photoWorkflowCompleted/);
 assert.match(cleanupSource,/path\.basename\(root\) !== '祈福运行数据'/);
 assert.match(runnerSource,/uploadedFiles/);
+assert.match(runnerSource,/receipt\.currentBatchFiles = batches\[index\]\.map/);
+assert.match(runnerSource,/receipt\.currentBatchStartedAt = new Date\(\)\.toISOString\(\)/);
 assert.match(runnerSource,/available-files-complete-waiting-for-supplement/);
 assert.match(runnerSource,/仍待补 .*不阻断现有福单图上传/);
 assert.match(runnerSource,/localMissingSupersededByOnline/);
@@ -626,6 +628,20 @@ assert.deepEqual(resolveBlessingUploadCount(['18','18','18','36',"$('#years').va
   numericMessages:[18,18,18,36],
 });
 assert.equal(resolveBlessingUploadCount(['36','确认要上传吗？'],18).uploadedCount,undefined);
+assert.deepEqual(resolveBlessingUploadResponseCount({result:{message:'10'}},10),{
+  uploadedCount:10,
+  numericMessages:[10],
+});
+assert.deepEqual(resolveBlessingUploadResponseCount('{"result":{"message":"10"}}',10),{
+  uploadedCount:10,
+  numericMessages:[10],
+});
+assert.equal(resolveBlessingUploadResponseCount({result:{message:'36'},orderId:10},10).uploadedCount,undefined);
+assert.equal(resolveBlessingUploadResponseCount("$('#years').val(laydate.now(0,'YYYYMM'));",10).uploadedCount,undefined);
+assert.match(siteSource,/waitForResponse/);
+assert.match(siteSource,/uploadPic\\\/name/);
+assert.match(siteSource,/allInnerTexts/);
+assert.doesNotMatch(siteSource,/layui-layer-msg:visible[^\n]*\.allTextContents/);
 assert.match(siteSource,/const selects = dialog\.locator\('select'\)/);
 assert.match(siteSource,/批量修改成\(\?:代理\|延续\)\?已处理状态/);
 assert.match(siteSource,/既没有已处理终态选项，也没有明确的/);
