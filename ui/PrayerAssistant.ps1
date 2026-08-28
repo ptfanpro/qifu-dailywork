@@ -49,7 +49,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.5.79（机器接口认证接入版）'
+$form.Text = '祈福本地执行器 V9.5.80（机器日清单只读联调版）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -168,7 +168,7 @@ $manualState = Add-Button $advancedPanel 'PDF：只补状态' 403 49 175 34
 $credentialButton = Add-Button $advancedPanel '设置浏览器辅助登录' 8 90 180 34
 $clearCredentialButton = Add-Button $advancedPanel '清除浏览器凭据' 198 90 155 34
 $automationCredentialButton = Add-Button $advancedPanel '配置机器接口' 363 90 175 34
-$automationCheckButton = Add-Button $advancedPanel '检查机器接口' 548 90 145 34
+$automationCheckButton = Add-Button $advancedPanel '检查接口/日清单' 548 90 145 34
 $clearAutomationCredentialButton = Add-Button $advancedPanel '清除接口凭据' 703 90 120 34
 
 $globalStatus = Add-Label $form '正在初始化本地与线上状态，请稍候……' 20 509 840 30
@@ -839,7 +839,7 @@ function Complete-Runner([int]$code) {
     if ($completedFlow -eq 'automation-auth') {
         Update-CredentialButtons
         $globalStatus.Text = if ($code -eq 0) {
-            '机器接口认证通过。当前仅开放身份状态检查，尚未建立后台人员会话；日常业务仍沿用现有浏览器会话。'
+            '机器接口认证与所选照片日期日清单检查通过；未打开登录页，也未触发验证码。当前仍是只读验证，写操作尚未切换。'
         } else {
             '机器接口检查未通过。请查看日志；这不会影响现有浏览器方式处理照片和 PDF。'
         }

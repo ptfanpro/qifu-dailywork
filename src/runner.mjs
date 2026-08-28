@@ -205,7 +205,20 @@ if (args.action === 'automation-auth-check') {
     if (!credential) throw new Error('本机尚未配置接口机器认证。');
     client = new AutomationApiClient(credential);
     const status = await client.status();
-    log(`接口机器认证通过；取得 ${status.scopes.length} 项受限权限，未创建后台人员会话。`);
+    const businessDate = String(args['photo-date'] || '').trim();
+    if (!businessDate) throw new Error('缺少机器接口日清单业务日期。');
+    const plan = await client.dailyPlan(businessDate);
+    const groupCounts = Object.fromEntries(Object.entries(plan.groups).map(([name, group])=>[name, group.count]));
+    const receipt = {
+      schemaVersion:1,businessDate,checkedAt:new Date().toISOString(),
+      canonicalVersion:plan.canonicalVersion,canonicalOrderSetSha256:plan.canonicalOrderSetSha256,
+      totals:plan.totals,groupCounts,
+    };
+    const receiptDir = path.join(workdaysRoot,businessDate,'machine-api');
+    fs.mkdirSync(receiptDir,{recursive:true});
+    atomic(path.join(receiptDir,'daily-plan-check.json'),receipt);
+    log('机器接口认证及日清单检查通过；未创建后台人员会话，也未进入验证码页。');
+    log(`${businessDate} 机器日清单：常规 ${plan.totals.daily} 条，续费待处理 ${plan.totals.renewal} 条；匿名订单哈希 ${plan.canonicalOrderSetSha256.slice(0,12)}…。`);
   } finally {
     client?.clear();
     if (credential) credential.secret = '';

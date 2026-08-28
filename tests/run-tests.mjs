@@ -47,6 +47,54 @@ assert.equal(automationRequests[1].options.headers.Authorization,`Bearer ${autom
 assert.equal(automationRequests.map((item)=>JSON.stringify(item)).join('\n').includes(automationSecret),false);
 automationClient.clear();
 
+const emptyPlanGroup=()=>({count:0,idSetSha256:'0'.repeat(64),items:[]});
+const dailyPlanBody={
+  schemaVersion:'1.0',businessDate:'2026-08-27',timezone:'Asia/Shanghai',dryRun:true,
+  renewalQueueScope:'global-pending-not-date-filtered',canonicalVersion:'daily-plan-id-set-v1',
+  canonicalOrderSetSha256:'1'.repeat(64),
+  totals:{daily:1,renewal:0,all:1},
+  groups:{
+    water:{count:1,idSetSha256:'2'.repeat(64),items:[{
+      orderId:'123',recordType:'blessing',state:'1',operationState:'0',productType:'qifudeng',
+      productCategory:'qifudeng',productName:'供水养净',paperColor:'none',templateId:1,
+      quantity:1,unit:'份',blessingImageUploaded:false,sceneImageUploaded:false,
+    }]},
+    'ordinary-red':emptyPlanGroup(),'ordinary-yellow':emptyPlanGroup(),
+    'tablet-red':emptyPlanGroup(),'tablet-yellow':emptyPlanGroup(),
+    'renewal-red':emptyPlanGroup(),'renewal-yellow':emptyPlanGroup(),
+  },
+};
+const dailyRequests=[];
+const dailyFetch=async(url,options)=>{
+  dailyRequests.push({url:String(url),options});
+  if(String(url).endsWith('/token')) return {ok:true,status:200,json:async()=>({
+    accessToken:automationToken,tokenType:'Bearer',expiresAt:Math.floor(fixedNow/1000)+900,
+    scopes:['automation:status','daily:plan:read'],
+  })};
+  return {ok:true,status:200,json:async()=>structuredClone(dailyPlanBody)};
+};
+const dailyClient=new AutomationApiClient(
+  {baseUrl:'https://automation.example.test',clientId:'prayer-local-v1',secret:automationSecret},
+  {fetchImpl:dailyFetch,now:()=>fixedNow,randomBytes:()=>fixedNonce},
+);
+assert.deepEqual(await dailyClient.dailyPlan('2026-08-27'),dailyPlanBody);
+assert.match(dailyRequests[1].url,/\/internal\/automation\/v1\/daily\/plan\?businessDate=2026-08-27&dryRun=true$/);
+assert.equal(dailyRequests[1].options.headers.Authorization,`Bearer ${automationToken}`);
+await assert.rejects(()=>dailyClient.dailyPlan('2026-02-30'),/日期无效/);
+const limitedClient=new AutomationApiClient(
+  {baseUrl:'https://automation.example.test',clientId:'prayer-local-v1',secret:automationSecret},
+  {fetchImpl:automationFetch,now:()=>fixedNow,randomBytes:()=>fixedNonce},
+);
+await assert.rejects(()=>limitedClient.dailyPlan('2026-08-27'),/缺少权限：daily:plan:read/);
+const mismatchClient=new AutomationApiClient(
+  {baseUrl:'https://automation.example.test',clientId:'prayer-local-v1',secret:automationSecret},
+  {fetchImpl:async(url)=>String(url).endsWith('/token')
+    ? {ok:true,status:200,json:async()=>({accessToken:automationToken,tokenType:'Bearer',expiresAt:Math.floor(fixedNow/1000)+900,scopes:['daily:plan:read']})}
+    : {ok:true,status:200,json:async()=>({...structuredClone(dailyPlanBody),businessDate:'2026-08-26'})},
+   now:()=>fixedNow,randomBytes:()=>fixedNonce},
+);
+await assert.rejects(()=>mismatchClient.dailyPlan('2026-08-27'),/日期或版本不一致/);
+
 const completeLegacyManifest={
   fileSetHash:'legacy-file-set',blessingReady:true,uploadReady:true,batchCompleteReady:true,
   counts:{blessing:15,pdfPages:15,missingBlessing:0,extraBlessing:0},
@@ -501,7 +549,9 @@ assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
 assert.match(uiSource,/V9\.5\.79/);
-assert.match(uiSource,/机器接口认证接入版/);
+assert.match(uiSource,/机器日清单只读联调版/);
+assert.match(uiSource,/检查接口\/日清单/);
+assert.match(runnerSource,/client\.dailyPlan\(businessDate\)/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);

@@ -1,6 +1,6 @@
 {
   "name": "prayer-local-runner-v9",
-  "version": "9.5.79",
+  "version": "9.5.80",
   "private": true,
   "type": "module",
   "description": "祈福每日照片与 PDF 双一键断点续跑执行器",
