@@ -5,7 +5,6 @@ Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'SettingsStore.ps1')
 . (Join-Path $PSScriptRoot 'Find-Runtime.ps1')
 . (Join-Path $PSScriptRoot 'SecureCredentialStore.ps1')
-. (Join-Path $PSScriptRoot 'AutomationCredentialStore.ps1')
 
 $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
     [pscustomobject]@{ Name='smoke-test'; Mutex=$null; OwnsLock=$true }
@@ -15,7 +14,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.5.79',
+        '祈福本地执行器 V9.5.81',
         'OK',
         'Information'
     ) | Out-Null
@@ -28,7 +27,6 @@ $dataDir = Join-Path $appRoot 'data'
 $script:localStateRoot = Join-Path (Split-Path -Parent $appRoot) '祈福运行数据'
 $settingsPath = Join-Path $script:localStateRoot 'settings.json'
 $script:credentialPath = Join-Path $script:localStateRoot 'secure-login.dat'
-$script:automationCredentialPath = Join-Path $script:localStateRoot 'secure-automation.dat'
 $legacySettingsPath = Join-Path $dataDir 'settings.json'
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 New-Item -ItemType Directory -Force -Path $script:localStateRoot | Out-Null
@@ -49,7 +47,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.5.80（机器日清单只读联调版）'
+$form.Text = '祈福本地执行器 V9.5.81（人工验证码登录回退版）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -154,7 +152,7 @@ $advancedToggle = Add-Button $form '展开高级/故障工具 ▼' 600 457 260 3
 
 $advancedPanel = New-Object System.Windows.Forms.Panel
 $advancedPanel.Location = New-Object System.Drawing.Point(20,501)
-$advancedPanel.Size = New-Object System.Drawing.Size(840,134)
+$advancedPanel.Size = New-Object System.Drawing.Size(840,92)
 $advancedPanel.BorderStyle = 'FixedSingle'
 $advancedPanel.Visible = $false
 $form.Controls.Add($advancedPanel)
@@ -165,11 +163,8 @@ $manualSceneUpload = Add-Button $advancedPanel '照片：只处理场景' 548 8 
 $manualPdfInspect = Add-Button $advancedPanel 'PDF：只检查' 8 49 180 34
 $manualPdfExport = Add-Button $advancedPanel 'PDF：导出并完成' 198 49 195 34
 $manualState = Add-Button $advancedPanel 'PDF：只补状态' 403 49 175 34
-$credentialButton = Add-Button $advancedPanel '设置浏览器辅助登录' 8 90 180 34
-$clearCredentialButton = Add-Button $advancedPanel '清除浏览器凭据' 198 90 155 34
-$automationCredentialButton = Add-Button $advancedPanel '配置机器接口' 363 90 175 34
-$automationCheckButton = Add-Button $advancedPanel '检查接口/日清单' 548 90 145 34
-$clearAutomationCredentialButton = Add-Button $advancedPanel '清除接口凭据' 703 90 120 34
+$credentialButton = Add-Button $advancedPanel '设置登录账号' 588 49 120 34
+$clearCredentialButton = Add-Button $advancedPanel '清除登录账号' 718 49 105 34
 
 $globalStatus = Add-Label $form '正在初始化本地与线上状态，请稍候……' 20 509 840 30
 $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
@@ -184,7 +179,7 @@ $form.Controls.Add($logBox)
 
 function Update-ResponsiveLayout {
     $contentWidth = [Math]::Max(840, $form.ClientSize.Width - 40)
-    $logTop = if ($advancedPanel.Visible) { 679 } else { 545 }
+    $logTop = if ($advancedPanel.Visible) { 637 } else { 545 }
     $logHeight = [Math]::Max(100, $form.ClientSize.Height - $logTop - 20)
 
     $rootBox.Width = [Math]::Max(420, $form.ClientSize.Width - 305)
@@ -193,7 +188,7 @@ function Update-ResponsiveLayout {
     foreach ($control in @($photoProgress,$pdfProgress)) { $control.Width = [Math]::Max(500, $contentWidth - 38) }
     $advancedToggle.Left = $form.ClientSize.Width - 280
     $globalStatus.Width = $contentWidth
-    $globalStatus.Top = if ($advancedPanel.Visible) { 643 } else { 509 }
+    $globalStatus.Top = if ($advancedPanel.Visible) { 601 } else { 509 }
     $logBox.Location = New-Object System.Drawing.Point(20,$logTop)
     $logBox.Size = New-Object System.Drawing.Size($contentWidth,$logHeight)
 }
@@ -227,17 +222,12 @@ function Save-Settings {
 function Update-CredentialButtons {
     $credentialFileExists = Test-Path -LiteralPath $script:credentialPath -PathType Leaf
     $configured = Test-PrayerCredential -Path $script:credentialPath
-    $credentialButton.Text = if ($configured) { '浏览器辅助登录：已配置' } elseif ($credentialFileExists) { '浏览器凭据需重设' } else { '设置浏览器辅助登录' }
+    $credentialButton.Text = if ($configured) { '登录账号：已配置' } elseif ($credentialFileExists) { '登录账号需重设' } else { '设置登录账号' }
     $clearCredentialButton.Enabled = ($credentialFileExists -and -not $script:running)
-    $automationFileExists = Test-Path -LiteralPath $script:automationCredentialPath -PathType Leaf
-    $automationConfigured = Test-AutomationCredential -Path $script:automationCredentialPath
-    $automationCredentialButton.Text = if ($automationConfigured) { '机器接口：已配置' } elseif ($automationFileExists) { '接口凭据需重设' } else { '配置机器接口' }
-    $automationCheckButton.Enabled = ($automationConfigured -and -not $script:running)
-    $clearAutomationCredentialButton.Enabled = ($automationFileExists -and -not $script:running)
 }
 function Show-PrayerCredentialDialog {
     $dialog = New-Object System.Windows.Forms.Form
-    $dialog.Text = '设置祈福平台浏览器辅助登录'
+    $dialog.Text = '设置祈福平台登录账号'
     $dialog.ClientSize = New-Object System.Drawing.Size(430,220)
     $dialog.StartPosition = 'CenterParent'
     $dialog.FormBorderStyle = 'FixedDialog'
@@ -276,63 +266,7 @@ function Show-PrayerCredentialDialog {
     $passwordBox.Clear()
     Update-CredentialButtons
     if ($dialog.DialogResult -eq 'OK') {
-        $globalStatus.Text = '浏览器辅助登录凭据已加密保存；无验证码时可自动提交，有验证码时仍由本人输入。'
-        $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
-    }
-}
-function Show-AutomationCredentialDialog {
-    $existing = $null
-    try { $existing = Read-AutomationCredential -Path $script:automationCredentialPath } catch {}
-    $dialog = New-Object System.Windows.Forms.Form
-    $dialog.Text = '配置祈福平台机器接口认证'
-    $dialog.ClientSize = New-Object System.Drawing.Size(520,310)
-    $dialog.StartPosition = 'CenterParent'
-    $dialog.FormBorderStyle = 'FixedDialog'
-    $dialog.MaximizeBox = $false
-    $dialog.MinimizeBox = $false
-    $dialog.Font = New-Object System.Drawing.Font('Microsoft YaHei UI',10)
-    Add-Label $dialog '服务地址' 25 25 90 28 | Out-Null
-    $baseUrlBox = New-Object System.Windows.Forms.TextBox
-    $baseUrlBox.Location = New-Object System.Drawing.Point(120,22)
-    $baseUrlBox.Size = New-Object System.Drawing.Size(365,30)
-    $baseUrlBox.Text = if ($existing) { [string]$existing.BaseUrl } else { 'https://admin.stqifu.com' }
-    $dialog.Controls.Add($baseUrlBox)
-    Add-Label $dialog '客户端编号' 25 70 90 28 | Out-Null
-    $clientIdBox = New-Object System.Windows.Forms.TextBox
-    $clientIdBox.Location = New-Object System.Drawing.Point(120,67)
-    $clientIdBox.Size = New-Object System.Drawing.Size(365,30)
-    $clientIdBox.Text = if ($existing) { [string]$existing.ClientId } else { '' }
-    $dialog.Controls.Add($clientIdBox)
-    Add-Label $dialog '机器密钥' 25 115 90 28 | Out-Null
-    $secretBox = New-Object System.Windows.Forms.TextBox
-    $secretBox.Location = New-Object System.Drawing.Point(120,112)
-    $secretBox.Size = New-Object System.Drawing.Size(365,30)
-    $secretBox.UseSystemPasswordChar = $true
-    $dialog.Controls.Add($secretBox)
-    $note = Add-Label $dialog '机器密钥由平台部署时单独发放。凭据使用 Windows 当前用户 DPAPI 加密，只保存于本机非同步目录。接口认证不创建后台人员会话，也不会绕过验证码。' 25 158 460 82
-    $note.ForeColor = [System.Drawing.Color]::DimGray
-    $save = Add-Button $dialog '加密保存' 295 252 90 34
-    $cancel = Add-Button $dialog '取消' 395 252 90 34
-    $cancel.Add_Click({ $dialog.DialogResult = 'Cancel'; $dialog.Close() })
-    $save.Add_Click({
-        try {
-            $secret = $secretBox.Text
-            if ([string]::IsNullOrEmpty($secret) -and $existing) { $secret = [string]$existing.Secret }
-            Save-AutomationCredential -Path $script:automationCredentialPath -BaseUrl $baseUrlBox.Text.Trim() -ClientId $clientIdBox.Text.Trim() -Secret $secret
-            $secretBox.Clear(); $secret = $null
-            $dialog.DialogResult = 'OK'
-            $dialog.Close()
-        } catch {
-            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'无法保存','OK','Warning') | Out-Null
-        }
-    })
-    $dialog.AcceptButton = $save
-    $dialog.CancelButton = $cancel
-    [void]$dialog.ShowDialog($form)
-    $secretBox.Clear(); $existing = $null
-    Update-CredentialButtons
-    if ($dialog.DialogResult -eq 'OK') {
-        $globalStatus.Text = '机器接口凭据已加密保存。请点击【检查机器接口】验证服务端是否已部署并启用。'
+        $globalStatus.Text = '登录账号已用 Windows 当前用户密钥加密保存；验证码始终由你在 Edge 登录页手动输入。'
         $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
     }
 }
@@ -481,7 +415,6 @@ function Get-ActionLabel([string]$action) {
         'export' { return 'PDF 导出、校验与状态完成' }
         'state-change' { return 'PDF 状态补处理' }
         'renewal-state-change' { return '续费改为代理已处理' }
-        'automation-auth-check' { return '机器接口认证检查' }
         default { return $action }
     }
 }
@@ -527,7 +460,7 @@ function Set-Running([bool]$value) {
     $photoRefreshButton.Enabled = -not $value
     $pdfRefreshButton.Enabled = -not $value
     $refreshAllButton.Enabled = -not $value
-    foreach ($button in @($manualPhotoPrepare,$manualPhotoScan,$manualPhotoUpload,$manualSceneUpload,$manualPdfInspect,$manualPdfExport,$manualState,$credentialButton,$automationCredentialButton,$automationCheckButton)) { $button.Enabled = -not $value }
+    foreach ($button in @($manualPhotoPrepare,$manualPhotoScan,$manualPhotoUpload,$manualSceneUpload,$manualPdfInspect,$manualPdfExport,$manualState,$credentialButton)) { $button.Enabled = -not $value }
     Update-CredentialButtons
 }
 function Set-PhotoResult([string]$text, [System.Drawing.Color]$color, [int]$progress, [string]$buttonText, [bool]$enabled, [string]$nextAction) {
@@ -836,16 +769,6 @@ function Complete-Runner([int]$code) {
     $completedFlow = $script:activeFlow
     Set-Running $false
     Refresh-AllCards
-    if ($completedFlow -eq 'automation-auth') {
-        Update-CredentialButtons
-        $globalStatus.Text = if ($code -eq 0) {
-            '机器接口认证与所选照片日期日清单检查通过；未打开登录页，也未触发验证码。当前仍是只读验证，写操作尚未切换。'
-        } else {
-            '机器接口检查未通过。请查看日志；这不会影响现有浏览器方式处理照片和 PDF。'
-        }
-        $globalStatus.ForeColor = if ($code -eq 0) { [System.Drawing.Color]::DarkGreen } else { [System.Drawing.Color]::DarkOrange }
-        return
-    }
     if ($completedFlow -eq 'initialize') {
         if ($code -ne 0) { $script:initFailures.Add($completedAction) }
         if ($code -eq 0 -and $completedAction -eq 'photo-scan' -and (Test-ShouldAutoResumePhoto)) {
@@ -1036,8 +959,6 @@ $manualPdfInspect.Add_Click({ Start-Runner 'inspect' $false 'manual' $true })
 $manualPdfExport.Add_Click({ Start-Runner 'export' $true 'manual' $true })
 $manualState.Add_Click({ Start-Runner 'state-change' $true 'manual' $true })
 $credentialButton.Add_Click({ if (-not $script:running) { Show-PrayerCredentialDialog } })
-$automationCredentialButton.Add_Click({ if (-not $script:running) { Show-AutomationCredentialDialog } })
-$automationCheckButton.Add_Click({ if (-not $script:running) { Start-Runner 'automation-auth-check' $false 'automation-auth' $true } })
 $clearCredentialButton.Add_Click({
     if ($script:running -or -not (Test-Path -LiteralPath $script:credentialPath -PathType Leaf)) { return }
     $answer = [System.Windows.Forms.MessageBox]::Show('确定清除本机自动登录凭据吗？清除后需要手动登录或重新设置。','清除自动登录凭据','YesNo','Warning')
@@ -1045,16 +966,6 @@ $clearCredentialButton.Add_Click({
         Remove-PrayerCredential -Path $script:credentialPath
         Update-CredentialButtons
         $globalStatus.Text = '本机自动登录凭据已清除。'
-        $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
-    }
-})
-$clearAutomationCredentialButton.Add_Click({
-    if ($script:running -or -not (Test-Path -LiteralPath $script:automationCredentialPath -PathType Leaf)) { return }
-    $answer = [System.Windows.Forms.MessageBox]::Show('确定清除本机机器接口凭据吗？','清除机器接口凭据','YesNo','Warning')
-    if ($answer -eq 'Yes') {
-        Remove-AutomationCredential -Path $script:automationCredentialPath
-        Update-CredentialButtons
-        $globalStatus.Text = '本机机器接口凭据已清除；浏览器辅助登录凭据未受影响。'
         $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
     }
 })
