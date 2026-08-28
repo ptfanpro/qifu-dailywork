@@ -7,7 +7,7 @@ import { calculateQuantities, venueMessage, normalizeText } from '../src/quantit
 import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
-import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, isLikelyScene, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseWindowsOcrTail, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
+import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isLikelyScene, isReliableOcrConsensus, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { CAPTCHA_INPUT_SELECTOR, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isTransientAutomationPage, resolveBlessingUploadCount, resolveRenewalTerminalDialog, scheduleSiteClick } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
@@ -464,8 +464,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.75/);
-assert.match(uiSource,/验证码人工接管修正版/);
+assert.match(uiSource,/V9\.5\.76/);
+assert.match(uiSource,/编号与场景判定闭环修正版/);
 assert.match(uiSource,/WorkingArea/);
 assert.match(uiSource,/Update-ResponsiveLayout/);
 assert.match(uiSource,/等待平台登录：请在祈福专用 Edge 完成登录/);
@@ -634,6 +634,32 @@ const adjacentDuplicatePages=[
 assert.equal(repairSingleAdjacentDuplicatePdfCode(adjacentDuplicatePages),true);
 assert.equal(adjacentDuplicatePages.at(-1).number,495);
 assert.equal(adjacentDuplicatePages.at(-1).codeEvidence,'pdf-adjacent-page-duplicate-repair');
+// 2026-08-27：红纸2/黄纸2整批右上角只读到牌位年份。只在前序编号
+// 完整连续、未识别页全部属于后续纸张批次时，按业务顺序补成唯一尾段。
+const unreadTailPages=[
+  ...Array.from({length:5},(_,index)=>({pdf:'827红纸1.pdf',pageNumber:index+1,rawNumber:543+index,number:543+index})),
+  ...Array.from({length:3},(_,index)=>({pdf:'827红纸2.pdf',pageNumber:index+1,rawNumber:2027,number:null})),
+  ...Array.from({length:2},(_,index)=>({pdf:'827黄纸2.pdf',pageNumber:index+1,rawNumber:2027,number:null})),
+];
+assert.equal(inferTrailingUnreadPdfCodes(unreadTailPages),true);
+assert.deepEqual(unreadTailPages.slice(5).map((page)=>page.number),[548,549,550,551,552]);
+assert.ok(unreadTailPages.slice(5).every((page)=>page.codeEvidence==='contiguous-known-range-and-unread-later-batch-tail'));
+const unsafeMiddleGapPages=unreadTailPages.map((page)=>({...page}));
+unsafeMiddleGapPages[2].number=550;
+unsafeMiddleGapPages.slice(5).forEach((page)=>{page.number=null;});
+assert.equal(inferTrailingUnreadPdfCodes(unsafeMiddleGapPages),false);
+
+// 单个裁框的一次 OCR 命中不足以成为可靠编号；至少需要两个独立裁框一致。
+assert.equal(isReliableOcrConsensus({number:580,votes:1,prefixDistance:0,maxConfidence:92},null,20),false);
+assert.equal(isReliableOcrConsensus({number:580,votes:2,prefixDistance:0,maxConfidence:55},null,20),true);
+assert.equal(isReliableOcrConsensus({number:580,votes:2,prefixDistance:0,maxConfidence:55},{number:569,votes:2,prefixDistance:0,maxConfidence:70},20),false);
+assert.deepEqual(parseLooseWindowsCodeCandidates('26B · 1 · 5g5 1 · 2027','268',new Set([592,593,594,595,596])),[595]);
+assert.deepEqual(parseLooseWindowsCodeCandidates('768 刁 77','268',new Set(Array.from({length:54},(_,index)=>543+index))),[577]);
+// 2026-08-27 实图：Windows OCR 吞掉业务前缀首位，并把 577 拆成“57 7”。
+// 完整三位拼接应优先于把“57”错误补成同批次里的 557。
+assert.deepEqual(parseLooseWindowsCodeCandidates('6R · 57 7','268',new Set(Array.from({length:54},(_,index)=>543+index))),[577]);
+assert.deepEqual(parseLooseWindowsCodeCandidates('77 2027','268',new Set([577])),[]);
+assert.deepEqual(parseLooseWindowsCodeCandidates('768 刁 77','268',new Set([577,677])),[]);
 const twoAnchorPhotos=Array.from({length:8},(_,index)=>({
   reliable:index<2,
   number:index<2?339+index:null,
@@ -680,6 +706,22 @@ const unsafeHighConfidenceZeroOne=duplicatedZeroOnePhotos.map((item)=>({...item,
 unsafeHighConfidenceZeroOne[1].number=503;
 unsafeHighConfidenceZeroOne[1].evidence={method:'ocr',votes:2,maxConfidence:65};
 assert.deepEqual(reconcileDuplicatePhotoNumbers(unsafeHighConfidenceZeroOne,new Set(Array.from({length:14},(_,index)=>503+index)),occupiedZeroOneNumbers),[]);
+// OCR 弱候选若指向已被另一张可靠照片占用的编号，应交给全局一一对应处理，
+// 不得阻断拍摄序列把当前照片归入唯一缺号。
+assert.equal(hasStrongOcrConflict({candidates:[{number:569,votes:2,prefixDistance:0}]},580,new Set([569])),false);
+assert.equal(hasStrongOcrConflict({candidates:[{number:568,votes:2,prefixDistance:0}]},580,new Set([569])),true);
+assert.equal(hasStrongOcrConflict({candidates:[{number:580,votes:1,prefixDistance:0,maxConfidence:29}]},595,new Set([569])),true);
+assert.equal(hasStrongOcrConflict({candidates:[{number:580,votes:1,prefixDistance:0,maxConfidence:9}]},595,new Set([569])),false);
+const occupiedDuplicateSequence=[579,580,581,582,583].map((number,index)=>({
+  file:`occupied-${index}.jpg`,
+  reliable:index!==1,
+  number:index!==1?number:null,
+  candidates:index===1?[{number:569,votes:2,prefixDistance:0,maxConfidence:66}]:[],
+  paperGeometry:{usablePaper:true,rectangularPaper:true,score:.2,boxArea:.3,width:.58,height:.49,fill:.7,top:.5},
+  visualMetrics:{edgeDensity:.12,upperEdgeDensity:.10,uniformity:.42},
+}));
+inferPhotoGapsAroundExistingNumbers(occupiedDuplicateSequence,new Set([579,580,581,582,583]),new Set([569]));
+assert.equal(occupiedDuplicateSequence[1].number,580);
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,score:0.045,width:0.844,top:0.842,height:0.079,boxArea:0.067},visualMetrics:{uniformity:0.288,upperEdgeDensity:0.175,edgeDensity:0.227}}),true);
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,score:0.0812,width:1,top:0.875,height:0.125,boxArea:0.125},visualMetrics:{uniformity:0.294,upperEdgeDensity:0.177,edgeDensity:0.229}}),true);
 // 2026-08-25 真实故障的脱敏结构回归：近景灯阵被金色灯架连通块误判为
@@ -696,6 +738,25 @@ assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:fal
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,rectangularPaper:false,score:0.054023,left:0.121875,top:0.366667,width:0.23125,height:0.3875,right:0.353125,bottom:0.754167,fill:0.602877,boxArea:0.089609},visualMetrics:{edgeDensity:0.102904,upperEdgeDensity:0.085456,uniformity:0.542747}}),true);
 // 同批近景福单即使纸张与右边缘相连、矩形标记失败，也不能被新场景规则误伤。
 assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.520964,left:0.171875,top:0.15,width:0.828125,height:0.704167,right:1,bottom:0.854167,fill:0.893379,boxArea:0.583138},visualMetrics:{edgeDensity:0.114453,upperEdgeDensity:0.089102,uniformity:0.512318}}),false);
+// 2026-08-27 真实批次的匿名视觉回归：两张供灯及一张供水必须仍是场景；
+// 清晰红/黄福单即使纸色连通域接到底边，也不能再被提前当作场景跳过 OCR。
+const august27Scenes=[
+  {paperGeometry:{usablePaper:false,rectangularPaper:false,score:.036276,width:.35625,top:.429167,height:.241667,fill:.421355,boxArea:.086094},visualMetrics:{edgeDensity:.122969,upperEdgeDensity:.086432,uniformity:.495013},sceneMetrics:{darkRatio:.66599}},
+  {paperGeometry:{usablePaper:false,rectangularPaper:false,score:.047318,width:.334375,top:.366667,height:.279167,fill:.506905,boxArea:.093346},visualMetrics:{edgeDensity:.075898,upperEdgeDensity:.068906,uniformity:.568646},sceneMetrics:{darkRatio:.76599}},
+  {paperGeometry:{usablePaper:false,rectangularPaper:false,score:.26112,width:1,top:.625,height:.375,fill:.696319,boxArea:.375,bottom:1},visualMetrics:{edgeDensity:.233516,upperEdgeDensity:.191771,uniformity:.314271},sceneMetrics:{darkRatio:.141979}},
+];
+assert.ok(august27Scenes.every((item)=>isLikelyScene(item)));
+const august27Papers=[
+  {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.227461,width:.834375,top:.504167,height:.495833,fill:.549806,boxArea:.413711,bottom:1},visualMetrics:{edgeDensity:.202188,upperEdgeDensity:.137773,uniformity:.424102},sceneMetrics:{darkRatio:.411875}},
+  {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.223685,width:.89375,top:.5125,height:.4875,fill:.513388,boxArea:.435703,bottom:1},visualMetrics:{edgeDensity:.201172,upperEdgeDensity:.14069,uniformity:.408021},sceneMetrics:{darkRatio:.411406}},
+  {paperGeometry:{usablePaper:false,rectangularPaper:false,score:.229922,width:.9625,top:.191667,height:.808333,fill:.295521,boxArea:.778021,bottom:1},visualMetrics:{edgeDensity:.228385,upperEdgeDensity:.145495,uniformity:.420313},sceneMetrics:{darkRatio:.4025}},
+  {paperGeometry:{usablePaper:false,rectangularPaper:false,score:.202018,width:.759375,top:.191667,height:.8,fill:.33254,boxArea:.6075,bottom:.991667},visualMetrics:{edgeDensity:.216146,upperEdgeDensity:.135482,uniformity:.430495},sceneMetrics:{darkRatio:.426198}},
+  {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.188919,width:.503125,top:.191667,height:.7875,fill:.476815,boxArea:.396211,bottom:.979167},visualMetrics:{edgeDensity:.216602,upperEdgeDensity:.136419,uniformity:.432565},sceneMetrics:{darkRatio:.422552}},
+  {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.189583,width:.646875,top:.5125,height:.479167,fill:.611636,boxArea:.309961,bottom:.991667},visualMetrics:{edgeDensity:.182552,upperEdgeDensity:.120417,uniformity:.441354},sceneMetrics:{darkRatio:.487656}},
+  {paperGeometry:{usablePaper:false,rectangularPaper:false,score:.193086,width:1,top:.55,height:.45,fill:.42908,boxArea:.45,bottom:1},visualMetrics:{edgeDensity:.226107,upperEdgeDensity:.143294,uniformity:.430495},sceneMetrics:{darkRatio:.329167}},
+  {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.167214,width:.76875,top:.529167,height:.470833,fill:.461976,boxArea:.361953,bottom:1},visualMetrics:{edgeDensity:.232982,upperEdgeDensity:.150599,uniformity:.419948},sceneMetrics:{darkRatio:.384063}},
+];
+assert.ok(august27Papers.every((item)=>!isLikelyScene(item)));
 
 // 同批清晰福单的纸色连通域会把木架也包进去，旧版据此误选“竖版”裁框，
 // 并在 y=47.5% 处截到神像底座。新构图的编号实际位于约 y=50%~53%。
@@ -709,7 +770,12 @@ assert.deepEqual(targetedCurrentCodeLayouts(falsePortraitLayouts).map((layout) =
   'current-portrait-code-line',
   'current-temple-code-line',
   'current-outdoor-code-line',
+  'current-temple-code-micro',
 ]);
+const portraitCodeBand=targetedCurrentCodeLayouts(falsePortraitLayouts)[0];
+assert.ok(portraitCodeBand.top <= 0.35 && portraitCodeBand.top + portraitCodeBand.height >= 0.41);
+const templeMicroLayout=targetedCurrentCodeLayouts(falsePortraitLayouts).find((layout)=>layout.name==='current-temple-code-micro');
+assert.ok(templeMicroLayout.top <= 0.50 && templeMicroLayout.top + templeMicroLayout.height >= 0.53);
 // 2026-08-26 真实故障的脱敏构图回归：纸张定位正确，但提速后的固定四框
 // 没覆盖纸内上方编号行。纸张相对窄框必须先于固定相机框参与有限复核。
 const august26Geometry={left:0.171875,top:0.15,width:0.828125,height:0.7041666667,right:1,bottom:0.8541666667,usablePaper:true,rectangularPaper:false};
@@ -763,6 +829,10 @@ const globallyAmbiguousPhotos=[
 assert.deepEqual(resolveAmbiguousPhotosByGlobalSet(globallyAmbiguousPhotos,new Set([466,467,468]),new Set([467])).map((item)=>item.to),[466]);
 const competingAmbiguousPhotos=[0,1].map((index)=>({file:`candidate-${index}.jpg`,reliable:false,number:null,paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},candidates:[{number:466,votes:2,prefixDistance:2.2}]}));
 assert.deepEqual(resolveAmbiguousPhotosByGlobalSet(competingAmbiguousPhotos,new Set([466]),new Set()),[]);
+const exactSingleVotePhoto=[{file:'actual-580.jpg',reliable:false,number:null,paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},candidates:[{number:580,votes:1,prefixDistance:0,maxConfidence:29}]}];
+assert.deepEqual(resolveAmbiguousPhotosByGlobalSet(exactSingleVotePhoto,new Set([579,580]),new Set([579])).map((item)=>item.to),[580]);
+const weakSingleVotePhoto=[{file:'weak-580.jpg',reliable:false,number:null,paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},candidates:[{number:580,votes:1,prefixDistance:0,maxConfidence:9}]}];
+assert.deepEqual(resolveAmbiguousPhotosByGlobalSet(weakSingleVotePhoto,new Set([580]),new Set()),[]);
 assert.match(runnerSource,/schemaVersion:2[\s\S]*stage:'not-started'/);
 assert.match(runnerSource,/needsOnlineRetryCheck[\s\S]*queryUploadedOrders/);
 assert.match(runnerSource,/本地已有 \$\{Object\.keys\(uploadedFiles\)\.length\} 张回执/);
