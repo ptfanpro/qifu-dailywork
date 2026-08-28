@@ -4,9 +4,11 @@ $root = Split-Path -Parent $PSScriptRoot
 $singleInstanceHelper = Join-Path $root 'ui\SingleInstance.ps1'
 $settingsHelper = Join-Path $root 'ui\SettingsStore.ps1'
 $credentialHelper = Join-Path $root 'ui\SecureCredentialStore.ps1'
+$automationCredentialHelper = Join-Path $root 'ui\AutomationCredentialStore.ps1'
 . $singleInstanceHelper
 . $settingsHelper
 . $credentialHelper
+. $automationCredentialHelper
 
 function Assert-True($value, [string]$message) {
     if (-not $value) { throw $message }
@@ -99,6 +101,28 @@ try {
         } else { throw }
     } finally {
         $roundTrip = $null
+    }
+
+    $automationCredentialPath = Join-Path $testRoot 'secure-automation.dat'
+    $automationSecret = 'regression-machine-secret-at-least-32-bytes'
+    try {
+        Save-AutomationCredential -Path $automationCredentialPath -BaseUrl 'https://automation.example.test' -ClientId 'prayer-test' -Secret $automationSecret
+        Assert-True (Test-Path -LiteralPath $automationCredentialPath -PathType Leaf) '机器接口加密凭据文件没有建立'
+        $rawAutomationCredential = Get-Content -Raw -LiteralPath $automationCredentialPath
+        Assert-True ($rawAutomationCredential -notmatch 'automation\.example|prayer-test|regression-machine') '机器接口凭据文件泄漏了明文'
+        $automationRoundTrip = Read-AutomationCredential -Path $automationCredentialPath
+        Assert-True ($automationRoundTrip.BaseUrl -eq 'https://automation.example.test') '机器接口地址回读错误'
+        Assert-True ($automationRoundTrip.ClientId -eq 'prayer-test') '机器接口客户端编号回读错误'
+        Assert-True ($automationRoundTrip.Secret -eq $automationSecret) '机器接口密钥回读错误'
+        Remove-AutomationCredential -Path $automationCredentialPath
+        Assert-True (-not (Test-Path -LiteralPath $automationCredentialPath)) '清除机器接口凭据后文件仍存在'
+    } catch {
+        if ($_.Exception.Message -match 'user profile loaded|data protection operation was unsuccessful|current Windows user') {
+            Write-Output 'Automation DPAPI round-trip skipped in impersonated test sandbox.'
+        } else { throw }
+    } finally {
+        $automationRoundTrip = $null
+        $automationSecret = $null
     }
 
     'Process safety tests passed'
