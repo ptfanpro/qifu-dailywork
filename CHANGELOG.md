@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased - machine authentication foundation
+
+- 新增与后台 `/internal/automation/v1/token`、`/status` 对接的 HMAC-SHA256 机器认证客户端，只取得短期受限令牌，不建立后台人员 Session，也不识别或绕过验证码。
+- 机器密钥使用 Windows 当前用户 DPAPI 单独加密保存，不与后台人员账号密码共用；请求只允许 HTTPS（本机测试除外），密钥不写入命令行、环境变量或日志。
+- 新增 `automation-auth-check` 本地自检动作及固定时间、固定随机数、令牌状态、非 HTTPS 拒绝、明文泄漏和 DPAPI 桌面往返回归。
+- 该基础能力尚未替换现有浏览器业务动作；查询、上传、PDF 和状态接口完成并通过隔离验收前，现行人工验证码登录仍保留。
+
 ## 9.5.76 - 2026-08-28
 
 - 修复照片右上角编号被分隔符、空格或 OCR 字母误拆时无法归属的问题；Windows 本地 OCR 会保留非空原始文本，并仅在当天 PDF 编号集合中重组候选。

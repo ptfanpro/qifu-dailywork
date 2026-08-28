@@ -9,6 +9,7 @@ import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
+import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
 
 function parseArgs(argv) { const out = { action: argv[2] }; for (let i=3;i<argv.length;i+=2) out[argv[i].replace(/^--/,'')] = argv[i+1]; return out; }
 function atomic(file, value) {
@@ -192,8 +193,26 @@ const appRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const localStateRoot = path.join(path.dirname(appRoot), '祈福运行数据');
 const credentialPath = path.join(localStateRoot, 'secure-login.dat');
 const credentialHelperPath = path.join(appRoot, 'ui', 'Read-SecureCredential.ps1');
+const automationCredentialPath = path.join(localStateRoot, 'secure-automation.dat');
+const automationCredentialHelperPath = path.join(appRoot, 'ui', 'Read-AutomationCredential.ps1');
 const workdaysRoot = path.join(localStateRoot, 'workdays');
 fs.mkdirSync(workdaysRoot, { recursive:true });
+if (args.action === 'automation-auth-check') {
+  let credential = null;
+  let client = null;
+  try {
+    credential = readEncryptedAutomationCredential(automationCredentialPath, automationCredentialHelperPath);
+    if (!credential) throw new Error('本机尚未配置接口机器认证。');
+    client = new AutomationApiClient(credential);
+    const status = await client.status();
+    log(`接口机器认证通过；取得 ${status.scopes.length} 项受限权限，未创建后台人员会话。`);
+  } finally {
+    client?.clear();
+    if (credential) credential.secret = '';
+    credential = null;
+  }
+  process.exit(0);
+}
 if (args.action === 'cleanup-local-state') {
   const report = cleanupLocalState(localStateRoot, { force:args['force-cleanup'] === 'yes' });
   if (report.skipped) log('本机空间清理：距离上次清理不足24小时，本次跳过。');

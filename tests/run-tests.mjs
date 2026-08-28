@@ -11,10 +11,41 @@ import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, domina
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { CAPTCHA_INPUT_SELECTOR, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isTransientAutomationPage, resolveBlessingUploadCount, resolveRenewalTerminalDialog, scheduleSiteClick } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
+import { AutomationApiClient, canonicalTokenRequest, createTokenRequest, normalizeAutomationBaseUrl } from '../src/automation-auth.mjs';
 
 const require = createRequire(import.meta.url);
 const { PDFDocument } = require('pdf-lib');
 const sharp = require('sharp');
+
+assert.equal(normalizeAutomationBaseUrl('https://automation.example.test/'),'https://automation.example.test');
+assert.equal(normalizeAutomationBaseUrl('http://127.0.0.1:18080/'),'http://127.0.0.1:18080');
+assert.throws(()=>normalizeAutomationBaseUrl('http://automation.example.test'),/只允许 HTTPS/);
+assert.throws(()=>normalizeAutomationBaseUrl('https://user:pass@automation.example.test'),/不得包含账号/);
+const automationSecret='0123456789abcdef0123456789abcdef';
+const fixedNonce=Buffer.alloc(24,7);
+const fixedNow=Date.parse('2026-08-28T03:04:05.000Z');
+const tokenRequest=createTokenRequest({clientId:'prayer-local-v1',secret:automationSecret},{now:()=>fixedNow,randomBytes:()=>fixedNonce});
+const tokenTimestamp=String(Math.floor(fixedNow/1000));
+const tokenNonce=fixedNonce.toString('base64url');
+const expectedSignature=(await import('node:crypto')).default.createHmac('sha256',automationSecret)
+  .update(canonicalTokenRequest('prayer-local-v1',tokenTimestamp,tokenNonce),'utf8').digest('hex');
+assert.equal(tokenRequest.headers['X-Automation-Timestamp'],tokenTimestamp);
+assert.equal(tokenRequest.headers['X-Automation-Nonce'],tokenNonce);
+assert.equal(tokenRequest.headers['X-Automation-Signature'],expectedSignature);
+const automationRequests=[];
+const automationToken='x'.repeat(96);
+const automationFetch=async(url,options)=>{
+  automationRequests.push({url,options});
+  if(String(url).endsWith('/token')) return {ok:true,status:200,json:async()=>({accessToken:automationToken,tokenType:'Bearer',expiresAt:Math.floor(fixedNow/1000)+900,scopes:['automation:status']})};
+  return {ok:true,status:200,json:async()=>({authenticated:true,clientId:'prayer-local-v1',scopes:['automation:status'],adminSessionCreated:false})};
+};
+const automationClient=new AutomationApiClient({baseUrl:'https://automation.example.test',clientId:'prayer-local-v1',secret:automationSecret},{fetchImpl:automationFetch,now:()=>fixedNow,randomBytes:()=>fixedNonce});
+assert.deepEqual(await automationClient.status(),{authenticated:true,clientId:'prayer-local-v1',scopes:['automation:status']});
+assert.equal(automationRequests.length,2);
+assert.equal(automationRequests[0].url,'https://automation.example.test/internal/automation/v1/token');
+assert.equal(automationRequests[1].options.headers.Authorization,`Bearer ${automationToken}`);
+assert.equal(automationRequests.map((item)=>JSON.stringify(item)).join('\n').includes(automationSecret),false);
+automationClient.clear();
 
 const completeLegacyManifest={
   fileSetHash:'legacy-file-set',blessingReady:true,uploadReady:true,batchCompleteReady:true,
@@ -296,6 +327,7 @@ assert.deepEqual(filledLoginFields,{username:'admin',password:'secret'});
 assert.equal(submittedCaptchaLogin,false);
 fs.rmSync(loginCredentialMarker,{force:true});
 const siteSource=fs.readFileSync(new URL('../src/site.mjs',import.meta.url),'utf8');
+const runnerSource=fs.readFileSync(new URL('../src/runner.mjs',import.meta.url),'utf8');
 assert.match(siteSource,/始终查询完整的“福单已上传 \+ 场景图未上传”集合/);
 assert.doesNotMatch(siteSource,/queryUploadedOrders\(date, \{ productMode: mode === 'water' \? 'water' : 'all', sceneStatus: '未上传' \}\)/);
 assert.match(siteSource,/connectOverCDP/);
@@ -317,6 +349,10 @@ assert.match(siteSource,/连续3次没有生效/);
 assert.match(siteSource,/queryDailyTablet[\s\S]*await this\.queryLamp\(date\)/);
 assert.doesNotMatch(siteSource,/launchPersistentContext/);
 assert.doesNotMatch(siteSource,/browser-profile-backup/);
+assert.match(runnerSource,/secure-automation\.dat/);
+assert.match(runnerSource,/args\.action === 'automation-auth-check'/);
+assert.match(runnerSource,/未创建后台人员会话/);
+assert.doesNotMatch(runnerSource,/--automation-secret|process\.env\.(?:PRAYER_)?AUTOMATION_SECRET/);
 
 // Windows 上目标 JSON 已存在时仍应能连续更新，不能让计时日志中断业务流程。
 const timingDir=path.join(dir,'timing');
@@ -544,7 +580,6 @@ assert.doesNotMatch(siteSource,/if \(!confirmed\) throw new Error\('没有识别
 assert.match(siteSource,/scheduleSiteClick\(camera\)/);
 assert.match(siteSource,/const monthText = `\$\{year\}\$\{String\(month\)\.padStart\(2, '0'\)\}`/);
 assert.doesNotMatch(siteSource,/const monthText = `\$\{year\}\//);
-const runnerSource=fs.readFileSync(new URL('../src/runner.mjs',import.meta.url),'utf8');
 assert.match(runnerSource,/manual-online-closure-reconciled/);
 assert.match(runnerSource,/resolveHistoricalPhotoClosureEvidence/);
 assert.match(runnerSource,/当前福单已上传、福单未上传、供灯待祈福和牌位待祈福均为 0/);
