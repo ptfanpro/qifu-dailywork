@@ -18,6 +18,19 @@ const IMAGE_UPLOAD_URL = 'http://admin.stqifu.com/blessing/mind/toUpload/name';
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const SHARED_EDGE_PORT = 19227;
 const SHARED_EDGE_ENDPOINT = `http://127.0.0.1:${SHARED_EDGE_PORT}`;
+export const CAPTCHA_INPUT_SELECTOR = [
+  '#code:visible',
+  'input[placeholder*="验证码"]:visible',
+  'input[aria-label*="验证码"]:visible',
+  'input[name*="captcha" i]:visible',
+  'input[name*="verify" i]:visible',
+  'input[id*="captcha" i]:visible',
+  'input[id*="verify" i]:visible',
+].join(', ');
+
+export function isCaptchaInputDescriptor({ id = '', name = '', placeholder = '', ariaLabel = '' } = {}) {
+  return String(id).toLowerCase() === 'code' || /captcha|verify|验证码/i.test([id, name, placeholder, ariaLabel].join(' '));
+}
 
 export function readEncryptedWindowsCredential(credentialPath, helperPath) {
   if (!credentialPath || !helperPath || !fs.existsSync(credentialPath) || !fs.existsSync(helperPath)) return null;
@@ -140,20 +153,20 @@ export class PrayerSite {
     this.loginTimeoutMs = Number(options.loginTimeoutMs || 10 * 60 * 1000);
     this.credentialPath = options.credentialPath || null;
     this.credentialHelperPath = options.credentialHelperPath || null;
+    this.credentialReader = options.credentialReader || readEncryptedWindowsCredential;
     this.autoLoginAttempted = false;
   }
   async tryStoredLogin() {
     if (this.autoLoginAttempted || !this.credentialPath || !fs.existsSync(this.credentialPath)) return false;
     this.autoLoginAttempted = true;
-    const captchaVisible = await this.page.locator('input[name*="captcha" i]:visible, input[name*="verify" i]:visible, input[id*="captcha" i]:visible, input[id*="verify" i]:visible').count().catch(() => 0);
-    if (captchaVisible) throw new Error('登录页面要求验证码，已停止自动登录。请在专用 Edge 手动登录后重试。');
     let credential = null;
     try {
-      credential = readEncryptedWindowsCredential(this.credentialPath, this.credentialHelperPath);
+      credential = this.credentialReader(this.credentialPath, this.credentialHelperPath);
       if (!credential) return false;
       const password = this.page.locator('input[type="password"]:visible').first();
       if (!await password.count()) return false;
       const usernameSelectors = [
+        '#loginName:visible',
         'input[name="username"]:visible', 'input[name="userName"]:visible',
         'input[name="account"]:visible', 'input[name="loginName"]:visible',
         'input[type="email"]:visible', 'input[type="text"]:visible',
@@ -166,6 +179,11 @@ export class PrayerSite {
       if (!username) throw new Error('登录页面没有识别到账号输入框，已停止自动登录。');
       await username.fill(credential.username, { timeout:3000 });
       await password.fill(credential.password, { timeout:3000 });
+      const captchaVisible = await this.page.locator(CAPTCHA_INPUT_SELECTOR).count().catch(() => 0);
+      if (captchaVisible) {
+        this.log('账号和密码已从 Windows 加密凭据安全填入。请在 Edge 输入验证码并点击登录，成功后程序会自动继续。');
+        return 'captcha-required';
+      }
       const submitSelectors = [
         'button[type="submit"]:visible', 'input[type="submit"]:visible',
         'button:has-text("登录"):visible', 'input[value="登录"]:visible',
@@ -180,7 +198,7 @@ export class PrayerSite {
       await scheduleSiteClick(submit, { timeoutMs:3000 });
       this.timing.count('browser_action_count');
       this.log('已使用 Windows 加密凭据提交登录，正在验证。');
-      return true;
+      return 'submitted';
     } finally {
       if (credential) { credential.username = ''; credential.password = ''; }
       credential = null;
@@ -319,8 +337,9 @@ export class PrayerSite {
         const currentUrl = this.page.url();
         const passwordVisible = await this.page.locator('input[type="password"]').isVisible().catch(() => false);
         if (passwordVisible && !this.autoLoginAttempted) {
-          const submitted = await this.tryStoredLogin();
-          if (submitted) { autoLoginSubmittedAt = Date.now(); await sleep(750); continue; }
+          const loginMode = await this.tryStoredLogin();
+          if (loginMode === 'submitted') { autoLoginSubmittedAt = Date.now(); await sleep(750); continue; }
+          if (loginMode === 'captcha-required') { loginPromptLogged = true; await sleep(500); continue; }
         }
         if (passwordVisible && autoLoginSubmittedAt && Date.now() - autoLoginSubmittedAt > 15000) {
           throw new Error('自动登录未成功。请检查账号密码，或手动处理验证码；程序没有重复尝试。');

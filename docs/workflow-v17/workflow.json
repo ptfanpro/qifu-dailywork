@@ -6,7 +6,10 @@
     "default": "manual-in-dedicated-edge",
     "optionalAutoLogin": "windows-current-user-dpapi",
     "maximumAutomaticAttemptsPerLoginPage": 1,
-    "stopOnCaptchaOrFailure": true,
+    "captcha": "manual-user-entry-after-secure-account-password-prefill",
+    "neverRecognizeFillOrBypassCaptcha": true,
+    "resumeAutomaticallyAfterManualCaptchaLogin": true,
+    "stopOnCredentialFailureOrUnknownLoginStructure": true,
     "credentialExcludedFromSettingsLogsGitNasAndMigration": true,
     "reenterOnNewComputerOrWindowsUser": true
   },
@@ -287,8 +290,8 @@
     "safeRequest": "reload-main-or-read-only-page",
     "neverRefreshUnsavedForm": true,
     "stopAtTaskPauseOrCompletion": true,
-    "onLogout": "stop-and-require-user-login",
-    "storeCredentials": false
+    "onLogout": "manual-login-or-dpapi-prefill-with-manual-captcha-handoff",
+    "storeBrowserCredentials": false
   },
   "quantityAccounting": {
     "runAfterPdfExport": true,

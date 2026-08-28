@@ -14,7 +14,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.5.74',
+        '祈福本地执行器 V9.5.75',
         'OK',
         'Information'
     ) | Out-Null
@@ -47,7 +47,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.5.74（Windows 加密自动登录版）'
+$form.Text = '祈福本地执行器 V9.5.75（验证码人工接管修正版）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -433,6 +433,9 @@ function Refresh-UiLog {
             if ($newText -match '请在 Edge 窗口登录') {
                 $globalStatus.Text = '等待平台登录：请在祈福专用 Edge 完成登录，软件会自动继续。'
                 $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
+            } elseif ($newText -match '账号和密码已从 Windows 加密凭据安全填入') {
+                $globalStatus.Text = '账号密码已安全填入：请在 Edge 输入验证码并点击登录，软件会自动继续。'
+                $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
             } elseif ($newText -match '已使用 Windows 加密凭据提交登录') {
                 $globalStatus.Text = '已安全提交自动登录，正在验证平台登录状态……'
                 $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
@@ -658,7 +661,7 @@ function Start-Runner([string]$action, [bool]$authorized, [string]$flow, [bool]$
     )
     if ($authorized) { $argsList += @('--authorized','yes') }
     if ($flow -eq 'initialize') {
-        $initialLoginTimeout = if (Test-PrayerCredential -Path $script:credentialPath) { '20000' } else { '5000' }
+        $initialLoginTimeout = if (Test-PrayerCredential -Path $script:credentialPath) { '600000' } else { '5000' }
         $argsList += @('--login-timeout-ms',$initialLoginTimeout)
     }
     $processInfo = New-Object System.Diagnostics.ProcessStartInfo
