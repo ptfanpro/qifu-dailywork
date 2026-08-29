@@ -43,6 +43,9 @@ const OCR_LAYOUTS = [
 // 四个小框未命中时才进入动态纸张布局和有限兜底。
 const CURRENT_CAMERA_CODE_LAYOUTS = {
   temple: [
+    // 2026-08-28 同一台相机出现两个新的稳定高度。供灯福单编号位于
+    // y=41%~45%，供水福单位于 y=56%~59%；纸色与木架、神像相连时，
+    // 动态纸框会从画面顶部一直延伸到底部，不能再由它推算编号位置。
     // 2026-08-25 起的新一批 4:3 原图把纸张整体下移，编号稳定落在
     // y=50%~53%。旧 top=47.5% 会只截到神像底座，清晰编号也会全部漏掉。
     { name: 'current-temple-code-line', left: 0.64, top: 0.49, width: 0.14, height: 0.055 },
@@ -50,6 +53,12 @@ const CURRENT_CAMERA_CODE_LAYOUTS = {
     // 偏移，再用这个微型框隔离下方装饰线；Windows OCR 对原尺寸彩色微型框
     // 明显优于放大后的整块纸面。
     { name: 'current-temple-code-micro', left: 0.65, top: 0.495, width: 0.12, height: 0.040 },
+    // 微型滑动带只保留编号本身，避开紧邻的花边。两种高度分别覆盖同批
+    // 供灯福单和三张略有上下位移的供水福单。
+    { name: 'current-temple-upper-code-line', left: 0.61, top: 0.405, width: 0.15, height: 0.025 },
+    { name: 'current-temple-upper-code-line-shifted', left: 0.61, top: 0.415, width: 0.15, height: 0.025 },
+    { name: 'current-temple-lower-code-line', left: 0.59, top: 0.570, width: 0.15, height: 0.025 },
+    { name: 'current-temple-lower-code-line-shifted', left: 0.59, top: 0.585, width: 0.15, height: 0.025 },
     { name: 'current-temple-code-wide', left: 0.54, top: 0.47, width: 0.36, height: 0.16, sparse: true },
   ],
   outdoor: [
@@ -117,6 +126,17 @@ export function targetedCurrentCodeLayouts(layouts) {
     const layout = (layouts || []).find((item) => item.name === layoutName);
     if (layout && selected.length < 2) selected.push(layout);
   }
+  // 新批次的上下两条严格编号带必须始终参与有限复核。它们都只覆盖右侧
+  // 短编码，不读取正文；即使纸张定位把构图误判成 portrait，也能回到真实
+  // 阻断位置，而不是继续围绕错误纸框重复 OCR。纸张相对框若可信仍保留
+  // 原有最高优先级，避免改变已经稳定的历史批次。
+  for (const layoutName of [
+    'current-temple-upper-code-line', 'current-temple-upper-code-line-shifted',
+    'current-temple-lower-code-line', 'current-temple-lower-code-line-shifted',
+  ]) {
+    const layout = (layouts || []).find((item) => item.name === layoutName);
+    if (layout && !selected.some((item) => item.name === layout.name)) selected.push(layout);
+  }
   for (const layout of layouts || []) {
     const match = /^current-(temple|outdoor|portrait)-code-line$/.exec(layout.name);
     if (!match || seenModes.has(match[1])) continue;
@@ -131,7 +151,7 @@ export function targetedCurrentCodeLayouts(layouts) {
   const templeMicro = (layouts || []).find((layout) => layout.name === 'current-temple-code-micro')
     || CURRENT_CAMERA_CODE_LAYOUTS.temple.find((layout) => layout.name === 'current-temple-code-micro');
   if (templeMicro && !selected.some((layout) => layout.name === templeMicro.name)) selected.push(templeMicro);
-  return selected.slice(0, 6);
+  return selected.slice(0, 8);
 }
 
 // PDF 模板既有横版福单，也有竖版牌位。竖版右上角编号的位置会随模板宽度
@@ -959,6 +979,33 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
         .toFile(windowsDiagnostic);
       windowsFallbackFiles.push(windowsDiagnostic);
     }
+    // 8 月 28 日微型编号带在红通道自然对比下清晰可读；旧阈值 65–85 会
+    // 把细笔画和 0/1/2 的内孔一起压没。先保留一份未二值化红通道作为
+    // 独立证据，再由下方多阈值复核，仍需至少两票同号才能自动落号。
+    const currentMicroBand = /^current-temple-(?:upper|lower)-code-line/.test(landscapeCodeLayout.name);
+    if (currentMicroBand) {
+      for (const height of [300, 420]) {
+        const redNaturalDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-focused-red-natural-${height}.png`);
+        await sharpFile(file)
+          .rotate()
+          .extract(extract)
+          .resize({ height, withoutEnlargement: false })
+          .extractChannel(0)
+          .normalize()
+          .sharpen({ sigma: 0.7 })
+          .png()
+          .toFile(redNaturalDiagnostic);
+        const redNaturalResult = await worker.recognize(redNaturalDiagnostic);
+        const redNaturalParsed = parseOcrCandidates(redNaturalResult.data.text, expectedPrefix, expectedNumbers)
+          .filter((item) => item.prefixDistance <= 0.1);
+        for (const item of redNaturalParsed) focusedObservations.push({
+          ...item,
+          confidence: Number(redNaturalResult.data.confidence || 0),
+          layout: landscapeCodeLayout.name,
+          variant: `focused-red-natural-${height}`,
+        });
+      }
+    }
     // 红纸在普通灰度中本身偏暗，会与黑色编号一起被阈值压成整块黑色。
     // 红通道能把红纸背景抬亮而保留黑字；黄纸/低饱和照片则继续由灰度通道
     // 负责。两路仍各跑两个阈值，最终必须形成同号共识，不能单次猜号。
@@ -966,7 +1013,8 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
       // 木架和高光会拉高整幅裁图的动态范围，红纸主体归一化后通常落在
       // 50~100。另有局部阴影覆盖编号的照片，使用 CLAHE 局部均衡后再以
       // 中阈值识别，避免把整片纸纹放大成噪声。
-      const thresholds = channel === 'clahe' ? [105, 125, 145]
+      const thresholds = channel === 'red' && currentMicroBand ? [90, 110, 130, 150]
+        : channel === 'clahe' ? [105, 125, 145]
         : channel === 'red' && landscapeCodeLayout.name === 'current-temple-code-line' ? [85, 105, 125]
           : [65, 75, 85];
       for (const threshold of thresholds) {
@@ -1128,12 +1176,13 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     // 只保留按实测有效性排序的 6 个严格编号裁框。
     const windowsPriority = (fileName) => {
       const name = path.basename(fileName);
-      if (/current-temple-code-micro-windows-color/.test(name)) return 0;
-      if (/current-portrait-code-line-windows-color/.test(name)) return 1;
-      if (/current-temple-code-line-windows-color/.test(name)) return 2;
-      if (/windows-color/.test(name)) return 3;
-      if (/windows-red/.test(name)) return 4;
-      return 5;
+      if (/current-temple-(?:upper|lower)-code-line-windows-color/.test(name)) return 0;
+      if (/current-temple-code-micro-windows-color/.test(name)) return 1;
+      if (/current-portrait-code-line-windows-color/.test(name)) return 2;
+      if (/current-temple-code-line-windows-color/.test(name)) return 3;
+      if (/windows-color/.test(name)) return 4;
+      if (/windows-red/.test(name)) return 5;
+      return 6;
     };
     const orderedWindowsFiles = [...new Set(windowsFallbackFiles)]
       .sort((left, right) => windowsPriority(left) - windowsPriority(right))
@@ -1579,6 +1628,24 @@ async function photoShapeFingerprints(item) {
     const vector = await localShapeFingerprint(sharpFile(item.file).rotate().extract(extract));
     if (vector) result.push({ name, vector });
   }
+  // 当前 4:3 相机有两个稳定纸面区域。纸张颜色与木架或神像连通时，动态
+  // geometry 会几乎覆盖整幅画面；继续缩放这个错误框不会得到可比指纹。
+  // 固定区域只用于本地 PDF 版式复核，最终仍需相似度、次优差距和一页一图
+  // 三重约束，不会单凭相机位置落号。
+  const aspect = Number(metadata.width || 0) / Math.max(1, Number(metadata.height || 0));
+  if (aspect >= 1.20 && aspect <= 1.50) {
+    const cameraPaperLayouts = [
+      ['camera-water-board', { left: 0.285, top: 0.505, width: 0.48, height: 0.485 }],
+      ['camera-water-board-tight', { left: 0.30, top: 0.525, width: 0.45, height: 0.455 }],
+      ['camera-lamp-board', { left: 0.19, top: 0.36, width: 0.59, height: 0.54 }],
+      ['camera-lamp-paper', { left: 0.21, top: 0.40, width: 0.55, height: 0.46 }],
+    ];
+    for (const [name, layout] of cameraPaperLayouts) {
+      const extract = cropFromRatios(metadata, layout);
+      const vector = await localShapeFingerprint(sharpFile(item.file).rotate().extract(extract));
+      if (vector) result.push({ name, vector });
+    }
+  }
   return result;
 }
 
@@ -1597,10 +1664,13 @@ export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = nu
     const variants = await photoShapeFingerprints(item);
     if (!variants.length) continue;
     const paperColor = await dominantPaperColor(item.file,item.paperGeometry);
-    const sameColorPages = paperColor === 'red' ? indexedPages.filter((page)=>/红纸/.test(page.pdfName || ''))
+    // 供水福单也使用红纸，但文件名是“供水”而非“红纸”；必须进入同一
+    // 候选集合，否则 599–601 会被错误排除，只剩 602 红纸页参与比较。
+    const sameColorPages = paperColor === 'red' ? indexedPages.filter((page)=>/(?:红纸|供水)/.test(page.pdfName || ''))
       : paperColor === 'yellow' ? indexedPages.filter((page)=>/黄纸/.test(page.pdfName || '')) : [];
+    const sameOrientationPages = indexedPages.filter((page)=>page.portrait === (item.paperGeometry.height > item.paperGeometry.width * 1.25));
     const candidatePages = sameColorPages.length ? sameColorPages
-      : indexedPages.filter((page)=>page.portrait === (item.paperGeometry.height > item.paperGeometry.width * 1.25));
+      : sameOrientationPages.length ? sameOrientationPages : indexedPages;
     const scores = candidatePages
       .map((page) => {
         const variantScores = variants.map((variant) => ({ name: variant.name, score: localShapeSimilarity(variant.vector, page._localShapeFingerprint) }))
@@ -1895,6 +1965,9 @@ async function sceneVisualScore(file) {
 export function classifySceneVisualScore(item) {
   if (item.darkRatio <= 0.18 && item.luminance >= 110) return 'scene-water';
   if (item.darkRatio >= 0.32 && item.warmBrightRatio >= 0.10) return 'scene-lamp';
+  // 远一点的灯阵曝光更低，亮焰面积会明显缩小；暗像素、低平均亮度和仍然
+  // 可见的暖色高光三项同时成立时，依然是单图可确认的供灯场景。
+  if (item.darkRatio >= 0.35 && item.luminance <= 95 && item.warmBrightRatio >= 0.055) return 'scene-lamp';
   return null;
 }
 
@@ -1998,7 +2071,15 @@ export function isLikelyScene(item) {
     && geometry.width >= 0.96
     && geometry.height >= 0.60
     && geometry.boxArea >= 0.60
-    && geometry.fill >= 0.60;
+    && geometry.fill >= 0.58;
+  // 暗场灯阵的金色台阶可能被纸色检测标成“可用纸张”。真实福单虽然也会
+  // 较暗，但不会同时满足窄于 78% 画幅、低上半部边缘和 5.5% 以上暖色灯焰。
+  const dimLampSceneStructure = geometry.rectangularPaper === false
+    && geometry.width <= 0.78
+    && Number(scene.darkRatio || 0) >= 0.35
+    && Number(scene.luminance || 255) <= 95
+    && Number(scene.warmBrightRatio || 0) >= 0.055
+    && Number(metrics.upperEdgeDensity || 1) <= 0.09;
   // 供水场景中，画面下半部的水碗、供桌和远处红纸可能连成一个宽色块。
   // 它从画面中部延伸到底边，但高度不到半幅、没有矩形纸边；真实近景福单
   // 的纸张通常从画面上部开始且高度超过半幅。旧版把这种色块当成福单，
@@ -2021,7 +2102,7 @@ export function isLikelyScene(item) {
     && metrics.upperEdgeDensity <= 0.10
     && metrics.edgeDensity <= 0.13;
   // 灯阵或供水全景会在画面底部形成横跨全宽的红/黄连通块；它不是纸张。
-  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene
+  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure) return true;
   // 纸张偶尔与画面右边缘相接，严格矩形条件会失败；足够大的连续红/黄纸色块仍应判为纸张。
   if (geometry.rectangularPaper || (geometry.score >= 0.085
@@ -2035,7 +2116,7 @@ export function isLikelyScene(item) {
     && metrics.uniformity > 0.47
     && metrics.upperEdgeDensity < 0.08
     && metrics.edgeDensity < 0.16;
-  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene
+  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure || visualScene);
 }
 

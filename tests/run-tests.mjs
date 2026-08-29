@@ -178,6 +178,17 @@ assert.equal(localShapeResult.status,'completed');
 assert.equal(localShapeResult.resolved,1);
 assert.equal(shapeItems[0].number,401);
 assert.equal(shapeItems[0].evidence.method,'local-pdf-page-shape-fingerprint');
+// 2026-08-28 构图回归：红纸与木架/神像连色后，检测框几乎覆盖整幅照片，
+// 但实际福单仍位于稳定的下半幅相机区域。PDF 指纹必须同时尝试该固定纸面
+// 裁框，并在错误几何把横版误报成竖版时回退全部未认领 PDF 页面。
+const shiftedShapePhoto=path.join(localShapeRoot,'shifted-photo.jpg');
+const shiftedPage=await sharp(shapePageOne).resize(576,432,{fit:'fill'}).png().toBuffer();
+await sharp({create:{width:1200,height:900,channels:3,background:'#8c6a3e'}})
+  .composite([{input:shiftedPage,left:342,top:455}]).jpeg({quality:94}).toFile(shiftedShapePhoto);
+const shiftedShapeItems=[{file:shiftedShapePhoto,reliable:false,number:null,candidates:[],visualMetrics:{},paperGeometry:{left:.26,top:.01,width:.61,height:.98,right:.87,bottom:.99,score:.3,fill:.5,boxArea:.60,usablePaper:true,rectangularPaper:false}}];
+const shiftedShapeResult=await matchPdfPagesLocally(shiftedShapeItems,shapePages);
+assert.equal(shiftedShapeResult.resolved,1);
+assert.equal(shiftedShapeItems[0].number,401);
 const claimedShapeItems=[{file:shapePhoto,reliable:false,number:null,candidates:[],visualMetrics:{},paperGeometry:{left:0.1,top:140/900,width:0.8,height:640/900,right:0.9,bottom:(140+640)/900,score:0.5,fill:0.95,boxArea:0.56,rectangularPaper:true}}];
 const claimedShapeResult=await matchPdfPagesLocally(claimedShapeItems,shapePages,null,new Set([402]));
 assert.equal(claimedShapeResult.resolved,1);
@@ -548,8 +559,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.81/);
-assert.match(uiSource,/人工验证码登录回退版/);
+assert.match(uiSource,/V9\.5\.82/);
+assert.match(uiSource,/微型编号带与场景识别修正版/);
 assert.doesNotMatch(uiSource,/配置机器接口|检查接口\/日清单|清除接口凭据/);
 assert.match(runnerSource,/client\.dailyPlan\(businessDate\)/);
 assert.match(uiSource,/WorkingArea/);
@@ -850,6 +861,14 @@ const august27Scenes=[
   {paperGeometry:{usablePaper:false,rectangularPaper:false,score:.26112,width:1,top:.625,height:.375,fill:.696319,boxArea:.375,bottom:1},visualMetrics:{edgeDensity:.233516,upperEdgeDensity:.191771,uniformity:.314271},sceneMetrics:{darkRatio:.141979}},
 ];
 assert.ok(august27Scenes.every((item)=>isLikelyScene(item)));
+// 2026-08-28 两张未分类场景的匿名指标：暗场灯阵被金色台阶误成“可用纸张”，
+// 白天供水台阶的黄色连通域填充率只比旧阈值低 0.08%。两者都应在 OCR 前
+// 进入场景分类，同时不能放宽到下方的真实福单集合。
+const august28Scenes=[
+  {paperGeometry:{left:0,top:.491667,width:.7125,height:.508333,right:.7125,bottom:1,score:.240521,fill:.664078,boxArea:.362188,rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.150417,upperEdgeDensity:.078281,uniformity:.475247},sceneMetrics:{luminance:85.5666,warmBrightRatio:.066823,darkRatio:.375833}},
+  {paperGeometry:{left:0,top:.3,width:1,height:.7,right:1,bottom:1,score:.419453,fill:.599219,boxArea:.7,rectangularPaper:false,usablePaper:false},visualMetrics:{edgeDensity:.227747,upperEdgeDensity:.201641,uniformity:.333802},sceneMetrics:{luminance:126.7958,warmBrightRatio:.113958,darkRatio:.098125}},
+];
+assert.ok(august28Scenes.every((item)=>isLikelyScene(item)));
 const august27Papers=[
   {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.227461,width:.834375,top:.504167,height:.495833,fill:.549806,boxArea:.413711,bottom:1},visualMetrics:{edgeDensity:.202188,upperEdgeDensity:.137773,uniformity:.424102},sceneMetrics:{darkRatio:.411875}},
   {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.223685,width:.89375,top:.5125,height:.4875,fill:.513388,boxArea:.435703,bottom:1},visualMetrics:{edgeDensity:.201172,upperEdgeDensity:.14069,uniformity:.408021},sceneMetrics:{darkRatio:.411406}},
@@ -870,12 +889,11 @@ assert.ok(august25Layouts[0].top <= 0.50 && august25Layouts[0].top + august25Lay
 // 即使纸色检测误判为窄竖纸，也必须复核 temple 编号行，不能只跑第一种构图。
 const falsePortraitLayouts = prioritizedPhotoLayouts({ width: 0.55, height: 0.78, top: 0.12 }, []);
 assert.equal(falsePortraitLayouts[0].name, 'current-portrait-code-line');
-assert.deepEqual(targetedCurrentCodeLayouts(falsePortraitLayouts).map((layout) => layout.name), [
-  'current-portrait-code-line',
-  'current-temple-code-line',
-  'current-outdoor-code-line',
-  'current-temple-code-micro',
-]);
+const falsePortraitTargetedNames=targetedCurrentCodeLayouts(falsePortraitLayouts).map((layout) => layout.name);
+assert.equal(falsePortraitTargetedNames[0],'current-portrait-code-line');
+assert.ok(['current-temple-code-line','current-outdoor-code-line','current-temple-code-micro',
+  'current-temple-upper-code-line','current-temple-lower-code-line']
+  .every((name)=>falsePortraitTargetedNames.includes(name)));
 const portraitCodeBand=targetedCurrentCodeLayouts(falsePortraitLayouts)[0];
 assert.ok(portraitCodeBand.top <= 0.35 && portraitCodeBand.top + portraitCodeBand.height >= 0.41);
 const templeMicroLayout=targetedCurrentCodeLayouts(falsePortraitLayouts).find((layout)=>layout.name==='current-temple-code-micro');
@@ -893,6 +911,24 @@ assert.deepEqual(targetedCurrentCodeLayouts(august26Layouts).slice(0,2).map((lay
 ]);
 assert.ok(targetedCurrentCodeLayouts(august26Layouts)[0].top <= 0.23);
 assert.ok(targetedCurrentCodeLayouts(august26Layouts)[0].height >= 0.04);
+// 2026-08-28 脱敏构图回归：供水福单的纸色与木架/神像相连，动态纸框
+// 几乎覆盖整幅照片，真实编号稳定落在画面 y=56%~59%。固定候选必须独立
+// 覆盖这条编号带，不能继续相信错误的纸框顶边。
+const august28WaterLayouts=targetedCurrentCodeLayouts(prioritizedPhotoLayouts({
+  left:.265625,top:.008333,width:.6125,height:.9875,right:.878125,bottom:.995833,
+  score:.298568,fill:.493628,boxArea:.604844,usablePaper:true,rectangularPaper:false,
+},[]));
+assert.ok(august28WaterLayouts.some((layout)=>layout.left<=.68
+  && layout.left+layout.width>=.74 && layout.top<=.58 && layout.top+layout.height>=.59));
+// 同日供灯福单编号位于 y=41%~45%，必须有一个严格小框覆盖；宽达 14% 的
+// portrait 回退框会带入标题和花边，实测无法形成 OCR 共识。
+const august28LampLayouts=targetedCurrentCodeLayouts(prioritizedPhotoLayouts({
+  left:.159375,top:.4,width:.825,height:.508333,right:.984375,bottom:.908333,
+  score:.236549,fill:.564052,boxArea:.419375,usablePaper:true,rectangularPaper:false,
+},[]));
+assert.ok(august28LampLayouts.some((layout)=>layout.left<=.65
+  && layout.left+layout.width>=.73 && layout.top<=.42 && layout.top+layout.height>=.43
+  && layout.height<=.08));
 const sameKindSceneRoot=fs.mkdtempSync(path.join(os.tmpdir(),'prayer-same-kind-scene-test-'));
 const createLampScene=async(name,warmWidth)=>{
   const file=path.join(sameKindSceneRoot,name);
@@ -908,6 +944,10 @@ assert.deepEqual(sameKindSceneResult.assignments.map((item)=>[item.targetName,it
 // 清晰供水补图永远停在人工队列。以下匿名指标来自当天真实供水/供灯画面。
 assert.equal(classifySceneVisualScore({luminance:133.0394,warmBrightRatio:0.2260,darkRatio:0.0750}),'scene-water');
 assert.equal(classifySceneVisualScore({luminance:92.7817,warmBrightRatio:0.1807,darkRatio:0.3788}),'scene-lamp');
+// 2026-08-28 的第二张灯阵曝光更低，暖色高光面积只有 6.7%，但暗像素 37.6%、
+// 整体亮度 85.6，仍是明确灯阵；供水全景保持由低暗像素和高亮度识别。
+assert.equal(classifySceneVisualScore({luminance:85.5666,warmBrightRatio:.066823,darkRatio:.375833}),'scene-lamp');
+assert.equal(classifySceneVisualScore({luminance:126.7958,warmBrightRatio:.113958,darkRatio:.098125}),'scene-water');
 assert.equal(classifySceneVisualScore({luminance:102,warmBrightRatio:0.04,darkRatio:0.20}),null);
 const singleWaterFile=path.join(sameKindSceneRoot,'single-water.jpg');
 await sharp(Buffer.from('<svg width="160" height="120" xmlns="http://www.w3.org/2000/svg"><rect width="160" height="120" fill="#d8c7a0"/><g fill="#d7a536"><circle cx="30" cy="70" r="12"/><circle cx="70" cy="70" r="12"/><circle cx="110" cy="70" r="12"/></g></svg>')).jpeg({quality:92}).toFile(singleWaterFile);
