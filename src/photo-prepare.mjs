@@ -1715,6 +1715,94 @@ export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = nu
   };
 }
 
+// 按证据类型做编号二次复核。清晰可见编号使用“多裁框 OCR 共识 + PDF 编号
+// 索引存在性”两条证据；折叠、遮挡或由缺号/顺序推断的照片才使用 PDF 正文
+// 指纹。不能把同模板整本 PDF 的低区分度灰度排名当成反证，否则会把大量
+// 正确旧照片误报为错号。纯数字旧文件若纸面暂时读不出，只报告 inconclusive，
+// 只有读出不同编号才判冲突；只读复核绝不自动改名或覆盖线上结果。
+export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgress = null, options = {}) {
+  const trustedManual = (item) => /manual-visual-review|manual-pdf-content-and-folded-photo-fingerprint-review/.test(String(item?.evidence?.method || ''));
+  const eligible = items.filter((item) => item?.reliable && Number.isInteger(item.number)
+    && !isLikelyScene(item));
+  if (!eligible.length) return { status:'not-needed', attempted:0, confirmed:0, rejected:0, inconclusive:0, diagnostics:[] };
+  const indexedPages = pdfPages.filter((page) => Number.isInteger(page.number) && page._localShapeFingerprint);
+  const candidateNumbers = options.candidateNumbers instanceof Set ? options.candidateNumbers : null;
+  onProgress?.(`编号二次复核：正在按证据类型检查 ${eligible.length} 张福单；清晰编号核对 PDF 索引，折叠或推断编号核对 PDF 正文指纹。`);
+  const diagnostics = [];
+  let confirmed = 0;
+  let rejected = 0;
+  let inconclusive = 0;
+  for (const item of eligible) {
+    const claimedNumber = item.number;
+    const claimedPages = indexedPages.filter((page) => page.number === claimedNumber);
+    let reason = null;
+    let status = 'confirmed';
+    let scores = [];
+    const method = String(item?.evidence?.method || '');
+    const visibleConsensus = /(?:ocr|photo-code|targeted-landscape-code)/.test(method)
+      && Number(item?.evidence?.votes || 0) >= 2
+      && Number(item?.evidence?.maxConfidence || 0) >= 20;
+    if (method === 'existing-numeric-filename-claim' && Number.isInteger(item.observedOcrNumber) && item.observedOcrNumber !== claimedNumber) {
+      reason = 'visible-code-disagrees-with-filename';
+    } else if (claimedPages.length !== 1) {
+      reason = 'claimed-pdf-page-not-unique';
+    } else if (method === 'existing-numeric-filename-claim' && item.observedOcrNumber === claimedNumber) {
+      item.evidence.pdfRecheck={method:'existing-filename-visible-code-and-pdf-index',status:'confirmed'};
+    } else if (method === 'existing-numeric-filename-claim' && !Number.isInteger(item.observedOcrNumber)) {
+      status = 'inconclusive';
+      inconclusive += 1;
+    } else if (trustedManual(item)) {
+      item.evidence.pdfRecheck={method:'preserved-manual-pdf-content-review',status:'confirmed'};
+    } else if (visibleConsensus) {
+      item.evidence.pdfRecheck={method:'multi-crop-visible-code-and-pdf-index',status:'confirmed'};
+    } else {
+      const variants = await photoShapeFingerprints(item);
+      if (!variants.length) reason = 'paper-fingerprint-unavailable';
+      else {
+        const paperColor = await dominantPaperColor(item.file,item.paperGeometry);
+        const missingPages = candidateNumbers ? indexedPages.filter((page)=>candidateNumbers.has(page.number)) : indexedPages;
+        const sameColorPages = paperColor === 'red' ? missingPages.filter((page)=>/(?:红纸|供水)/.test(page.pdfName || ''))
+          : paperColor === 'yellow' ? missingPages.filter((page)=>/黄纸/.test(page.pdfName || '')) : [];
+        const candidatePages = sameColorPages.length ? sameColorPages : missingPages;
+        scores = candidatePages.map((page) => {
+          const variantScores = variants.map((variant) => ({name:variant.name,score:localShapeSimilarity(variant.vector,page._localShapeFingerprint)}))
+            .sort((a,b)=>b.score-a.score);
+          const topCount = Math.min(3,variantScores.length);
+          const stable = variantScores.slice(0,topCount).reduce((sum,value)=>sum+value.score,0)/Math.max(1,topCount);
+          return {page,score:0.8*variantScores[0].score+0.2*stable,variant:variantScores[0].name};
+        }).sort((a,b)=>b.score-a.score || a.page.number-b.page.number);
+        const claimIndex = scores.findIndex((score)=>score.page.number===claimedNumber);
+        const claim = claimIndex >= 0 ? scores[claimIndex] : null;
+        const bestOther = scores.find((score)=>score.page.number!==claimedNumber);
+        const margin = Number(claim?.score || 0)-Number(bestOther?.score || 0);
+        if (!claim) reason = 'claimed-page-not-in-candidate-set';
+        else if (claimIndex !== 0) reason = 'pdf-fingerprint-prefers-another-page';
+        else if (claim.score < 0.26) reason = 'pdf-fingerprint-score-too-low';
+        else if (scores.length > 1 && margin < 0.035) reason = 'pdf-fingerprint-margin-too-small';
+        if (!reason) {
+          item.evidence = {
+            ...item.evidence,
+            pdfRecheck:{method:'independent-pdf-page-content-fingerprint',status:'confirmed',score:Number(claim.score.toFixed(4)),margin:Number(margin.toFixed(4)),variant:claim.variant},
+          };
+        }
+      }
+    }
+    if (reason) {
+      item.reliable = false;
+      item.pdfRecheck = {status:'rejected',reason,claimedNumber};
+      rejected += 1;
+      status = 'rejected';
+    } else if (status === 'confirmed') {
+      confirmed += 1;
+    }
+    diagnostics.push({
+      file:path.basename(item.file),claimedNumber,status,reason,
+      top:scores.slice(0,5).map(({page,score,variant})=>({number:page.number,pdfName:page.pdfName,score:Number(score.toFixed(4)),variant})),
+    });
+  }
+  return {status:'completed',attempted:eligible.length,confirmed,rejected,inconclusive,diagnostics};
+}
+
 export function parseWindowsOcrTail(text) {
   const normalized = normalizeOcr(text);
   const matches = [...normalized.matchAll(/(?:^|\D)(\d{3,4})(?!\d)/g)];
@@ -2740,6 +2828,8 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   // 运行时不会读取 OPENAI_API_KEY，也绝不会发送图片或编号裁剪到网络。
   let cloudVision = { status: 'disabled-by-local-mode', resolved: 0, attempted: 0 };
   let localPageMatch = { status: 'not-needed', resolved: 0, attempted: 0, unresolved: 0 };
+  let pdfClaimRecheck = { status:'not-needed', attempted:0, confirmed:0, rejected:0, inconclusive:0, diagnostics:[] };
+  const existingNumericAuditItems = [];
   try {
     onProgress?.(`正在建立 PDF 编号索引，共 ${pdfFiles.length} 个 PDF。`);
     pdfPages = await indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, appRoot);
@@ -2775,6 +2865,28 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
           result.visualMetrics ||= await imageVisualMetrics(file);
           recognized.push(result);
         }
+      }
+      // “重新核对编号”不能把已经改成纯数字文件名的照片当成天然正确。
+      // 先独立读取纸面可见编号，再在后面的 PDF 正文指纹阶段复核文件名声称。
+      // 该步骤只读原文件，不自动纠正已经上传过的照片。
+      const numericAuditFiles = images.filter((file) => {
+        const stem = path.parse(file).name;
+        return /^\d+$/.test(stem) && expectedNumbers.has(Number(stem));
+      });
+      let numericAuditIndex = 0;
+      for (const file of numericAuditFiles) {
+        numericAuditIndex += 1;
+        onProgress?.(`正在重新核对现有数字照片 ${numericAuditIndex}/${numericAuditFiles.length}：${path.basename(file)}`);
+        const observed = await recognizePreparedImage(worker,file,expectedPrefix,expectedNumbers,cropDir,appRoot);
+        existingNumericAuditItems.push({
+          ...observed,
+          file,
+          reliable:true,
+          number:Number(path.parse(file).name),
+          observedOcrNumber:observed.reliable && Number.isInteger(observed.number) ? observed.number : null,
+          observedOcrEvidence:observed.evidence || null,
+          evidence:{method:'existing-numeric-filename-claim'},
+        });
       }
       // 增量补跑时，新原图读出的编号可能已被一个旧数字文件占用。先读取
       // 那个旧文件纸面上的真实编号；若它明确属于另一个尚未占用的 PDF 页，
@@ -2889,11 +3001,34 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     }
   }
 
+  try {
+    const existingNumericNumbers = new Set(images.map((file)=>/^\d+$/.test(path.parse(file).name) ? Number(path.parse(file).name) : null)
+      .filter((number)=>Number.isInteger(number) && expectedNumbers.has(number)));
+    const newClaimCandidateNumbers = new Set([...expectedNumbers].filter((number)=>!existingNumericNumbers.has(number)));
+    pdfClaimRecheck = await recheckReliablePhotoClaimsWithPdf(
+      [...recognized,...existingNumericAuditItems],pdfPages,onProgress,{candidateNumbers:newClaimCandidateNumbers},
+    );
+    if (pdfClaimRecheck.rejected) {
+      const rejectedFiles = pdfClaimRecheck.diagnostics.filter((item)=>item.status==='rejected').map((item)=>item.file);
+      issues.push(`编号二次复核未通过 ${pdfClaimRecheck.rejected} 张：${rejectedFiles.join('、')}。已停止改名和上传，请查看 PDF 指纹诊断。`);
+    } else if (pdfClaimRecheck.attempted) {
+      onProgress?.(`编号二次复核完成：${pdfClaimRecheck.confirmed}/${pdfClaimRecheck.attempted} 张得到第二证据确认，${pdfClaimRecheck.inconclusive || 0} 张现有数字照片纸面暂不可读。`);
+    }
+  } catch {
+    for (const item of [...recognized,...existingNumericAuditItems]) {
+      if (item?.reliable && Number.isInteger(item.number)
+        && !/manual-visual-review|manual-pdf-content-and-folded-photo-fingerprint-review/.test(String(item?.evidence?.method || ''))) item.reliable=false;
+    }
+    pdfClaimRecheck = {status:'unavailable',attempted:recognized.length+existingNumericAuditItems.length,confirmed:0,rejected:recognized.length+existingNumericAuditItems.length,inconclusive:0,diagnostics:[]};
+    issues.push('编号二次复核发生异常；为防止错误上传，本轮所有自动编号均已停止。');
+  }
+
   const assignments = [];
   const occupiedNames = new Set();
   const assignedNumbers = new Set();
   const foreignNumericFiles = [];
   const numericRepairSources = new Set(numericCodeRepairs.map((item) => path.resolve(item.source)));
+  const numericAuditByPath = new Map(existingNumericAuditItems.map((item)=>[path.resolve(item.file),item]));
   for (const repair of numericCodeRepairs) {
     assignedNumbers.add(repair.to);
     occupiedNames.add(`${repair.to}.jpg`);
@@ -2911,7 +3046,8 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       const number = Number(stem);
       if (numericRepairSources.has(path.resolve(file))) continue;
       occupiedNames.add(lowerName);
-      if (expectedNumbers.has(number)) assignedNumbers.add(number);
+      const audit = numericAuditByPath.get(path.resolve(file));
+      if (expectedNumbers.has(number) && (!audit || audit.reliable)) assignedNumbers.add(number);
       else foreignNumericFiles.push(file);
     } else if (['2.1', '2.2', '2.5', '2.6'].includes(stem)) {
       occupiedNames.add(lowerName);
@@ -3074,6 +3210,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     recognized,
     cloudVision,
     localPageMatch,
+    pdfClaimRecheck,
     issues: [...new Set(issues)],
     pendingIssues: [...new Set(pendingIssues)],
     manualReview: {

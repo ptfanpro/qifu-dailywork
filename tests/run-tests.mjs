@@ -7,7 +7,7 @@ import { calculateQuantities, venueMessage, normalizeText } from '../src/quantit
 import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
-import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isLikelyScene, isReliableOcrConsensus, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
+import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isLikelyScene, isReliableOcrConsensus, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { CAPTCHA_INPUT_SELECTOR, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isTransientAutomationPage, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
@@ -198,6 +198,49 @@ const allClaimedShapeItems=[{file:shapePhoto,reliable:false,number:null,candidat
 const allClaimedShapeResult=await matchPdfPagesLocally(allClaimedShapeItems,shapePages,null,new Set([401,402]));
 assert.equal(allClaimedShapeResult.status,'not-needed');
 assert.equal(allClaimedShapeResult.resolved,0);
+const confirmedPdfClaim=[{
+  file:shapePhoto,reliable:true,number:401,candidates:[],visualMetrics:{},
+  evidence:{method:'targeted-landscape-code-threshold-consensus'},
+  paperGeometry:{left:0.1,top:140/900,width:0.8,height:640/900,right:0.9,bottom:(140+640)/900,score:0.5,fill:0.95,boxArea:0.56,rectangularPaper:true},
+}];
+const confirmedPdfRecheck=await recheckReliablePhotoClaimsWithPdf(confirmedPdfClaim,shapePages);
+assert.equal(confirmedPdfRecheck.attempted,1);
+assert.equal(confirmedPdfRecheck.confirmed,1);
+assert.equal(confirmedPdfRecheck.rejected,0);
+assert.equal(confirmedPdfClaim[0].evidence.pdfRecheck.status,'confirmed');
+const contradictedPdfClaim=[{
+  file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},
+  evidence:{method:'targeted-landscape-code-threshold-consensus'},
+  paperGeometry:{left:0.1,top:140/900,width:0.8,height:640/900,right:0.9,bottom:(140+640)/900,score:0.5,fill:0.95,boxArea:0.56,rectangularPaper:true},
+}];
+const contradictedPdfRecheck=await recheckReliablePhotoClaimsWithPdf(contradictedPdfClaim,shapePages);
+assert.equal(contradictedPdfRecheck.confirmed,0);
+assert.equal(contradictedPdfRecheck.rejected,1);
+assert.equal(contradictedPdfClaim[0].reliable,false);
+assert.equal(contradictedPdfClaim[0].pdfRecheck.reason,'pdf-fingerprint-prefers-another-page');
+const numericFilenameConflict=[{
+  file:shapePhoto,reliable:true,number:401,observedOcrNumber:402,candidates:[],visualMetrics:{},
+  evidence:{method:'existing-numeric-filename-claim'},paperGeometry:{},
+}];
+const numericFilenameConflictResult=await recheckReliablePhotoClaimsWithPdf(numericFilenameConflict,shapePages);
+assert.equal(numericFilenameConflictResult.rejected,1);
+assert.equal(numericFilenameConflict[0].pdfRecheck.reason,'visible-code-disagrees-with-filename');
+const strongVisibleCodeClaim=[{
+  file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},paperGeometry:{},
+  evidence:{method:'targeted-landscape-code-threshold-consensus',votes:4,maxConfidence:91},
+}];
+const strongVisibleCodeResult=await recheckReliablePhotoClaimsWithPdf(strongVisibleCodeClaim,shapePages);
+assert.equal(strongVisibleCodeResult.confirmed,1);
+assert.equal(strongVisibleCodeResult.rejected,0);
+assert.equal(strongVisibleCodeClaim[0].evidence.pdfRecheck.method,'multi-crop-visible-code-and-pdf-index');
+const unreadableExistingFilename=[{
+  file:shapePhoto,reliable:true,number:401,observedOcrNumber:null,candidates:[],visualMetrics:{},paperGeometry:{},
+  evidence:{method:'existing-numeric-filename-claim'},
+}];
+const unreadableExistingResult=await recheckReliablePhotoClaimsWithPdf(unreadableExistingFilename,shapePages);
+assert.equal(unreadableExistingResult.inconclusive,1);
+assert.equal(unreadableExistingResult.rejected,0);
+assert.equal(unreadableExistingFilename[0].reliable,true);
 const standardTopEdgeLayouts=targetedCurrentCodeLayouts([
   {name:'paper-relative-landscape-code-upper-right'},
   {name:'paper-relative-landscape-code-lower-right'},
@@ -559,8 +602,12 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.82/);
-assert.match(uiSource,/微型编号带与场景识别修正版/);
+assert.match(uiSource,/V9\.5\.83/);
+assert.match(uiSource,/编号双证据复核版/);
+assert.match(uiSource,/重新核对编号/);
+assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
+assert.match(runnerSource,/只读编号复核完成/);
+assert.match(runnerSource,/没有改名、压缩、上传或修改平台/);
 assert.doesNotMatch(uiSource,/配置机器接口|检查接口\/日清单|清除接口凭据/);
 assert.match(runnerSource,/client\.dailyPlan\(businessDate\)/);
 assert.match(uiSource,/WorkingArea/);

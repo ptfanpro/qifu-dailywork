@@ -14,7 +14,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.5.82',
+        '祈福本地执行器 V9.5.83',
         'OK',
         'Information'
     ) | Out-Null
@@ -47,7 +47,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.5.82（微型编号带与场景识别修正版）'
+$form.Text = '祈福本地执行器 V9.5.83（编号双证据复核版）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -98,7 +98,7 @@ $photoDate.Location = New-Object System.Drawing.Point(92,27)
 $photoDate.Size = New-Object System.Drawing.Size(150,30)
 $photoGroup.Controls.Add($photoDate)
 $photoMainButton = Add-Button $photoGroup '正在初始化照片状态…' 255 24 245 42
-$photoRefreshButton = Add-Button $photoGroup '重新检测照片' 510 24 135 42
+$photoRefreshButton = Add-Button $photoGroup '重新核对编号' 510 24 135 42
 $openPhotoButton = Add-Button $photoGroup '打开照片目录' 655 24 165 42
 $photoStatus = Add-Label $photoGroup '尚未初始化。' 18 76 800 28
 $photoStatus.ForeColor = [System.Drawing.Color]::DimGray
@@ -408,6 +408,7 @@ function Get-ActionLabel([string]$action) {
     switch ($action) {
         'cleanup-local-state' { return '本机空间清理' }
         'photo-prepare' { return '照片处理与编号' }
+        'photo-recheck' { return '照片编号只读复核' }
         'photo-scan' { return '照片预检' }
         'photo-upload' { return '福单图上传' }
         'photo-scenes' { return '场景图与牌位批量完成' }
@@ -684,7 +685,7 @@ function Start-Runner([string]$action, [bool]$authorized, [string]$flow, [bool]$
     $globalStatus.Text = "正在执行：$(Get-ActionLabel $action)。已完成阶段会自动跳过。"
     $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
     Append-Log "[$(Get-Date -Format HH:mm:ss)] 开始：$(Get-ActionLabel $action)"
-    if ($action -eq 'photo-prepare') {
+    if ($action -eq 'photo-prepare' -or $action -eq 'photo-recheck') {
         Append-Log "[$(Get-Date -Format HH:mm:ss)] 本轮仅使用本地 OCR 与 PDF 页面匹配；不会读取 API 密钥、不会上传图片。如仍未决将明确停止，不会改名或上传。"
     }
     [void]$script:activeProcess.Start()
@@ -911,7 +912,7 @@ $pdfMainButton.Add_Click({
         Start-Runner $script:pdfNextAction $true 'pdf' $true
     }
 })
-$photoRefreshButton.Add_Click({ Start-Initialization 'photo-backlog' })
+$photoRefreshButton.Add_Click({ Start-Runner 'photo-recheck' $false 'manual' $true })
 $pdfRefreshButton.Add_Click({ Start-Initialization 'pdf' })
 $refreshAllButton.Add_Click({ Start-Initialization 'all' })
 
