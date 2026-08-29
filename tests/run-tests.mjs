@@ -7,7 +7,7 @@ import { calculateQuantities, venueMessage, normalizeText } from '../src/quantit
 import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
-import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isLikelyScene, isReliableOcrConsensus, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
+import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { CAPTCHA_INPUT_SELECTOR, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isTransientAutomationPage, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
@@ -233,6 +233,14 @@ const strongVisibleCodeResult=await recheckReliablePhotoClaimsWithPdf(strongVisi
 assert.equal(strongVisibleCodeResult.confirmed,1);
 assert.equal(strongVisibleCodeResult.rejected,0);
 assert.equal(strongVisibleCodeClaim[0].evidence.pdfRecheck.method,'multi-crop-visible-code-and-pdf-index');
+const strictVisibleCodeBoxClaim=[{
+  file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},paperGeometry:{},
+  evidence:{method:'windows-ocr-strict-lower-code-box',votes:1,prefixDistance:0,maxConfidence:100},
+}];
+const strictVisibleCodeBoxResult=await recheckReliablePhotoClaimsWithPdf(strictVisibleCodeBoxClaim,shapePages);
+assert.equal(strictVisibleCodeBoxResult.confirmed,1);
+assert.equal(strictVisibleCodeBoxResult.rejected,0);
+assert.equal(strictVisibleCodeBoxClaim[0].evidence.pdfRecheck.method,'strict-visible-code-box-and-pdf-index');
 const unreadableExistingFilename=[{
   file:shapePhoto,reliable:true,number:401,observedOcrNumber:null,candidates:[],visualMetrics:{},paperGeometry:{},
   evidence:{method:'existing-numeric-filename-claim'},
@@ -602,8 +610,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.83/);
-assert.match(uiSource,/编号双证据复核版/);
+assert.match(uiSource,/V9\.5\.84/);
+assert.match(uiSource,/补拍编号断点修正版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -842,6 +850,27 @@ assert.deepEqual(gapPhotos.map((item)=>item.number),[486,487,488,489]);
 assert.equal(gapPhotos[0].evidence.method,'capture-leading-gap-before-code-anchor');
 assert.deepEqual(twoAnchorPhotos.map((item)=>item.number),Array.from({length:8},(_,index)=>339+index));
 assert.match(twoAnchorPhotos[2].evidence.method,/ascending/);
+// 2026-08-28 真实故障的脱敏回归：603~613 连拍结束 29 秒后，摄影者补拍
+// 旧编号 597/598。微信文件流水号仍递增，但拍摄时间已经形成新段，绝不能
+// 把两张未识别照片沿前段外推成 614/615。
+const resetCapturePhotos=Array.from({length:13},(_,index)=>({
+  file:index<11
+    ? `微信图片_202608281914${String(3+index*2).padStart(2,'0')}_${1352+index}_92.jpg`
+    : `微信图片_202608281914${index===11?'54':'55'}_${1352+index}_92.jpg`,
+  reliable:index<11,number:index<11?603+index:null,candidates:[],
+  paperGeometry:{usablePaper:true,rectangularPaper:true,score:.22,top:.52,width:.61,height:.47,boxArea:.29,fill:.78},
+  visualMetrics:{edgeDensity:.18},
+}));
+assert.ok(Number.isFinite(photoCaptureTimestamp(resetCapturePhotos[0].file)));
+assert.equal(isContinuousPhotoCapture(resetCapturePhotos[10],resetCapturePhotos[11]),false);
+inferPhotoSequences(resetCapturePhotos,new Set(Array.from({length:19},(_,index)=>597+index)));
+assert.deepEqual(resetCapturePhotos.slice(11).map((item)=>item.number),[null,null]);
+const continuousEdgePhotos=resetCapturePhotos.map((item,index)=>({
+  ...item,file:`微信图片_202608281914${String(3+index*2).padStart(2,'0')}_${1352+index}_92.jpg`,
+  reliable:index<11,number:index<11?603+index:null,evidence:null,
+}));
+inferPhotoSequences(continuousEdgePhotos,new Set(Array.from({length:19},(_,index)=>597+index)));
+assert.deepEqual(continuousEdgePhotos.slice(11).map((item)=>item.number),[614,615]);
 const duplicatedSixEightPhotos=[
   {file:'actual-466.jpg',reliable:true,number:468,candidates:[],paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},evidence:{method:'ocr'}},
   {file:'467.jpg',reliable:true,number:467,candidates:[],paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{}},
@@ -939,7 +968,7 @@ assert.equal(falsePortraitLayouts[0].name, 'current-portrait-code-line');
 const falsePortraitTargetedNames=targetedCurrentCodeLayouts(falsePortraitLayouts).map((layout) => layout.name);
 assert.equal(falsePortraitTargetedNames[0],'current-portrait-code-line');
 assert.ok(['current-temple-code-line','current-outdoor-code-line','current-temple-code-micro',
-  'current-temple-upper-code-line','current-temple-lower-code-line']
+  'current-temple-upper-code-line','current-temple-lower-code-box-high','current-temple-lower-code-box-low']
   .every((name)=>falsePortraitTargetedNames.includes(name)));
 const portraitCodeBand=targetedCurrentCodeLayouts(falsePortraitLayouts)[0];
 assert.ok(portraitCodeBand.top <= 0.35 && portraitCodeBand.top + portraitCodeBand.height >= 0.41);
@@ -967,6 +996,10 @@ const august28WaterLayouts=targetedCurrentCodeLayouts(prioritizedPhotoLayouts({
 },[]));
 assert.ok(august28WaterLayouts.some((layout)=>layout.left<=.68
   && layout.left+layout.width>=.74 && layout.top<=.58 && layout.top+layout.height>=.59));
+assert.ok(august28WaterLayouts.some((layout)=>layout.name==='current-temple-lower-code-box-high'
+  && layout.top<=.54 && layout.top+layout.height>=.59));
+assert.ok(august28WaterLayouts.some((layout)=>layout.name==='current-temple-lower-code-box-low'
+  && layout.top<=.58 && layout.top+layout.height>=.61));
 // 同日供灯福单编号位于 y=41%~45%，必须有一个严格小框覆盖；宽达 14% 的
 // portrait 回退框会带入标题和花边，实测无法形成 OCR 共识。
 const august28LampLayouts=targetedCurrentCodeLayouts(prioritizedPhotoLayouts({
