@@ -14,7 +14,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.5.75',
+        '祈福本地执行器 V9.5.82',
         'OK',
         'Information'
     ) | Out-Null
@@ -47,7 +47,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.5.75（验证码人工接管修正版）'
+$form.Text = '祈福本地执行器 V9.5.82（微型编号带与场景识别修正版）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -163,8 +163,8 @@ $manualSceneUpload = Add-Button $advancedPanel '照片：只处理场景' 548 8 
 $manualPdfInspect = Add-Button $advancedPanel 'PDF：只检查' 8 49 180 34
 $manualPdfExport = Add-Button $advancedPanel 'PDF：导出并完成' 198 49 195 34
 $manualState = Add-Button $advancedPanel 'PDF：只补状态' 403 49 175 34
-$credentialButton = Add-Button $advancedPanel '设置自动登录' 588 49 120 34
-$clearCredentialButton = Add-Button $advancedPanel '清除凭据' 718 49 105 34
+$credentialButton = Add-Button $advancedPanel '设置登录账号' 588 49 120 34
+$clearCredentialButton = Add-Button $advancedPanel '清除登录账号' 718 49 105 34
 
 $globalStatus = Add-Label $form '正在初始化本地与线上状态，请稍候……' 20 509 840 30
 $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
@@ -222,12 +222,12 @@ function Save-Settings {
 function Update-CredentialButtons {
     $credentialFileExists = Test-Path -LiteralPath $script:credentialPath -PathType Leaf
     $configured = Test-PrayerCredential -Path $script:credentialPath
-    $credentialButton.Text = if ($configured) { '自动登录：已配置' } elseif ($credentialFileExists) { '凭据需重设' } else { '设置自动登录' }
+    $credentialButton.Text = if ($configured) { '登录账号：已配置' } elseif ($credentialFileExists) { '登录账号需重设' } else { '设置登录账号' }
     $clearCredentialButton.Enabled = ($credentialFileExists -and -not $script:running)
 }
 function Show-PrayerCredentialDialog {
     $dialog = New-Object System.Windows.Forms.Form
-    $dialog.Text = '设置祈福平台自动登录'
+    $dialog.Text = '设置祈福平台登录账号'
     $dialog.ClientSize = New-Object System.Drawing.Size(430,220)
     $dialog.StartPosition = 'CenterParent'
     $dialog.FormBorderStyle = 'FixedDialog'
@@ -266,7 +266,7 @@ function Show-PrayerCredentialDialog {
     $passwordBox.Clear()
     Update-CredentialButtons
     if ($dialog.DialogResult -eq 'OK') {
-        $globalStatus.Text = '自动登录凭据已用 Windows 当前用户密钥加密保存。下次遇到登录页会自动登录一次。'
+        $globalStatus.Text = '登录账号已用 Windows 当前用户密钥加密保存；验证码始终由你在 Edge 登录页手动输入。'
         $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
     }
 }

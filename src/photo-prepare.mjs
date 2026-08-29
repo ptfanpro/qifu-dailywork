@@ -43,9 +43,22 @@ const OCR_LAYOUTS = [
 // 四个小框未命中时才进入动态纸张布局和有限兜底。
 const CURRENT_CAMERA_CODE_LAYOUTS = {
   temple: [
+    // 2026-08-28 同一台相机出现两个新的稳定高度。供灯福单编号位于
+    // y=41%~45%，供水福单位于 y=56%~59%；纸色与木架、神像相连时，
+    // 动态纸框会从画面顶部一直延伸到底部，不能再由它推算编号位置。
     // 2026-08-25 起的新一批 4:3 原图把纸张整体下移，编号稳定落在
     // y=50%~53%。旧 top=47.5% 会只截到神像底座，清晰编号也会全部漏掉。
-    { name: 'current-temple-code-line', left: 0.60, top: 0.495, width: 0.25, height: 0.075 },
+    { name: 'current-temple-code-line', left: 0.64, top: 0.49, width: 0.14, height: 0.055 },
+    // 同一构图中编号实际只占画面约 12%×4%。保留上面的宽容框兼容轻微
+    // 偏移，再用这个微型框隔离下方装饰线；Windows OCR 对原尺寸彩色微型框
+    // 明显优于放大后的整块纸面。
+    { name: 'current-temple-code-micro', left: 0.65, top: 0.495, width: 0.12, height: 0.040 },
+    // 微型滑动带只保留编号本身，避开紧邻的花边。两种高度分别覆盖同批
+    // 供灯福单和三张略有上下位移的供水福单。
+    { name: 'current-temple-upper-code-line', left: 0.61, top: 0.405, width: 0.15, height: 0.025 },
+    { name: 'current-temple-upper-code-line-shifted', left: 0.61, top: 0.415, width: 0.15, height: 0.025 },
+    { name: 'current-temple-lower-code-line', left: 0.59, top: 0.570, width: 0.15, height: 0.025 },
+    { name: 'current-temple-lower-code-line-shifted', left: 0.59, top: 0.585, width: 0.15, height: 0.025 },
     { name: 'current-temple-code-wide', left: 0.54, top: 0.47, width: 0.36, height: 0.16, sparse: true },
   ],
   outdoor: [
@@ -55,7 +68,9 @@ const CURRENT_CAMERA_CODE_LAYOUTS = {
   portrait: [
     // 竖版黄纸/红纸在 1800×1350 成品图中只占画面中部，编号位于纸张
     // 右上角而不是整幅图右上角。旧版动态框贴着纸张顶边，稳定漏掉编号。
-    { name: 'current-portrait-code-line', left: 0.565, top: 0.345, width: 0.145, height: 0.055 },
+    // 牌位图存在上下两种稳定装框高度（约 y=35% 与 y=41%）。单独窄行会
+    // 在两者间来回漏识别；这个窄带同时覆盖两处编号，又不包含牌位正文。
+    { name: 'current-portrait-code-line', left: 0.59, top: 0.32, width: 0.15, height: 0.14 },
     { name: 'current-portrait-code-wide', left: 0.525, top: 0.305, width: 0.215, height: 0.125, sparse: true },
   ],
 };
@@ -88,6 +103,14 @@ export function prioritizedPhotoLayouts(geometry, dynamicLayouts) {
 export function targetedCurrentCodeLayouts(layouts) {
   const seenModes = new Set();
   const selected = [];
+  // prioritizedPhotoLayouts 已按构图证据把最可能的固定相机框放在首位。
+  // 当纸张贴住画面底边时，动态框的 top 会随连通域漂移；先跑固定窄框可
+  // 直接识别清晰编号，同时仍保留一个动态框兼容纸张位置真正变化的旧照片。
+  const primaryMatch = /^current-(temple|portrait)-code-line$/.exec((layouts || [])[0]?.name || '');
+  if (primaryMatch) {
+    seenModes.add(primaryMatch[1]);
+    selected.push(layouts[0]);
+  }
   // 纸色连通域能够稳定框住整张福单时，纸张相对编号框比固定相机框更准。
   // V9.5.65 为提速把首轮限制为四个固定框，导致 2026-08-26 这批清晰
   // 供水福单右上角编号（529/531/532）完全落在首轮之外。这里只提升两个
@@ -101,7 +124,18 @@ export function targetedCurrentCodeLayouts(layouts) {
     'paper-relative-landscape-code-lower-right',
   ]) {
     const layout = (layouts || []).find((item) => item.name === layoutName);
-    if (layout) selected.push(layout);
+    if (layout && selected.length < 2) selected.push(layout);
+  }
+  // 新批次的上下两条严格编号带必须始终参与有限复核。它们都只覆盖右侧
+  // 短编码，不读取正文；即使纸张定位把构图误判成 portrait，也能回到真实
+  // 阻断位置，而不是继续围绕错误纸框重复 OCR。纸张相对框若可信仍保留
+  // 原有最高优先级，避免改变已经稳定的历史批次。
+  for (const layoutName of [
+    'current-temple-upper-code-line', 'current-temple-upper-code-line-shifted',
+    'current-temple-lower-code-line', 'current-temple-lower-code-line-shifted',
+  ]) {
+    const layout = (layouts || []).find((item) => item.name === layoutName);
+    if (layout && !selected.some((item) => item.name === layout.name)) selected.push(layout);
   }
   for (const layout of layouts || []) {
     const match = /^current-(temple|outdoor|portrait)-code-line$/.exec(layout.name);
@@ -114,7 +148,10 @@ export function targetedCurrentCodeLayouts(layouts) {
     seenModes.add(mode);
     selected.push(CURRENT_CAMERA_CODE_LAYOUTS[mode][0]);
   }
-  return selected.slice(0, 6);
+  const templeMicro = (layouts || []).find((layout) => layout.name === 'current-temple-code-micro')
+    || CURRENT_CAMERA_CODE_LAYOUTS.temple.find((layout) => layout.name === 'current-temple-code-micro');
+  if (templeMicro && !selected.some((layout) => layout.name === templeMicro.name)) selected.push(templeMicro);
+  return selected.slice(0, 8);
 }
 
 // PDF 模板既有横版福单，也有竖版牌位。竖版右上角编号的位置会随模板宽度
@@ -714,6 +751,7 @@ export function inferSequentialPdfCodes(pages) {
   }
   repairSinglePdfOutlier(pages);
   repairSingleAdjacentDuplicatePdfCode(pages);
+  inferTrailingUnreadPdfCodes(pages);
   // 不再按“文件排序后的页面位置”跨 PDF 强填编号。增量补单会在黄纸、牌位后
   // 继续产生红纸 N，文件名顺序不等于打印编号顺序，旧逻辑会把 318 错写成 314。
   // 先利用总页数与已识别区间修复单页多读一位，再仅在唯一未识别 PDF 组中补齐缺口。
@@ -789,6 +827,38 @@ export function inferSequentialPdfCodes(pages) {
   return pages;
 }
 
+// 牌位批次的右上角除了业务编号还会出现 2026/2027 等起止年份。若一个新批次
+// 的所有页面都只读到了年份，旧逻辑会把整组排除，继而照片中清晰的后续编号
+// 也因“不在 PDF 集合内”全部丢弃。这里只在已识别编号本身无缺口、未识别页
+// 全部来自红纸/黄纸的后续批次，且原始 OCR 没有任何三位业务编号时，才把它们
+// 作为唯一连续尾段补齐。若普通批次中间真有漏页，已识别集合会出现缺口，本
+// 规则不会触发。
+export function inferTrailingUnreadPdfCodes(pages) {
+  const known = pages.filter((page) => Number.isInteger(page.number));
+  const unresolved = pages.filter((page) => !Number.isInteger(page.number));
+  if (known.length < 5 || !unresolved.length || unresolved.length > 50) return false;
+  const knownNumbers = known.map((page) => page.number).sort((a, b) => a - b);
+  if (new Set(knownNumbers).size !== knownNumbers.length) return false;
+  if (!knownNumbers.every((number, index) => index === 0 || number === knownNumbers[index - 1] + 1)) return false;
+  const laterPaperBatch = unresolved.every((page) => {
+    const match = /(?:红纸|黄纸)(\d+)/.exec(path.basename(page.pdf || ''));
+    const raw = page.rawNumber;
+    const rawIsOnlyDateNoise = !Number.isInteger(raw) || (raw >= 1900 && raw <= 2100);
+    return match && Number(match[1]) >= 2 && rawIsOnlyDateNoise;
+  });
+  if (!laterPaperBatch) return false;
+  const ordered = [...unresolved].sort((a, b) => photoPdfBusinessRank(a.pdf) - photoPdfBusinessRank(b.pdf)
+    || path.basename(a.pdf || '').localeCompare(path.basename(b.pdf || ''), 'zh-CN', { numeric: true })
+    || a.pageNumber - b.pageNumber);
+  const start = knownNumbers.at(-1) + 1;
+  for (let index = 0; index < ordered.length; index += 1) {
+    ordered[index].number = start + index;
+    ordered[index].codeEvidence = 'contiguous-known-range-and-unread-later-batch-tail';
+    ordered[index].sequenceScore = { inferredTailStart: start, knownCount: knownNumbers.length };
+  }
+  return true;
+}
+
 function cropFromRatios(metadata, layout) {
   const width = Number(metadata.width || 0);
   const height = Number(metadata.height || 0);
@@ -800,6 +870,20 @@ function cropFromRatios(metadata, layout) {
     width: Math.max(1, Math.min(width - left, Math.floor(width * layout.width))),
     height: Math.max(1, Math.min(height - top, Math.floor(height * layout.height))),
   };
+}
+
+function isUsableOcrExtract(extract) {
+  return Number(extract?.width || 0) >= 12 && Number(extract?.height || 0) >= 8;
+}
+
+export function isReliableOcrConsensus(best, second = null, minimumConfidence = 20) {
+  if (!best || best.maxConfidence < minimumConfidence || best.votes < 2) return false;
+  const uniquelyBest = !second
+    || best.votes > second.votes
+    || (best.votes === second.votes && best.prefixDistance < second.prefixDistance);
+  if (!uniquelyBest) return false;
+  if (best.prefixDistance <= 0.1) return true;
+  return best.prefixDistance <= 1 && best.votes >= 3;
 }
 
 export async function createOcrWorker(appRoot) {
@@ -823,13 +907,15 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   const windowsFallbackFiles = [];
   const paperEvidence = await detectPaperEvidence(file);
   const visualMetrics = await imageVisualMetrics(file);
-  if (isLikelyScene({ paperGeometry: paperEvidence.geometry, visualMetrics })) {
+  const sceneMetrics = await sceneVisualScore(file);
+  if (isLikelyScene({ paperGeometry: paperEvidence.geometry, visualMetrics, sceneMetrics })) {
     return {
       file,
       reliable: false,
       number: null,
       paperGeometry: paperEvidence.geometry,
       visualMetrics,
+      sceneMetrics,
       evidence: { method: 'scene-visual-fast-path' },
       candidates: [],
     };
@@ -845,11 +931,40 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   const landscapeCodeLayouts = targetedCurrentCodeLayouts(layouts);
   for (const landscapeCodeLayout of landscapeCodeLayouts) {
     const extract = cropFromRatios(metadata, landscapeCodeLayout);
+    // 纸色连通域偶尔会贴住画面右边缘，使动态“纸内右上角”落到图外。
+    // 无有效像素的动态框直接跳过，固定相机框仍会继续复核。
+    if (!isUsableOcrExtract(extract)) continue;
     const focusedObservations = [];
     // 紧裁后的内容只有一个短业务编码。Tesseract 的 SINGLE_LINE 会在字符
     // 间距略大时把它当成多个空行并直接返回空；SINGLE_WORD 对数字、连字符
     // 白名单更稳定，最终仍需完整前缀和当天 PDF 范围双重约束。
     await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
+    // 当前相机构图的短编号在原彩色图上边缘最自然。先做一次不阈值化的
+    // 紧裁识别，避免红纸归一化把细连字符和 5/6/7 的笔画抹掉。
+    if (/^current-(?:temple|portrait)-code-/.test(landscapeCodeLayout.name)) {
+      const colorDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-focused-color.png`);
+      await sharpFile(file)
+        .rotate()
+        .extract(extract)
+        .resize({ height: 420, withoutEnlargement: false })
+        .extend({ top: 50, bottom: 50, left: 50, right: 50, background: 'white' })
+        .png()
+        .toFile(colorDiagnostic);
+      const colorResult = await worker.recognize(colorDiagnostic);
+      const colorParsed = parseOcrCandidates(colorResult.data.text, expectedPrefix, expectedNumbers)
+        .filter((item) => item.prefixDistance <= 1.1);
+      for (const item of colorParsed) focusedObservations.push({
+        ...item,
+        confidence: Number(colorResult.data.confidence || 0),
+        layout: landscapeCodeLayout.name,
+        variant: 'focused-color',
+      });
+      if (appRoot) {
+        const windowsColorDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-windows-color.png`);
+        await sharpFile(file).rotate().extract(extract).png().toFile(windowsColorDiagnostic);
+        windowsFallbackFiles.push(windowsColorDiagnostic);
+      }
+    }
     if (appRoot) {
       const windowsDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-windows-red.png`);
       await sharpFile(file)
@@ -864,6 +979,33 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
         .toFile(windowsDiagnostic);
       windowsFallbackFiles.push(windowsDiagnostic);
     }
+    // 8 月 28 日微型编号带在红通道自然对比下清晰可读；旧阈值 65–85 会
+    // 把细笔画和 0/1/2 的内孔一起压没。先保留一份未二值化红通道作为
+    // 独立证据，再由下方多阈值复核，仍需至少两票同号才能自动落号。
+    const currentMicroBand = /^current-temple-(?:upper|lower)-code-line/.test(landscapeCodeLayout.name);
+    if (currentMicroBand) {
+      for (const height of [300, 420]) {
+        const redNaturalDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-focused-red-natural-${height}.png`);
+        await sharpFile(file)
+          .rotate()
+          .extract(extract)
+          .resize({ height, withoutEnlargement: false })
+          .extractChannel(0)
+          .normalize()
+          .sharpen({ sigma: 0.7 })
+          .png()
+          .toFile(redNaturalDiagnostic);
+        const redNaturalResult = await worker.recognize(redNaturalDiagnostic);
+        const redNaturalParsed = parseOcrCandidates(redNaturalResult.data.text, expectedPrefix, expectedNumbers)
+          .filter((item) => item.prefixDistance <= 0.1);
+        for (const item of redNaturalParsed) focusedObservations.push({
+          ...item,
+          confidence: Number(redNaturalResult.data.confidence || 0),
+          layout: landscapeCodeLayout.name,
+          variant: `focused-red-natural-${height}`,
+        });
+      }
+    }
     // 红纸在普通灰度中本身偏暗，会与黑色编号一起被阈值压成整块黑色。
     // 红通道能把红纸背景抬亮而保留黑字；黄纸/低饱和照片则继续由灰度通道
     // 负责。两路仍各跑两个阈值，最终必须形成同号共识，不能单次猜号。
@@ -871,7 +1013,10 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
       // 木架和高光会拉高整幅裁图的动态范围，红纸主体归一化后通常落在
       // 50~100。另有局部阴影覆盖编号的照片，使用 CLAHE 局部均衡后再以
       // 中阈值识别，避免把整片纸纹放大成噪声。
-      const thresholds = channel === 'clahe' ? [105, 125, 145] : [65, 75, 85];
+      const thresholds = channel === 'red' && currentMicroBand ? [90, 110, 130, 150]
+        : channel === 'clahe' ? [105, 125, 145]
+        : channel === 'red' && landscapeCodeLayout.name === 'current-temple-code-line' ? [85, 105, 125]
+          : [65, 75, 85];
       for (const threshold of thresholds) {
         const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-focused-${channel[0]}${threshold}.png`);
         let pipeline = sharpFile(file)
@@ -906,15 +1051,14 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     const focusedGroups = groupObservations(focusedObservations);
     const focusedBest = focusedGroups[0] || null;
     const focusedSecond = focusedGroups[1] || null;
-    if ((focusedBest?.votes >= 2 || (focusedBest?.prefixDistance <= 0.1 && focusedBest?.maxConfidence >= 60))
-      && focusedBest.maxConfidence >= 35
-      && (!focusedSecond || focusedBest.votes > focusedSecond.votes)) {
+    if (isReliableOcrConsensus(focusedBest, focusedSecond, 35)) {
       return {
         file,
         reliable: true,
         number: focusedBest.number,
         paperGeometry: paperEvidence.geometry,
         visualMetrics,
+        sceneMetrics,
         evidence: {
           method: 'targeted-landscape-code-threshold-consensus',
           votes: focusedBest.votes,
@@ -933,6 +1077,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   const firstPassLayouts = layouts.slice(0, 4);
   for (const layout of firstPassLayouts) {
     const extract = cropFromRatios(metadata, layout);
+    if (!isUsableOcrExtract(extract)) continue;
     const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}.png`);
     await sharpFile(file)
       .rotate()
@@ -953,6 +1098,20 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     const parsed = parseOcrCandidates(result.data.text, expectedPrefix, expectedNumbers);
     const confidence = Number(result.data.confidence || 0);
     for (const item of parsed) observations.push({ ...item, confidence, layout: layout.name, variant: 'gray' });
+    // 2026-08-27 实图 268-1-576 在宽框中肉眼清晰，但 SPARSE_TEXT 只给
+    // 9 分；同一严格右上角裁框用 AUTO 能稳定读成 2681-576（63 分）。
+    // 仅当 SPARSE_TEXT 已读出完整业务前缀和当天 PDF 编号、但置信度不足时，
+    // 才追加一种分割模式作为独立证据。它不扩大裁图范围，也不会根据缺号猜测。
+    if (layout.sparse
+      && confidence < 20
+      && parsed.some((item) => item.prefixDistance <= 0.1)) {
+      await worker.setParameters({ tessedit_pageseg_mode: PSM.AUTO });
+      const autoResult = await worker.recognize(diagnostic);
+      await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
+      const autoParsed = parseOcrCandidates(autoResult.data.text, expectedPrefix, expectedNumbers);
+      const autoConfidence = Number(autoResult.data.confidence || 0);
+      for (const item of autoParsed) observations.push({ ...item, confidence: autoConfidence, layout: layout.name, variant: 'gray-auto' });
+    }
     // 完整业务前缀、当天编号范围和足够 OCR 置信度同时成立时，单个窄框已是
     // 可用强证据；无需继续跑后面的宽框与阈值组合。
     if (parsed.some((item) => item.prefixDistance <= 0.1) && confidence >= 20) break;
@@ -980,6 +1139,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     const thresholds = [110, 170];
     for (const layout of secondPassLayouts) {
       const extract = cropFromRatios(metadata, layout);
+      if (!isUsableOcrExtract(extract)) continue;
       for (const contrastChannel of contrastChannels) for (const threshold of thresholds) {
         const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-g${threshold}.png`);
         let thresholdCrop = sharpFile(file)
@@ -1003,24 +1163,36 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   const grouped = groupObservations(observations);
   const best = grouped[0] || null;
   const second = grouped[1] || null;
-  const uniquelyBest = Boolean(best && (!second || best.votes > second.votes || (best.votes === second.votes && best.prefixDistance < second.prefixDistance)));
-  // 单个低置信度固定裁框很容易把 355 看成相近号码。只有完整前缀且足够
-  // 置信，或至少两种独立裁切/二值化结果一致时，才可直接改名。
-  const strongOcrEvidence = Boolean(best && (
-    (best.prefixDistance <= 0.1 && (best.votes >= 2 || best.maxConfidence >= 35))
-    || (best.prefixDistance > 0.1 && best.prefixDistance <= 1 && best.votes >= 2)
-  ));
-  const exactFullCodeEvidence = Boolean(best?.prefixDistance <= 0.1 && best?.maxConfidence >= 20);
-  const paperTailEvidence = Boolean((paperEvidence.geometry?.usablePaper || paperEvidence.geometry?.rectangularPaper)
-    && best?.prefixDistance <= 2 && best?.votes >= 1);
-  const reliable = Boolean(best && uniquelyBest && (strongOcrEvidence || exactFullCodeEvidence || paperTailEvidence));
+  // 单一裁框/阈值即使置信度较高，也曾把清晰的 580 稳定误读为 569。自动改名
+  // 必须至少由两个独立裁框或预处理变体形成共识；单票结果保留为候选，交给
+  // PDF 唯一缺号和连续拍摄序列复核，不能直接成为“已确认”。
+  const reliable = isReliableOcrConsensus(best, second, 20);
   // Windows 自带 OCR 对实拍中很小、偏灰的打印编号明显优于 Tesseract。
   // 仅在本地 OCR 仍未可靠收敛时读取两个严格的编号裁框；结果与当天 PDF
   // 唯一编号集相交后也必须只剩一个编号，才允许采用，正文不会进入该裁框。
   if (!reliable && windowsFallbackFiles.length && appRoot) {
-    const windows = readWindowsOcrTails(appRoot, windowsFallbackFiles, cropDir);
+    // Windows OCR 串行读取文件。旧版把每个布局的彩色、红通道、阈值图都
+    // 塞进去，单图可达 14 个，30 秒超时前反而读不到最有效的微型原彩框。
+    // 只保留按实测有效性排序的 6 个严格编号裁框。
+    const windowsPriority = (fileName) => {
+      const name = path.basename(fileName);
+      if (/current-temple-(?:upper|lower)-code-line-windows-color/.test(name)) return 0;
+      if (/current-temple-code-micro-windows-color/.test(name)) return 1;
+      if (/current-portrait-code-line-windows-color/.test(name)) return 2;
+      if (/current-temple-code-line-windows-color/.test(name)) return 3;
+      if (/windows-color/.test(name)) return 4;
+      if (/windows-red/.test(name)) return 5;
+      return 6;
+    };
+    const orderedWindowsFiles = [...new Set(windowsFallbackFiles)]
+      .sort((left, right) => windowsPriority(left) - windowsPriority(right))
+      .slice(0, 6);
+    const windows = readWindowsOcrTails(appRoot, orderedWindowsFiles, cropDir);
     const matches = [...new Set([...windows.values()]
-      .flatMap((item) => item.numbers || [])
+      .flatMap((item) => [
+        ...(item.numbers || []),
+        ...parseLooseWindowsCodeCandidates(item.text, expectedPrefix, expectedNumbers),
+      ])
       .filter((number) => expectedNumbers.has(number)))];
     if (matches.length === 1) {
       return {
@@ -1029,6 +1201,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
         number: matches[0],
         paperGeometry: paperEvidence.geometry,
         visualMetrics,
+        sceneMetrics,
         evidence: { method: 'windows-ocr-strict-code-crop', votes: windows.size, prefixDistance: null, maxConfidence: 100, layouts: [] },
         candidates: [{ number: matches[0], votes: windows.size, prefixDistance: 0.25, maxConfidence: 100, layouts: ['windows-ocr-strict-code-crop'] }],
       };
@@ -1040,6 +1213,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     number: reliable ? best.number : null,
     paperGeometry: paperEvidence.geometry,
     visualMetrics,
+    sceneMetrics,
     evidence: best ? { votes: best.votes, prefixDistance: best.prefixDistance, maxConfidence: best.maxConfidence, layouts: best.layouts } : null,
     candidates: grouped.slice(0, 5),
   };
@@ -1454,6 +1628,24 @@ async function photoShapeFingerprints(item) {
     const vector = await localShapeFingerprint(sharpFile(item.file).rotate().extract(extract));
     if (vector) result.push({ name, vector });
   }
+  // 当前 4:3 相机有两个稳定纸面区域。纸张颜色与木架或神像连通时，动态
+  // geometry 会几乎覆盖整幅画面；继续缩放这个错误框不会得到可比指纹。
+  // 固定区域只用于本地 PDF 版式复核，最终仍需相似度、次优差距和一页一图
+  // 三重约束，不会单凭相机位置落号。
+  const aspect = Number(metadata.width || 0) / Math.max(1, Number(metadata.height || 0));
+  if (aspect >= 1.20 && aspect <= 1.50) {
+    const cameraPaperLayouts = [
+      ['camera-water-board', { left: 0.285, top: 0.505, width: 0.48, height: 0.485 }],
+      ['camera-water-board-tight', { left: 0.30, top: 0.525, width: 0.45, height: 0.455 }],
+      ['camera-lamp-board', { left: 0.19, top: 0.36, width: 0.59, height: 0.54 }],
+      ['camera-lamp-paper', { left: 0.21, top: 0.40, width: 0.55, height: 0.46 }],
+    ];
+    for (const [name, layout] of cameraPaperLayouts) {
+      const extract = cropFromRatios(metadata, layout);
+      const vector = await localShapeFingerprint(sharpFile(item.file).rotate().extract(extract));
+      if (vector) result.push({ name, vector });
+    }
+  }
   return result;
 }
 
@@ -1472,10 +1664,13 @@ export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = nu
     const variants = await photoShapeFingerprints(item);
     if (!variants.length) continue;
     const paperColor = await dominantPaperColor(item.file,item.paperGeometry);
-    const sameColorPages = paperColor === 'red' ? indexedPages.filter((page)=>/红纸/.test(page.pdfName || ''))
+    // 供水福单也使用红纸，但文件名是“供水”而非“红纸”；必须进入同一
+    // 候选集合，否则 599–601 会被错误排除，只剩 602 红纸页参与比较。
+    const sameColorPages = paperColor === 'red' ? indexedPages.filter((page)=>/(?:红纸|供水)/.test(page.pdfName || ''))
       : paperColor === 'yellow' ? indexedPages.filter((page)=>/黄纸/.test(page.pdfName || '')) : [];
+    const sameOrientationPages = indexedPages.filter((page)=>page.portrait === (item.paperGeometry.height > item.paperGeometry.width * 1.25));
     const candidatePages = sameColorPages.length ? sameColorPages
-      : indexedPages.filter((page)=>page.portrait === (item.paperGeometry.height > item.paperGeometry.width * 1.25));
+      : sameOrientationPages.length ? sameOrientationPages : indexedPages;
     const scores = candidatePages
       .map((page) => {
         const variantScores = variants.map((variant) => ({ name: variant.name, score: localShapeSimilarity(variant.vector, page._localShapeFingerprint) }))
@@ -1531,6 +1726,51 @@ function parseWindowsOcrNumbers(text) {
   return [...new Set([...normalized.matchAll(/(?:^|\D)(\d{3,4})(?!\d)/g)].map((match) => Number(match[1])))];
 }
 
+// Windows OCR 在极小的实拍编号上常把 8 读成 B、9 读成 g/q，也可能只保留
+// 三位尾号的最后两位。这里仍以当天 PDF 的真实编号集合为边界：字符归一化
+// 后的完整三/四位数字可以直接作为候选；残缺两位尾号则必须同时存在一个与
+// 平台前缀编辑距离不超过 1 的三位数字，并且在 PDF 集合中只能对应一个编号。
+// 因此不会仅凭“当天缺哪个号”猜测照片编号。
+export function parseLooseWindowsCodeCandidates(text, expectedPrefix, expectedNumbers) {
+  const normalized = normalizeOcr(text)
+    .replace(/[BRbr]/g, '8')
+    .replace(/[gq]/g, '9');
+  const tokens = [...normalized.matchAll(/\d{1,4}/g)]
+    .map((match) => ({ value: match[0], index: match.index || 0 }));
+  const candidates = new Set(tokens
+    .map((token) => Number(token.value))
+    .filter((number) => Number.isInteger(number) && expectedNumbers?.has(number)));
+  const prefixText = String(expectedPrefix || '');
+  const prefixTokens = tokens.filter((token) => (token.value.length === prefixText.length
+    && editDistance(token.value, prefixText) <= 1)
+    // 极小红纸编号的首位 2 偶尔会被木架边缘吞掉，例如 268 -> 6R -> 68。
+    // 只接受完整业务前缀的末两位原样命中，不接受任意两位近似。
+    || (prefixText.length === 3 && token.value === prefixText.slice(-2)));
+  for (const prefixToken of prefixTokens) {
+    const laterTokens = tokens.filter((token) => token.index > prefixToken.index);
+    // Windows OCR 会把清晰的 577 分成“57 7”。相邻数字片段合并后若正好
+    // 命中当天 PDF 集合，应优先于把“57”当成残缺尾号推成 557。
+    const joinedCandidates = new Set();
+    for (let index = 0; index < laterTokens.length - 1; index += 1) {
+      const joined = laterTokens[index].value + laterTokens[index + 1].value;
+      if (joined.length < 3 || joined.length > 4) continue;
+      const number = Number(joined);
+      if (expectedNumbers?.has(number)) joinedCandidates.add(number);
+    }
+    if (joinedCandidates.size === 1) {
+      candidates.add([...joinedCandidates][0]);
+      continue;
+    }
+    for (const token of laterTokens) {
+      if (token.index <= prefixToken.index || token.value.length < 2 || token.value.length > 3) continue;
+      const matches = [...(expectedNumbers || [])]
+        .filter((number) => String(number).endsWith(token.value));
+      if (matches.length === 1) candidates.add(matches[0]);
+    }
+  }
+  return [...candidates];
+}
+
 function readWindowsOcrTails(appRoot, files, workDir) {
   if (process.platform !== 'win32' || !appRoot || !files.length) return new Map();
   const script = path.join(appRoot, 'ui', 'Read-WindowsOcr.ps1');
@@ -1553,7 +1793,12 @@ function readWindowsOcrTails(appRoot, files, workDir) {
       const item = JSON.parse(line);
       const number = parseWindowsOcrTail(item.text);
       const numbers = parseWindowsOcrNumbers(item.text);
-      if (item.path && (numbers.length || (Number.isInteger(number) && number > 0))) values.set(path.resolve(item.path), { number, numbers, text: normalizeOcr(item.text) });
+      const normalizedText = normalizeOcr(item.text);
+      // “6R · 57 7”这类结果没有连续三位数字，旧版在进入宽松但受 PDF
+      // 集合约束的解析器之前就把整条 OCR 结果丢弃，导致后面的安全还原逻辑
+      // 永远没有机会运行。保留非空的严格编号裁框文本；候选是否可采信仍由
+      // parseLooseWindowsCodeCandidates 和当天 PDF 唯一编号集合决定。
+      if (item.path && normalizedText) values.set(path.resolve(item.path), { number, numbers, text: normalizedText });
     } catch {}
   }
   return values;
@@ -1720,6 +1965,9 @@ async function sceneVisualScore(file) {
 export function classifySceneVisualScore(item) {
   if (item.darkRatio <= 0.18 && item.luminance >= 110) return 'scene-water';
   if (item.darkRatio >= 0.32 && item.warmBrightRatio >= 0.10) return 'scene-lamp';
+  // 远一点的灯阵曝光更低，亮焰面积会明显缩小；暗像素、低平均亮度和仍然
+  // 可见的暖色高光三项同时成立时，依然是单图可确认的供灯场景。
+  if (item.darkRatio >= 0.35 && item.luminance <= 95 && item.warmBrightRatio >= 0.055) return 'scene-lamp';
   return null;
 }
 
@@ -1792,9 +2040,14 @@ async function imageVisualMetrics(file) {
 export function isLikelyScene(item) {
   const metrics = item.visualMetrics || {};
   const geometry = item.paperGeometry || {};
-  const sprawlingLights = geometry.score > 0.12
+  const scene = item.sceneMetrics || {};
+  const darkSceneOrLowText = Number(scene.darkRatio ?? 1) <= 0.25
+    || Number(metrics.edgeDensity || 0) <= 0.13;
+  const sprawlingLights = !geometry.usablePaper
+    && geometry.score > 0.12
     && geometry.width > 0.90
-    && (geometry.fill < 0.40 || geometry.top >= 0.58);
+    && (geometry.fill < 0.40 || geometry.top >= 0.58)
+    && darkSceneOrLowText;
   // 近景灯阵的金色灯架可能被纸色连通域误认为一张大黄纸，但灯阵整幅画面
   // 的结构非常稳定：没有矩形纸张、连通区域接近全宽、文字边缘极少且背景
   // 高度均匀。该证据必须先于“大色块即纸张”的兜底，避免场景图进入 OCR。
@@ -1818,7 +2071,15 @@ export function isLikelyScene(item) {
     && geometry.width >= 0.96
     && geometry.height >= 0.60
     && geometry.boxArea >= 0.60
-    && geometry.fill >= 0.60;
+    && geometry.fill >= 0.58;
+  // 暗场灯阵的金色台阶可能被纸色检测标成“可用纸张”。真实福单虽然也会
+  // 较暗，但不会同时满足窄于 78% 画幅、低上半部边缘和 5.5% 以上暖色灯焰。
+  const dimLampSceneStructure = geometry.rectangularPaper === false
+    && geometry.width <= 0.78
+    && Number(scene.darkRatio || 0) >= 0.35
+    && Number(scene.luminance || 255) <= 95
+    && Number(scene.warmBrightRatio || 0) >= 0.055
+    && Number(metrics.upperEdgeDensity || 1) <= 0.09;
   // 供水场景中，画面下半部的水碗、供桌和远处红纸可能连成一个宽色块。
   // 它从画面中部延伸到底边，但高度不到半幅、没有矩形纸边；真实近景福单
   // 的纸张通常从画面上部开始且高度超过半幅。旧版把这种色块当成福单，
@@ -1828,17 +2089,20 @@ export function isLikelyScene(item) {
     && Number(geometry.bottom || geometry.top + geometry.height) >= 0.98
     && geometry.width >= 0.82
     && geometry.height <= 0.50
-    && geometry.boxArea <= 0.45;
+    && geometry.boxArea <= 0.45
+    // 旧场景图即使纸色检测误报 usablePaper，也有明显低均匀度；新批次
+    // 的清晰福单均匀度更高，因此不能只依赖 usablePaper 一个易波动标记。
+    && ((!geometry.usablePaper && darkSceneOrLowText) || Number(metrics.uniformity || 0) <= 0.35);
   // 近景灯阵只会形成几个小暖色连通块。第二张灯图的上半部边缘密度略高
   // 于旧阈值 0.08，但仍同时满足“小色块、无可用纸张、高均匀度、低总边缘”。
   const compactWarmSceneStructure = !geometry.usablePaper
     && geometry.rectangularPaper === false
     && geometry.boxArea <= 0.12
-    && metrics.uniformity >= 0.50
+    && metrics.uniformity >= 0.49
     && metrics.upperEdgeDensity <= 0.10
     && metrics.edgeDensity <= 0.13;
   // 灯阵或供水全景会在画面底部形成横跨全宽的红/黄连通块；它不是纸张。
-  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene
+  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure) return true;
   // 纸张偶尔与画面右边缘相接，严格矩形条件会失败；足够大的连续红/黄纸色块仍应判为纸张。
   if (geometry.rectangularPaper || (geometry.score >= 0.085
@@ -1847,10 +2111,12 @@ export function isLikelyScene(item) {
     && geometry.width < 0.90
     && geometry.fill >= 0.45)) return false;
   // 文件名“微信图片”不是业务证据；只用画面结构排除没有矩形纸张的场景图。
-  const visualScene = metrics.uniformity > 0.47
+  const visualScene = !geometry.usablePaper
+    && geometry.boxArea <= 0.12
+    && metrics.uniformity > 0.47
     && metrics.upperEdgeDensity < 0.08
     && metrics.edgeDensity < 0.16;
-  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene
+  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure || visualScene);
 }
 
@@ -1864,8 +2130,22 @@ export async function diagnosePhotoStructure(file) {
     paperGeometry: paperEvidence.geometry,
     visualMetrics,
     sceneMetrics,
-    likelyScene: isLikelyScene({ paperGeometry: paperEvidence.geometry, visualMetrics }),
+    likelyScene: isLikelyScene({ paperGeometry: paperEvidence.geometry, visualMetrics, sceneMetrics }),
   };
+}
+
+export function hasStrongOcrConflict(item, expectedNumber, assignedNumbers = new Set()) {
+  return (item?.candidates || []).some((candidate) => candidate.number !== expectedNumber
+    && candidate.prefixDistance <= 1
+    && (candidate.votes >= 2
+      // 单个精确前缀候选虽然不足以直接落号，但它足以阻止拍摄顺序把照片
+      // 强行覆盖为另一个编号。只有低置信单票继续交给序列推断。
+      || (candidate.votes >= 1
+        && candidate.prefixDistance <= 0.1
+        && Number(candidate.maxConfidence || 0) >= 20))
+    // 若该候选号已经由另一张更强照片占用，它正是需要全局一一对应消解的
+    // OCR 重复，不得阻断连续拍摄序列把本图归入唯一缺号。
+    && !assignedNumbers.has(candidate.number));
 }
 
 export function inferPhotoSequences(recognized, expectedNumbers) {
@@ -1923,7 +2203,7 @@ export function inferPhotoSequences(recognized, expectedNumbers) {
           if (!expectedNumbers.has(number) || assigned.has(index)) continue;
           const item = recognized[index];
           if (!paperLike(item)) continue;
-          const strongConflict = item.candidates.some((candidate) => candidate.prefixDistance <= 2 && candidate.number !== number);
+          const strongConflict = hasStrongOcrConflict(item, number, new Set(assigned.values()));
           if (strongConflict) continue;
           item.reliable = true;
           item.number = number;
@@ -1945,7 +2225,7 @@ export function inferPhotoSequences(recognized, expectedNumbers) {
             const number = offset + index;
             const item = recognized[index];
             if (!expectedNumbers.has(number) || !paperLike(item) || isLikelyScene(item)) break;
-            const strongConflict = item.candidates.some((candidate) => candidate.prefixDistance <= 2 && candidate.number !== number);
+            const strongConflict = hasStrongOcrConflict(item, number, new Set(assigned.values()));
             if (strongConflict) break;
             item.reliable = true;
             item.number = number;
@@ -2043,8 +2323,7 @@ export function inferPhotoGapsAroundExistingNumbers(recognized, expectedNumbers,
       && Math.abs(Number(a.width || 0) - Number(b.width || 0)) <= 0.14
       && Math.abs(Number(a.height || 0) - Number(b.height || 0)) <= 0.28;
   };
-  const hasConflict = (item, number) => (item.candidates || [])
-    .some((candidate) => candidate.prefixDistance <= 1 && candidate.number !== number);
+  const hasConflict = (item, number) => hasStrongOcrConflict(item, number, used);
   const apply = (indices, numbers, method) => {
     if (indices.length !== numbers.length) return false;
     for (let offset = 0; offset < indices.length; offset += 1) {
@@ -2239,7 +2518,12 @@ export function resolveAmbiguousPhotosByGlobalSet(recognized, expectedNumbers, o
       const item = recognized[index];
       if (item?.reliable || !item?.paperGeometry?.usablePaper || isLikelyScene(item)) continue;
       const options = [...new Set((item.candidates || [])
-        .filter((candidate) => Number(candidate.votes || 0) >= 2 && Number(candidate.prefixDistance ?? 99) <= 3.3)
+        .filter((candidate) => (Number(candidate.votes || 0) >= 2 && Number(candidate.prefixDistance ?? 99) <= 3.3)
+          // 精确平台前缀的单票结果可以作为全局候选，但仍必须通过下方
+          // “剩余 PDF 编号唯一且没有另一照片竞争”的一一对应约束。
+          || (Number(candidate.votes || 0) >= 1
+            && Number(candidate.prefixDistance ?? 99) <= 0.1
+            && Number(candidate.maxConfidence || 0) >= 20))
         .map((candidate) => candidate.number)
         .filter(Number.isInteger)
         .filter((number) => expectedNumbers.has(number) && !usedNumbers.has(number)))];

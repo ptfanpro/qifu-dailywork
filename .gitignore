@@ -23,6 +23,7 @@ playwright-profile/
 *auth-state*.json
 secure-login.dat
 *credential*.dat
+secure-automation.dat
 
 # Business data and generated evidence must never enter source control
 *.log

@@ -9,6 +9,7 @@ import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
+import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
 
 function parseArgs(argv) { const out = { action: argv[2] }; for (let i=3;i<argv.length;i+=2) out[argv[i].replace(/^--/,'')] = argv[i+1]; return out; }
 function atomic(file, value) {
@@ -192,8 +193,39 @@ const appRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const localStateRoot = path.join(path.dirname(appRoot), '祈福运行数据');
 const credentialPath = path.join(localStateRoot, 'secure-login.dat');
 const credentialHelperPath = path.join(appRoot, 'ui', 'Read-SecureCredential.ps1');
+const automationCredentialPath = path.join(localStateRoot, 'secure-automation.dat');
+const automationCredentialHelperPath = path.join(appRoot, 'ui', 'Read-AutomationCredential.ps1');
 const workdaysRoot = path.join(localStateRoot, 'workdays');
 fs.mkdirSync(workdaysRoot, { recursive:true });
+if (args.action === 'automation-auth-check') {
+  let credential = null;
+  let client = null;
+  try {
+    credential = readEncryptedAutomationCredential(automationCredentialPath, automationCredentialHelperPath);
+    if (!credential) throw new Error('本机尚未配置接口机器认证。');
+    client = new AutomationApiClient(credential);
+    const status = await client.status();
+    const businessDate = String(args['photo-date'] || '').trim();
+    if (!businessDate) throw new Error('缺少机器接口日清单业务日期。');
+    const plan = await client.dailyPlan(businessDate);
+    const groupCounts = Object.fromEntries(Object.entries(plan.groups).map(([name, group])=>[name, group.count]));
+    const receipt = {
+      schemaVersion:1,businessDate,checkedAt:new Date().toISOString(),
+      canonicalVersion:plan.canonicalVersion,canonicalOrderSetSha256:plan.canonicalOrderSetSha256,
+      totals:plan.totals,groupCounts,
+    };
+    const receiptDir = path.join(workdaysRoot,businessDate,'machine-api');
+    fs.mkdirSync(receiptDir,{recursive:true});
+    atomic(path.join(receiptDir,'daily-plan-check.json'),receipt);
+    log('机器接口认证及日清单检查通过；未创建后台人员会话，也未进入验证码页。');
+    log(`${businessDate} 机器日清单：常规 ${plan.totals.daily} 条，续费待处理 ${plan.totals.renewal} 条；匿名订单哈希 ${plan.canonicalOrderSetSha256.slice(0,12)}…。`);
+  } finally {
+    client?.clear();
+    if (credential) credential.secret = '';
+    credential = null;
+  }
+  process.exit(0);
+}
 if (args.action === 'cleanup-local-state') {
   const report = cleanupLocalState(localStateRoot, { force:args['force-cleanup'] === 'yes' });
   if (report.skipped) log('本机空间清理：距离上次清理不足24小时，本次跳过。');
@@ -586,6 +618,8 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
       for (let index=0; index<batches.length; index++) {
         log(`正在上传第 ${index+1}/${batches.length} 批，共 ${batches[index].length} 张。`);
         receipt.currentBatch = index + 1;
+        receipt.currentBatchFiles = batches[index].map((file)=>path.basename(file));
+        receipt.currentBatchStartedAt = new Date().toISOString();
         receipt.stage = 'starting';
         atomic(receiptFile,receipt);
         let result;
@@ -635,6 +669,8 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
         }
         receipt.uploadedCount = manifest.files.blessing.filter((file) => receipt.uploadedFiles[path.basename(file)]?.sha256 === manifest.fileHashes[path.basename(file)]).length;
         receipt.stage = 'batch-verified';
+        receipt.currentBatchFiles = [];
+        receipt.currentBatchCompletedAt = new Date().toISOString();
         atomic(receiptFile,receipt);
       }
       if (receipt.uploadedCount !== manifest.counts.blessing) throw new Error(`上传总数 ${receipt.uploadedCount} 与福单图 ${manifest.counts.blessing} 不一致。`);
