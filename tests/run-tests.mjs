@@ -233,6 +233,25 @@ const strongVisibleCodeResult=await recheckReliablePhotoClaimsWithPdf(strongVisi
 assert.equal(strongVisibleCodeResult.confirmed,1);
 assert.equal(strongVisibleCodeResult.rejected,0);
 assert.equal(strongVisibleCodeClaim[0].evidence.pdfRecheck.method,'multi-crop-visible-code-and-pdf-index');
+// A global one-to-one pass may promote a photo after preserving the original
+// multi-crop OCR votes.  The bookkeeping method name must not make the later
+// PDF shape check discard that clear visible code.
+const globallyResolvedVisibleCodeClaim=[{
+  file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},paperGeometry:{},
+  evidence:{method:'global-one-to-one-remaining-pdf-candidate',votes:2,prefixDistance:0,maxConfidence:92,layouts:['paper-relative-code-only','current-temple-code-line']},
+}];
+const globallyResolvedVisibleCodeResult=await recheckReliablePhotoClaimsWithPdf(globallyResolvedVisibleCodeClaim,shapePages);
+assert.equal(globallyResolvedVisibleCodeResult.confirmed,1);
+assert.equal(globallyResolvedVisibleCodeResult.rejected,0);
+assert.equal(globallyResolvedVisibleCodeClaim[0].evidence.pdfRecheck.method,'multi-crop-visible-code-and-pdf-index');
+const persistedDirectVisibleCodeClaim=[{
+  file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},paperGeometry:{},
+  evidence:{votes:2,prefixDistance:0,maxConfidence:92,layouts:['current-temple-code-line','current-temple-code-micro']},
+}];
+const persistedDirectVisibleCodeResult=await recheckReliablePhotoClaimsWithPdf(persistedDirectVisibleCodeClaim,shapePages);
+assert.equal(persistedDirectVisibleCodeResult.confirmed,1);
+assert.equal(persistedDirectVisibleCodeResult.rejected,0);
+assert.equal(persistedDirectVisibleCodeClaim[0].evidence.pdfRecheck.method,'multi-crop-visible-code-and-pdf-index');
 const strictVisibleCodeBoxClaim=[{
   file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},paperGeometry:{},
   evidence:{method:'windows-ocr-strict-lower-code-box',votes:1,prefixDistance:0,maxConfidence:100},
@@ -241,6 +260,22 @@ const strictVisibleCodeBoxResult=await recheckReliablePhotoClaimsWithPdf(strictV
 assert.equal(strictVisibleCodeBoxResult.confirmed,1);
 assert.equal(strictVisibleCodeBoxResult.rejected,0);
 assert.equal(strictVisibleCodeBoxClaim[0].evidence.pdfRecheck.method,'strict-visible-code-box-and-pdf-index');
+const strictPaperRelativeWindowsCodeClaim=[{
+  file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},paperGeometry:{},
+  evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:0.25,maxConfidence:100,layouts:['paper-relative-code-only']},
+}];
+const strictPaperRelativeWindowsCodeResult=await recheckReliablePhotoClaimsWithPdf(strictPaperRelativeWindowsCodeClaim,shapePages);
+assert.equal(strictPaperRelativeWindowsCodeResult.confirmed,1);
+assert.equal(strictPaperRelativeWindowsCodeResult.rejected,0);
+assert.equal(strictPaperRelativeWindowsCodeClaim[0].evidence.pdfRecheck.method,'strict-visible-code-box-and-pdf-index');
+const continuousAnchoredSequenceClaim=[{
+  file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},paperGeometry:{},
+  evidence:{method:'capture-ascending-sequence-between-code-anchors',votes:3,prefixDistance:null,maxConfidence:null,layouts:[]},
+}];
+const continuousAnchoredSequenceResult=await recheckReliablePhotoClaimsWithPdf(continuousAnchoredSequenceClaim,shapePages);
+assert.equal(continuousAnchoredSequenceResult.confirmed,1);
+assert.equal(continuousAnchoredSequenceResult.rejected,0);
+assert.equal(continuousAnchoredSequenceClaim[0].evidence.pdfRecheck.method,'continuous-capture-sequence-and-pdf-index');
 const unreadableExistingFilename=[{
   file:shapePhoto,reliable:true,number:401,observedOcrNumber:null,candidates:[],visualMetrics:{},paperGeometry:{},
   evidence:{method:'existing-numeric-filename-claim'},
@@ -259,6 +294,11 @@ const standardTopEdgeLayouts=targetedCurrentCodeLayouts([
 ]);
 assert.equal(standardTopEdgeLayouts[0].name,'paper-relative-code-only');
 assert.equal(standardTopEdgeLayouts.length,6);
+const raisedOutdoorLayouts=targetedCurrentCodeLayouts([
+  {name:'current-outdoor-upper-code-line'},
+  {name:'current-outdoor-code-line'},
+]);
+assert.equal(raisedOutdoorLayouts.some((item)=>item.name==='current-outdoor-upper-code-line'),true);
 fs.rmSync(localShapeRoot,{recursive:true,force:true});
 
 const cleanupRoot=path.join(fs.mkdtempSync(path.join(os.tmpdir(),'prayer-cleanup-test-')),'祈福运行数据');
@@ -610,8 +650,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.84/);
-assert.match(uiSource,/补拍编号断点修正版/);
+assert.match(uiSource,/V9\.5\.85/);
+assert.match(uiSource,/可见编号证据闭环修正版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -839,6 +879,26 @@ const twoAnchorPhotos=Array.from({length:8},(_,index)=>({
 }));
 inferPhotoSequences(twoAnchorPhotos,new Set(Array.from({length:8},(_,index)=>339+index)));
 
+const lowFillOutdoorPhotos=Array.from({length:5},(_,index)=>(
+  index<2
+    ? {
+      file:`微信图片_2026083010000${index}_${1400+index}_92.jpg`,reliable:true,number:616+index,candidates:[],
+      paperGeometry:{rectangularPaper:index===0,score:.24,boxArea:.48,width:.74,height:.65,fill:.49,top:.12},
+      visualMetrics:{edgeDensity:.145,upperEdgeDensity:.12},
+      evidence:index===0
+        ? {method:'targeted-landscape-code-threshold-consensus',votes:4,maxConfidence:91}
+        : {method:'windows-ocr-strict-code-crop',votes:1,maxConfidence:100},
+    }
+    : {
+      file:`微信图片_2026083010000${index}_${1400+index}_92.jpg`,reliable:false,number:null,candidates:[],
+      paperGeometry:{rectangularPaper:false,usablePaper:false,score:.10,boxArea:.54,width:.80,height:.68,fill:.20,top:.16},
+      visualMetrics:{edgeDensity:.15,upperEdgeDensity:.115},sceneMetrics:{darkRatio:.25,warmBrightRatio:.04,luminance:100},
+    }
+));
+inferPhotoSequences(lowFillOutdoorPhotos,new Set([616,617,618,619,620]));
+assert.deepEqual(lowFillOutdoorPhotos.map((item)=>item.number),[616,617,618,619,620]);
+assert.ok(lowFillOutdoorPhotos.slice(2).every((item)=>item.evidence.method==='capture-ascending-sequence-forward-edge'));
+
 const gapGeometry={usablePaper:true,rectangularPaper:true,score:.2,boxArea:.3,width:.58,height:.49,fill:.7,top:.5};
 const gapMetrics={edgeDensity:.12,upperEdgeDensity:.10,uniformity:.35};
 const gapPhotos=[486,487,488,489].map((number,index)=>({
@@ -956,6 +1016,19 @@ const august27Papers=[
   {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.167214,width:.76875,top:.529167,height:.470833,fill:.461976,boxArea:.361953,bottom:1},visualMetrics:{edgeDensity:.232982,upperEdgeDensity:.150599,uniformity:.419948},sceneMetrics:{darkRatio:.384063}},
 ];
 assert.ok(august27Papers.every((item)=>!isLikelyScene(item)));
+// 2026-08-29 的两张夜间灯阵被金色台阶误识别成宽“可用纸张”。低文字边缘、
+// 暖色高光和暗场三项同时成立时应先按场景处理；同批黄纸福单的文字边缘
+// 明显更高，不能被这条规则吞掉。
+assert.equal(isLikelyScene({
+  paperGeometry:{rectangularPaper:false,usablePaper:true,width:.897,height:.633,boxArea:.568},
+  visualMetrics:{edgeDensity:.068,upperEdgeDensity:.023,uniformity:.577},
+  sceneMetrics:{luminance:91.8,warmBrightRatio:.155,darkRatio:.405},
+}),true);
+assert.equal(isLikelyScene({
+  paperGeometry:{rectangularPaper:false,usablePaper:true,width:.85,height:.45,boxArea:.38},
+  visualMetrics:{edgeDensity:.15,upperEdgeDensity:.08,uniformity:.45},
+  sceneMetrics:{luminance:79.8,warmBrightRatio:.16,darkRatio:.48},
+}),false);
 
 // 同批清晰福单的纸色连通域会把木架也包进去，旧版据此误选“竖版”裁框，
 // 并在 y=47.5% 处截到神像底座。新构图的编号实际位于约 y=50%~53%。
@@ -968,7 +1041,8 @@ assert.equal(falsePortraitLayouts[0].name, 'current-portrait-code-line');
 const falsePortraitTargetedNames=targetedCurrentCodeLayouts(falsePortraitLayouts).map((layout) => layout.name);
 assert.equal(falsePortraitTargetedNames[0],'current-portrait-code-line');
 assert.ok(['current-temple-code-line','current-outdoor-code-line','current-temple-code-micro',
-  'current-temple-upper-code-line','current-temple-lower-code-box-high','current-temple-lower-code-box-low']
+  'current-temple-upper-code-line','current-temple-lower-code-box-high','current-temple-lower-code-box-low',
+  'current-outdoor-upper-code-line']
   .every((name)=>falsePortraitTargetedNames.includes(name)));
 const portraitCodeBand=targetedCurrentCodeLayouts(falsePortraitLayouts)[0];
 assert.ok(portraitCodeBand.top <= 0.35 && portraitCodeBand.top + portraitCodeBand.height >= 0.41);
