@@ -14,7 +14,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.6.0',
+        '祈福本地执行器 V9.6.1',
         'OK',
         'Information'
     ) | Out-Null
@@ -47,7 +47,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.0（本地双引擎识别版）'
+$form.Text = '祈福本地执行器 V9.6.1（线上闭环复核版）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -108,18 +108,18 @@ $photoProgress.Size = New-Object System.Drawing.Size(802,18)
 $photoGroup.Controls.Add($photoProgress)
 
 $pendingGroup = New-Object System.Windows.Forms.GroupBox
-$pendingGroup.Text = '历史尚未闭环业务（独立处理，完成后恢复上方日期）'
+$pendingGroup.Text = '历史待复核业务（先查线上状态，完成后恢复上方日期）'
 $pendingGroup.Location = New-Object System.Drawing.Point(20,218)
 $pendingGroup.Size = New-Object System.Drawing.Size(840,68)
 $form.Controls.Add($pendingGroup)
-$pendingStatus = Add-Label $pendingGroup '正在扫描尚未闭环日期……' 18 28 385 28
+$pendingStatus = Add-Label $pendingGroup '正在扫描本机待复核日期……' 18 28 385 28
 $pendingStatus.ForeColor = [System.Drawing.Color]::DimGray
 $pendingPhotoPicker = New-Object System.Windows.Forms.ComboBox
 $pendingPhotoPicker.DropDownStyle = 'DropDownList'
 $pendingPhotoPicker.Location = New-Object System.Drawing.Point(415,23)
 $pendingPhotoPicker.Size = New-Object System.Drawing.Size(145,30)
 $pendingGroup.Controls.Add($pendingPhotoPicker)
-$pendingProcessButton = Add-Button $pendingGroup '继续处理未完成项' 575 20 245 36
+$pendingProcessButton = Add-Button $pendingGroup '复核线上并处理未完成项' 575 20 245 36
 $pendingProcessButton.Enabled = $false
 
 $pdfGroup = New-Object System.Windows.Forms.GroupBox
@@ -334,13 +334,17 @@ function Get-PendingPhotoBusinessDates {
             $manifest = Read-JsonFile (Join-Path $photos 'photo-manifest.json')
             $checkpoint = Read-JsonFile (Join-Path $photos 'ui-workflow-state.json')
             $sceneReceipt = Read-JsonFile (Join-Path $photos 'scene-upload-receipt.json')
-            $terminalComplete = $sceneReceipt -and $sceneReceipt.complete -eq $true -and $sceneReceipt.tabletCompletionVerified -eq $true
+            $onlineClosure = Read-JsonFile (Join-Path $photos 'photo-online-closure.json')
+            $sceneTerminal = $sceneReceipt -and $sceneReceipt.complete -eq $true -and $sceneReceipt.tabletCompletionVerified -eq $true
+            $onlineTerminal = $onlineClosure -and $onlineClosure.complete -eq $true -and [string]$onlineClosure.businessDate -eq $workday.Name
+            $terminalComplete = $sceneTerminal -or $onlineTerminal
             $inbox = Get-PhotoInboxForBusinessDate $workday.Name
             $hasNewRaw = Test-PhotoInboxHasNewRaw $inbox
             $hasResumeEvidence = Test-PhotoRunHasResumeEvidence $photos $manifest $checkpoint
             # 旧版本曾把历史 2.3、4.5、5.6 等场景成品和超规格旧成品误报为 failed/photo-prepare。
             # 没有新增原图、待补编号或已提交阶段回执时，该失败断点不是可执行待办。
-            if (-not $terminalComplete -and ($hasNewRaw -or $hasResumeEvidence)) { [void]$found.Add($workday.Name) }
+            # 新增原图始终重新打开业务；否则线上零待办复核回执优先于旧断点。
+            if ($hasNewRaw -or (-not $terminalComplete -and $hasResumeEvidence)) { [void]$found.Add($workday.Name) }
         }
     }
     return @($found | Sort-Object)
@@ -350,7 +354,7 @@ function Refresh-PendingPhotoBar {
     $pendingPhotoPicker.Items.Clear()
     foreach ($dateText in @($script:pendingPhotoDates)) { [void]$pendingPhotoPicker.Items.Add($dateText) }
     if (@($script:pendingPhotoDates).Count -eq 0) {
-        $pendingStatus.Text = '没有发现尚未闭环的照片业务。'
+        $pendingStatus.Text = '没有发现需要复核的历史照片业务。'
         $pendingStatus.ForeColor = [System.Drawing.Color]::DarkGreen
         $pendingProcessButton.Enabled = $false
         return
@@ -360,7 +364,7 @@ function Refresh-PendingPhotoBar {
     $count = @($script:pendingPhotoDates).Count
     $preview = (@($script:pendingPhotoDates) | Select-Object -First 3) -join '、'
     if ($count -gt 3) { $preview += '……' }
-    $pendingStatus.Text = "发现 $count 个未闭环日期：$preview；可独立处理未完成项"
+    $pendingStatus.Text = "发现 $count 个本机待复核日期：$preview；先查线上状态再决定是否处理"
     $pendingStatus.ForeColor = [System.Drawing.Color]::DarkOrange
     $pendingProcessButton.Enabled = -not $script:running
 }
@@ -409,6 +413,7 @@ function Get-ActionLabel([string]$action) {
         'cleanup-local-state' { return '本机空间清理' }
         'photo-prepare' { return '照片处理与编号' }
         'photo-recheck' { return '照片编号只读复核' }
+        'photo-online-recheck' { return '照片线上闭环只读复核' }
         'photo-scan' { return '照片预检' }
         'photo-upload' { return '福单图上传' }
         'photo-scenes' { return '场景图与牌位批量完成' }
@@ -507,6 +512,12 @@ function Refresh-PhotoCard {
     $currentInbox = Get-PhotoInboxForBusinessDate $date
     $hasNewRaw = Test-PhotoInboxHasNewRaw $currentInbox
     $hasResumeEvidence = Test-PhotoRunHasResumeEvidence $photoRunDir $manifest $checkpoint
+    $onlineClosure = Read-JsonFile (Join-Path $photoRunDir 'photo-online-closure.json')
+    if ($onlineClosure -and $onlineClosure.complete -eq $true -and [string]$onlineClosure.businessDate -eq $date -and -not $hasNewRaw) {
+        $checkedAtText = if ($onlineClosure.checkedAt) { ([DateTime]$onlineClosure.checkedAt).ToLocalTime().ToString('yyyy-MM-dd HH:mm') } else { '最近一次复核' }
+        Set-PhotoResult "$date 线上闭环已复核（$checkedAtText）：福单未上传 0、供灯待祈福 0、牌位待祈福 0。本地旧断点或旧规格提醒不再列为未闭环。" ([System.Drawing.Color]::DarkGreen) 100 '线上已确认闭环' $false $null
+        return
+    }
     if ($blockingErrorCount -gt 0 -and $manifest.blessingReady -ne $true -and -not $hasNewRaw -and -not $hasResumeEvidence -and $blessingCount -gt 0 -and [int]$manifest.counts.missingBlessing -eq 0 -and [int]$manifest.counts.extraBlessing -eq 0) {
         Set-PhotoResult "$date 仅发现历史成品：福单图 $blessingCount 张；旧小数编号场景图和旧规格文件不作为新增待办，NAS 文件未修改。后续补图进入 1 文件夹后再重新检测。" ([System.Drawing.Color]::DimGray) 0 '历史成品目录' $false $null
         return
@@ -537,7 +548,7 @@ function Refresh-PhotoCard {
         return
     }
     if ($sceneManualIssueCount -gt 0) {
-        Set-PhotoResult "$date 已上传 $blessingCount 张已确认福单图；场景图仍有 $sceneManualIssueCount 项需人工补齐或确认。上方主按钮只续跑本日期断点；历史待办请使用中间的【继续处理未完成项】。" ([System.Drawing.Color]::DarkOrange) 62 '补齐场景后继续本日期' $true 'photo-prepare'
+        Set-PhotoResult "$date 已上传 $blessingCount 张已确认福单图；场景图仍有 $sceneManualIssueCount 项需人工补齐或确认。上方主按钮只续跑本日期断点；历史待办请使用中间的【复核线上并处理未完成项】。" ([System.Drawing.Color]::DarkOrange) 62 '补齐场景后继续本日期' $true 'photo-prepare'
         return
     }
     if ($missingCount -gt 0) {
@@ -698,7 +709,7 @@ function Start-NextInitialization {
         if ($script:initFailures.Count -eq 0) {
             $pendingCount = @($script:pendingPhotoDates).Count
             $globalStatus.Text = if ($pendingCount -gt 0) {
-                "初始化完成：发现 $pendingCount 个尚未闭环日期，已列入独立任务栏；主日期保持 $($photoDate.Value.ToString('yyyy-MM-dd'))。"
+                "初始化完成：发现 $pendingCount 个本机待复核日期，已列入独立任务栏；主日期保持 $($photoDate.Value.ToString('yyyy-MM-dd'))。"
             } else {
                 '初始化完成。照片和 PDF 是两个独立任务，请按需要点击对应的一键处理。'
             }
@@ -789,8 +800,25 @@ function Complete-Runner([int]$code) {
         if ($code -ne 0) {
             $failedDate = $script:backlogBusinessDate
             Restore-BacklogPhotoDate
-            $globalStatus.Text = "历史未完成日期 $failedDate 重新预检失败，已停在【$(Get-ActionLabel $completedAction)】；修复后再次点击【继续处理未完成项】。"
+            $globalStatus.Text = "历史待复核日期 $failedDate 的线上复核失败，已停在【$(Get-ActionLabel $completedAction)】；请检查登录或网络后再次点击复核按钮。"
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkRed
+            return
+        }
+        if ($completedAction -eq 'photo-online-recheck') {
+            $checkedDate = $script:backlogBusinessDate
+            $closurePath = Join-Path (Join-Path (Get-WorkdayRoot $checkedDate) 'photos') 'photo-online-closure.json'
+            $closure = Read-JsonFile $closurePath
+            if ($closure -and $closure.complete -eq $true -and [string]$closure.businessDate -eq $checkedDate) {
+                Write-WorkflowCheckpoint 'photo' 'completed' 'photo-online-recheck' 0
+                [void](Refresh-PendingPhotoDates)
+                Restore-BacklogPhotoDate
+                $globalStatus.Text = "历史日期 $checkedDate 已重新核对线上状态：福单、供灯、牌位待办均为 0，已确认闭环并移出待复核列表。"
+                $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
+                return
+            }
+            $globalStatus.Text = "历史日期 $checkedDate 线上仍有待办，正在按当前本地清单重新检测并处理；不会沿用旧步骤结论。"
+            $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
+            Start-Runner 'photo-scan' $false 'backlog' $false
             return
         }
         Refresh-PhotoCard
@@ -804,7 +832,7 @@ function Complete-Runner([int]$code) {
             Write-WorkflowCheckpoint 'photo' 'failed' $completedAction $code
             $failedDate = $script:backlogBusinessDate
             Restore-BacklogPhotoDate
-            $globalStatus.Text = "历史未完成日期 $failedDate 停在【$(Get-ActionLabel $completedAction)】；已保留确定完成的阶段，处理提示项后再次点击【继续处理未完成项】。"
+            $globalStatus.Text = "历史未完成日期 $failedDate 停在【$(Get-ActionLabel $completedAction)】；已保留确定完成的阶段，处理提示项后再次点击【复核线上并处理未完成项】。"
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkRed
             return
         }
@@ -814,7 +842,7 @@ function Complete-Runner([int]$code) {
             Write-WorkflowCheckpoint 'photo' 'waiting-supplement' $completedAction 0
             $waitingDate = $script:backlogBusinessDate
             Restore-BacklogPhotoDate
-            $globalStatus.Text = "历史未完成日期 $waitingDate 的确定项目已处理；仍有缺图或场景图需补齐/确认，完成后再次点击【继续处理未完成项】。"
+            $globalStatus.Text = "历史未完成日期 $waitingDate 的确定项目已处理；仍有缺图或场景图需补齐/确认，完成后再次点击【复核线上并处理未完成项】。"
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
             return
         }
@@ -904,9 +932,9 @@ $pendingProcessButton.Add_Click({
     $script:backlogBusinessDate = $selectedDate.ToString('yyyy-MM-dd')
     $script:running = $true
     try { $photoDate.Value = $selectedDate } finally { $script:running = $false }
-    $globalStatus.Text = "正在独立重新核对历史未完成日期 $($script:backlogBusinessDate)，不会覆盖上方默认日期。"
+    $globalStatus.Text = "正在只读复核历史日期 $($script:backlogBusinessDate) 的线上福单、供灯和牌位状态，不会覆盖上方默认日期。"
     $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
-    Start-Runner 'photo-scan' $false 'backlog' $true
+    Start-Runner 'photo-online-recheck' $false 'backlog' $true
 })
 $pdfMainButton.Add_Click({
     if (-not $script:running) {

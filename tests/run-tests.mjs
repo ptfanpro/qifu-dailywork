@@ -8,7 +8,7 @@ import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
 import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localOcrCodeLayoutsForPhoto, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, OVERLAPPING_RIGHT_CODE_BANDS, parseLocalOcrCodeCandidates, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
-import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
+import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isSceneUploadFrameUrl, isTransientAutomationPage, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick, waitForSceneUploadFrame } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
 import { AutomationApiClient, canonicalTokenRequest, createTokenRequest, normalizeAutomationBaseUrl } from '../src/automation-auth.mjs';
@@ -128,6 +128,16 @@ assert.deepEqual(resolveHistoricalPhotoClosureEvidence({manifest:completeLegacyM
 assert.equal(resolveHistoricalPhotoClosureEvidence({manifest:{...completeLegacyManifest,batchCompleteReady:false}}).proven,false);
 assert.equal(resolveHistoricalPhotoClosureEvidence({manifest:{...completeLegacyManifest,counts:{...completeLegacyManifest.counts,missingBlessing:1}}}).proven,false);
 assert.equal(resolveHistoricalPhotoClosureEvidence({manifest:{...completeLegacyManifest,pdfs:[]}}).proven,false);
+assert.deepEqual(evaluatePhotoOnlineRecheck({
+  onlineUploadedCount:32,onlineNotUploadedCount:0,pendingRegularCount:0,pendingTabletCount:0,historicalEvidenceProven:true,
+}),{
+  complete:true,onlineUploadedCount:32,onlineNotUploadedCount:0,pendingRegularCount:0,pendingTabletCount:0,
+  onlinePendingCount:0,historicalEvidenceProven:true,reason:'online-zero-pending-verified',
+});
+assert.equal(evaluatePhotoOnlineRecheck({onlineNotUploadedCount:1,historicalEvidenceProven:true}).complete,false);
+assert.equal(evaluatePhotoOnlineRecheck({pendingRegularCount:1,historicalEvidenceProven:true}).reason,'online-pending-remains');
+assert.equal(evaluatePhotoOnlineRecheck({pendingTabletCount:1,historicalEvidenceProven:true}).onlinePendingCount,1);
+assert.equal(evaluatePhotoOnlineRecheck({historicalEvidenceProven:false}).reason,'missing-historical-evidence');
 
 const cloudVisionItems=[{file:'opaque-local-file.jpg',reliable:false,number:null,paperGeometry:{},visualMetrics:{},candidates:[]}];
 const cloudVisionResult=await resolvePhotoNumbersWithCloudVision({items:cloudVisionItems});
@@ -688,8 +698,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.6\.0/);
-assert.match(uiSource,/本地双引擎识别版/);
+assert.match(uiSource,/V9\.6\.1/);
+assert.match(uiSource,/线上闭环复核版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -707,9 +717,9 @@ assert.doesNotMatch(uiSource,/\$settings\.photoBusinessDate/);
 assert.doesNotMatch(uiSource,/\$settings\.pdfBusinessDate/);
 assert.doesNotMatch(uiSource,/hasRememberedPhotoDate/);
 assert.doesNotMatch(uiSource,/hasRememberedPdfDate/);
-assert.match(uiSource,/历史尚未闭环业务/);
-assert.match(uiSource,/继续处理未完成项/);
-assert.match(uiSource,/独立处理，完成后恢复上方日期/);
+assert.match(uiSource,/历史待复核业务/);
+assert.match(uiSource,/复核线上并处理未完成项/);
+assert.match(uiSource,/先查线上状态，完成后恢复上方日期/);
 assert.doesNotMatch(uiSource,/OPENAI_API_KEY/);
 assert.match(uiSource,/不会读取 API 密钥/);
 assert.match(uiSource,/Test-PhotoInboxHasNewRaw/);
@@ -722,7 +732,15 @@ assert.match(uiSource,/当前等待补图；补入原图后再次点击照片主
 assert.match(uiSource,/Get-PendingPhotoBusinessDates/);
 assert.match(uiSource,/已列入独立任务栏；主日期保持/);
 assert.match(uiSource,/completedFlow -eq 'backlog'/);
-assert.match(uiSource,/Start-Runner 'photo-scan' \$false 'backlog' \$true/);
+assert.match(uiSource,/Start-Runner 'photo-online-recheck' \$false 'backlog' \$true/);
+assert.match(uiSource,/photo-online-closure\.json/);
+assert.match(uiSource,/\$hasNewRaw -or \(-not \$terminalComplete/);
+assert.match(runnerSource,/queryUploadedOrders\(photoDate/);
+assert.match(runnerSource,/queryNotUploadedOrders\(photoDate/);
+assert.match(runnerSource,/queryLamp\(photoDate\)/);
+assert.match(runnerSource,/queryDailyTablet\(photoDate\)/);
+assert.match(runnerSource,/photo-online-closure\.json/);
+assert.match(runnerSource,/platformModified:false/);
 assert.match(uiSource,/completedFlow -eq 'backlog-photo'/);
 assert.match(uiSource,/Continue-BacklogPhotoFlow/);
 assert.match(uiSource,/Restore-BacklogPhotoDate/);

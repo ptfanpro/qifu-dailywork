@@ -79,6 +79,11 @@ function pruneTimingHistory(root, directory, report, keepCount, dryRun) {
 }
 
 function photoWorkflowCompleted(photoDirectory) {
+  const onlineClosure = readJson(path.join(photoDirectory, 'photo-online-closure.json'), null);
+  if (onlineClosure?.complete === true && onlineClosure.checkedAt) {
+    const checkedAtMs = Date.parse(onlineClosure.checkedAt);
+    if (Number.isFinite(checkedAtMs)) return { completedAtMs:checkedAtMs };
+  }
   const receipt = readJson(path.join(photoDirectory, 'scene-upload-receipt.json'), null);
   if (!receipt?.complete || receipt.tabletCompletionVerified !== true || !receipt.completedAt) return null;
   const completedAtMs = Date.parse(receipt.completedAt);

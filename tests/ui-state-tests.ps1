@@ -59,6 +59,17 @@ try {
     $manifest.counts.missingBlessing = 0
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
 
+    Write-TestJson (Join-Path $photoRunDir 'photo-online-closure.json') ([ordered]@{
+        schemaVersion=1;businessDate='2026-08-10';checkedAt='2026-08-31T02:00:00Z';complete=$true;
+        onlineNotUploadedCount=0;pendingRegularCount=0;pendingTabletCount=0;readOnly=$true;platformModified=$false
+    })
+    Refresh-PhotoCard
+    if (-not [string]::IsNullOrWhiteSpace($script:photoNextAction)) { throw '线上零待办闭环后不应再安排本地旧断点动作' }
+    Assert-Equal $photoProgress.Value 100 '线上闭环复核后的照片进度错误'
+    Assert-Equal $photoMainButton.Enabled $false '线上闭环复核后主按钮应禁用'
+    if ($photoStatus.Text -notmatch '线上闭环已复核') { throw '没有显示线上闭环复核结果' }
+    Remove-Item -LiteralPath (Join-Path $photoRunDir 'photo-online-closure.json') -Force
+
     Write-TestJson (Join-Path $photoRunDir 'scene-upload-receipt.json') ([ordered]@{complete=$true;partialComplete=$false;fileSetHash='hash-1';completedOrderCount=164;tabletCompletionVerified=$true})
     Refresh-PhotoCard
     if (-not [string]::IsNullOrWhiteSpace($script:photoNextAction)) { throw '照片闭环完成后不应再安排动作' }
@@ -76,6 +87,7 @@ try {
     $oldPhotoRunDir = Join-Path (Join-Path (Join-Path $script:localStateRoot 'workdays') '2026-08-07') 'photos'
     Write-TestJson (Join-Path $oldPhotoRunDir 'photo-manifest.json') ([ordered]@{businessDate='2026-08-07';counts=[ordered]@{allImages=5;missingBlessing=2}})
     Write-TestJson (Join-Path $oldPhotoRunDir 'ui-workflow-state.json') ([ordered]@{state='waiting-supplement';lastAction='photo-upload'})
+    Write-TestJson (Join-Path $oldPhotoRunDir 'photo-online-closure.json') ([ordered]@{businessDate='2026-08-07';checkedAt='2026-08-31T02:00:00Z';complete=$true})
     $lateInbox = Join-Path (Join-Path $testRoot '8月8日') '1'
     New-Item -ItemType Directory -Force -Path $lateInbox | Out-Null
     [System.IO.File]::WriteAllBytes((Join-Path $lateInbox '微信补图.jpg'),[byte[]](1,2,3))
@@ -96,6 +108,9 @@ try {
     Write-TestJson (Join-Path $legacyRunDir 'ui-workflow-state.json') ([ordered]@{state='failed';lastAction='photo-prepare'})
 
     $pendingDates = @(Get-PendingPhotoBusinessDates)
+    Assert-Equal ($pendingDates -join ',') '2026-08-08' '线上已确认闭环的旧断点仍被错误列入待复核日期'
+    Remove-Item -LiteralPath (Join-Path $oldPhotoRunDir 'photo-online-closure.json') -Force
+    $pendingDates = @(Get-PendingPhotoBusinessDates)
     Assert-Equal ($pendingDates -join ',') '2026-08-07,2026-08-08' '初始化没有同时发现历史断点和其他日期新增原图'
     $script:running = $true
     $photoDate.Value = [DateTime]'2026-01-26'
@@ -111,7 +126,7 @@ try {
     Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') '2026-08-10' '待办扫描不应覆盖主业务日期'
     Assert-Equal ([string]$pendingPhotoPicker.SelectedItem) '2026-08-07' '待办栏没有默认选中最早未闭环日期'
     Assert-Equal $pendingProcessButton.Enabled $true '存在待办日期时一键处理按钮应可用'
-    if ($pendingStatus.Text -notmatch '2 个未闭环日期') { throw '待办栏没有显示未闭环日期数量' }
+    if ($pendingStatus.Text -notmatch '2 个本机待复核日期') { throw '待办栏没有显示待复核日期数量' }
 
     $pdfFolder = Join-Path $testRoot '8月11日'
     New-Item -ItemType Directory -Force -Path $pdfFolder | Out-Null

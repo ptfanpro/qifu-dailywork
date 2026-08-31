@@ -6,7 +6,7 @@ import { Timing } from './timing.mjs';
 import { calculateQuantities, normalizeText, venueMessage } from './quantity.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolder as photoDayFolder, scanPhotoWorkday, splitUploadBatches } from './photos.mjs';
 import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs';
-import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from './workflow-state.mjs';
+import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
 import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
@@ -235,7 +235,7 @@ if (args.action === 'cleanup-local-state') {
 const pdfDate = args['pdf-date']; const photoDate = args['photo-date'];
 const loginTimeoutMs = Number(args['login-timeout-ms'] || 10 * 60 * 1000);
 const siteOptions = { loginTimeoutMs, credentialPath, credentialHelperPath };
-if (!photoDate && ['scan','photo-prepare','photo-recheck','photo-scan','photo-upload','photo-scenes'].includes(args.action)) { fail('缺少照片业务日期。'); process.exit(2); }
+if (!photoDate && ['scan','photo-prepare','photo-recheck','photo-online-recheck','photo-scan','photo-upload','photo-scenes'].includes(args.action)) { fail('缺少照片业务日期。'); process.exit(2); }
 if (!pdfDate && ['scan','inspect','export','state-change','renewal-state-change'].includes(args.action)) { fail('缺少 PDF 业务日期。'); process.exit(2); }
 
 if (args.action === 'export') {
@@ -296,6 +296,68 @@ if (args.action === 'reconcile-manual-photo-closure') {
     : `旧版完整 PDF/照片对应凭据有 ${closureEvidence.legacyPdfPageCount} 页`;
   log(`纯本地补记完成：平台只读凭据确认供灯与牌位待办均为 0，${closureLabel}；${photoDate} 已记为人工闭环。未连接上传入口，未修改平台。`);
   process.exit(0);
+}
+
+if (args.action === 'photo-online-recheck') {
+  const photoRunDir = path.join(workdaysRoot,photoDate,'photos');
+  fs.mkdirSync(photoRunDir,{recursive:true});
+  const photoTiming = new Timing(photoRunDir,'photo-only',photoDate);
+  let photoSite;
+  try {
+    photoTiming.start('date-resolution');
+    log(`历史照片业务日期：${photoDate}。本轮先只读复核线上闭环状态，不上传图片、不修改订单。`);
+    photoTiming.end();
+    const manifestFile = path.join(photoRunDir,'photo-manifest.json');
+    const historicalManifestFile = path.join(workdaysRoot,photoDate,'order-manifest.json');
+    const manifest = fs.existsSync(manifestFile) ? JSON.parse(fs.readFileSync(manifestFile,'utf8')) : null;
+    const historicalManifest = fs.existsSync(historicalManifestFile) ? JSON.parse(fs.readFileSync(historicalManifestFile,'utf8')) : null;
+    const closureEvidence = resolveHistoricalPhotoClosureEvidence({historicalManifest,manifest});
+    photoTiming.start('order-processing');
+    photoSite = new PrayerSite(photoRunDir,photoTiming,log,siteOptions);
+    await photoSite.open();
+    const uploaded = await photoSite.queryUploadedOrders(photoDate,{productMode:'all'});
+    const notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all'});
+    const pendingRegular = await photoSite.queryLamp(photoDate);
+    const pendingTablet = await photoSite.queryDailyTablet(photoDate);
+    const result = evaluatePhotoOnlineRecheck({
+      onlineUploadedCount:uploaded.length,
+      onlineNotUploadedCount:notUploaded.length,
+      pendingRegularCount:pendingRegular.length,
+      pendingTabletCount:pendingTablet.length,
+      historicalEvidenceProven:closureEvidence.proven,
+    });
+    const checkedAt = new Date().toISOString();
+    atomic(path.join(photoRunDir,'photo-online-closure.json'),{
+      schemaVersion:1,
+      businessDate:photoDate,
+      checkedAt,
+      ...result,
+      closureEvidenceSource:closureEvidence.source,
+      historicalOrderCount:closureEvidence.historicalOrderCount,
+      legacyPdfPageCount:closureEvidence.legacyPdfPageCount,
+      readOnly:true,
+      platformModified:false,
+    });
+    photoTiming.end();
+    if (result.complete) {
+      log(`线上闭环复核通过：${photoDate} 的福单未上传 0 条、供灯待祈福 0 条、牌位待祈福 0 条；已写入本机终态回执，以后不再因旧的部分回执误报。平台未作任何修改。`);
+    } else if (!result.historicalEvidenceProven) {
+      throw new Error('线上待办虽已查询，但本机缺少该日期历史订单清单或完整 PDF/照片凭据，不能把空查询误记为闭环。');
+    } else {
+      log(`线上仍有待处理：福单未上传 ${result.onlineNotUploadedCount} 条、供灯待祈福 ${result.pendingRegularCount} 条、牌位待祈福 ${result.pendingTabletCount} 条；将继续按原业务日期处理，不采用旧断点猜测。`);
+    }
+    await photoSite.close();
+    photoSite = null;
+    photoTiming.finish();
+    process.exit(0);
+  } catch (error) {
+    fail(cleanErrorMessage(error));
+    const failedPhase = photoTiming.current?.phase ?? null;
+    try { if (photoTiming.current) photoTiming.end('failed',String(error.message).slice(0,80)); photoTiming.event('blocked',failedPhase,0); } catch {}
+    if (photoSite) await photoSite.close().catch(()=>{});
+    try { photoTiming.finish(); } catch {}
+    process.exit(1);
+  }
 }
 
 if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.action === 'photo-scan' || args.action === 'photo-upload' || args.action === 'photo-scenes') {

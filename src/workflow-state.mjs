@@ -46,6 +46,36 @@ export function evaluatePhotoOrderClosure({ missingBlessingCount = 0, onlineNotU
   };
 }
 
+export function evaluatePhotoOnlineRecheck({
+  onlineUploadedCount = 0,
+  onlineNotUploadedCount = 0,
+  pendingRegularCount = 0,
+  pendingTabletCount = 0,
+  historicalEvidenceProven = false,
+} = {}) {
+  const uploaded = Math.max(0, Number(onlineUploadedCount || 0));
+  const notUploaded = Math.max(0, Number(onlineNotUploadedCount || 0));
+  const regular = Math.max(0, Number(pendingRegularCount || 0));
+  const tablet = Math.max(0, Number(pendingTabletCount || 0));
+  const evidenceProven = historicalEvidenceProven === true;
+  const onlinePendingCount = notUploaded + regular + tablet;
+  const complete = evidenceProven && onlinePendingCount === 0;
+  return {
+    complete,
+    onlineUploadedCount: uploaded,
+    onlineNotUploadedCount: notUploaded,
+    pendingRegularCount: regular,
+    pendingTabletCount: tablet,
+    onlinePendingCount,
+    historicalEvidenceProven: evidenceProven,
+    reason: !evidenceProven
+      ? 'missing-historical-evidence'
+      : onlinePendingCount > 0
+        ? 'online-pending-remains'
+        : 'online-zero-pending-verified',
+  };
+}
+
 export function resolveHistoricalPhotoClosureEvidence({ historicalManifest = null, manifest = null } = {}) {
   const historicalOrderCount = Number(historicalManifest?.orderCount || 0);
   if (historicalOrderCount > 0) {
