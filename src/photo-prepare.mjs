@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
+import { recognizeLocalTextLine, verifyLocalOcrAssets } from './local-ocr.mjs';
 
 const require = createRequire(import.meta.url);
 const sharp = require('sharp');
@@ -95,6 +96,34 @@ export const OVERLAPPING_RIGHT_CODE_BANDS = [
   { name: 'right-code-band-lower-a', left: 0.55, top: 0.46, width: 0.40, height: 0.14 },
   { name: 'right-code-band-lower-b', left: 0.55, top: 0.53, width: 0.40, height: 0.14 },
 ];
+
+// V9.6 的本地 ONNX 识别不再依赖某一天的固定纵坐标。编号只会出现在纸张
+// 右侧，因此用相邻窄行从上到下滑动；同一个真实编号会落入至少两条相邻
+// 窄行。只有两个独立窄行识别为同号、完整前缀近似成立且编号存在于当天
+// PDF 唯一集合时才采信。全部图像与文字只在本机内存和临时目录中处理。
+function makeLocalOcrVerticalSweep(name, left, width) {
+  return Array.from({ length: 38 }, (_, index) => ({
+    name: `${name}-${String(index + 1).padStart(2, '0')}`,
+    left,
+    top: 0.15 + index * 0.0125,
+    width,
+    height: 0.040,
+  }));
+}
+
+export const LOCAL_OCR_RIGHT_CODE_SWEEP = makeLocalOcrVerticalSweep('local-ocr-right-line', 0.69, 0.21);
+export const LOCAL_OCR_INNER_CODE_SWEEP = makeLocalOcrVerticalSweep('local-ocr-inner-line', 0.52, 0.21);
+
+export function localOcrCodeLayoutsForPhoto(paperGeometry) {
+  // 纸面明显落在画面下半部且连到右边界时，是 8 月 30 日供灯构图，编号
+  // 位于画面中右侧；普通横版供水构图的编号则在最右侧。只用几何证据调整
+  // 两组窄行的先后，不把坐标本身当作编号证据。
+  const innerFirst = Number(paperGeometry?.top || 0) >= 0.45
+    && Number(paperGeometry?.right || 0) >= 0.97;
+  return innerFirst
+    ? [...LOCAL_OCR_INNER_CODE_SWEEP, ...LOCAL_OCR_RIGHT_CODE_SWEEP]
+    : [...LOCAL_OCR_RIGHT_CODE_SWEEP, ...LOCAL_OCR_INNER_CODE_SWEEP];
+}
 
 export function prioritizedPhotoLayouts(geometry, dynamicLayouts) {
   const geometryWidth = Number(geometry?.width || 0);
@@ -615,6 +644,48 @@ function parseOcrCandidates(text, expectedPrefix, expectedNumbers = null) {
   return found;
 }
 
+export function parseLocalOcrCodeCandidates(text, expectedPrefix, expectedNumbers = null) {
+  const allDirect = parseOcrCandidates(text, expectedPrefix, expectedNumbers);
+  const direct = allDirect.filter((item) => item.prefixDistance <= 1.1);
+  if (direct.length) return direct;
+  const normalizedLocal = normalizeOcr(text);
+  const exactPrefixDigits = String(expectedPrefix).replace(/[^0-9]/g, '');
+  const exactPrefix = new RegExp(`${exactPrefixDigits}\\s*-?\\s*1\\s*-?`).test(normalizedLocal);
+  const corrected = allDirect.filter((item) => exactPrefix && item.prefixDistance <= 2.5);
+  const correctedNumbers = [...new Set(corrected.map((item) => item.number))];
+  if (correctedNumbers.length) return corrected.map((item) => ({ ...item, prefixDistance: 1, correctedExtraTailDigit: true }));
+  const compactWithPrefix = normalizedLocal.replace(/\s+/g, '');
+  const extraTail = new RegExp(`(?:^|\\D)${exactPrefixDigits}-?1-?(\\d{4})(?!\\d)`).exec(compactWithPrefix);
+  if (extraTail && expectedNumbers) {
+    const variants = [...new Set([...extraTail[1]].map((_, index) => Number(
+      extraTail[1].slice(0, index) + extraTail[1].slice(index + 1),
+    )).filter((number) => expectedNumbers.has(number)))];
+    if (variants.length === 1) return [{
+      number: variants[0], prefixDistance: 1, normalized: normalizedLocal, correctedExtraTailDigit: true,
+    }];
+  }
+  // 极窄右上角裁框有时会把较小的业务前缀切掉，但会稳定保留三位尾号。
+  // 尾号只能作为弱候选：必须是裁框内唯一的三位数字、属于当天 PDF 集合，
+  // 后续还必须由相邻两个纵向窄行重复读到同号，绝不以单次结果落号。
+  const compact = String(text || '').replace(/\s+/g, '');
+  const digits = compact.replace(/[^0-9]/g, '');
+  if (digits.length !== 3) return [];
+  const number = Number(digits);
+  if (!expectedNumbers?.has(number)) return [];
+  return [{ number, prefixDistance: 1, normalized: compact, tailOnly: true }];
+}
+
+function hasAdjacentLocalOcrConsensus(observations, number) {
+  const indexesBySweep = new Map();
+  for (const item of observations.filter((value) => value.number === number)) {
+    const match = /^(local-ocr-(?:right|inner)-line)-(\d{2})$/.exec(item.variant || '');
+    if (!match) continue;
+    if (!indexesBySweep.has(match[1])) indexesBySweep.set(match[1], new Set());
+    indexesBySweep.get(match[1]).add(Number(match[2]));
+  }
+  return [...indexesBySweep.values()].some((indexes) => [...indexes].some((index) => indexes.has(index + 1)));
+}
+
 function parsePdfTailCandidate(text) {
   const compact = normalizeOcr(text).replace(/\s+/g, '');
   const explicit = /(?:^|\D)1-(\d{1,4})(?!\d)/.exec(compact);
@@ -899,6 +970,53 @@ function isUsableOcrExtract(extract) {
   return Number(extract?.width || 0) >= 12 && Number(extract?.height || 0) >= 8;
 }
 
+async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeometry, expectedPrefix, expectedNumbers, cropDir }) {
+  const assets = verifyLocalOcrAssets(appRoot);
+  if (!assets.available) return null;
+  const observations = [];
+  for (const layout of localOcrCodeLayoutsForPhoto(paperGeometry)) {
+    const extract = cropFromRatios(metadata, layout);
+    if (!isUsableOcrExtract(extract)) continue;
+    const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-paddle-color.png`);
+    await sharpFile(file).rotate().extract(extract).png().toFile(diagnostic);
+    try {
+      const result = await recognizeLocalTextLine(appRoot, diagnostic);
+      if (Number(result.confidence || 0) < 0.55) continue;
+      const parsedItems = parseLocalOcrCodeCandidates(result.text, expectedPrefix, expectedNumbers);
+      if (process.env.PRAYER_LOCAL_OCR_TRACE === 'yes' && parsedItems.length) {
+        console.error(`[local-ocr] ${layout.name}: ${parsedItems.map((item) => item.number).join(',')} @ ${Math.round(result.confidence * 100)}`);
+      }
+      for (const item of parsedItems) observations.push({
+        ...item,
+        confidence: Math.max(0, Math.min(100, Number(result.confidence || 0) * 100)),
+        layout: 'paddleocr-onnx-adaptive-right-line',
+        variant: layout.name,
+      });
+      const groups = groupObservations(observations);
+      const best = groups[0] || null;
+      if (isReliableOcrConsensus(best, groups[1] || null, 55)
+        && hasAdjacentLocalOcrConsensus(observations, best.number)) {
+        return {
+          number: best.number,
+          evidence: {
+            method: 'paddleocr-onnx-adaptive-right-line-consensus',
+            votes: best.votes,
+            prefixDistance: best.prefixDistance,
+            maxConfidence: best.maxConfidence,
+            layouts: best.layouts,
+            modelSha256: assets.modelSha256,
+          },
+          candidates: groups.slice(0, 5),
+        };
+      }
+    } catch {
+      // 运行库级错误只触发旧引擎降级；不写入图片、OCR 全文或账号信息。
+      return null;
+    }
+  }
+  return null;
+}
+
 export function isReliableOcrConsensus(best, second = null, minimumConfidence = 20) {
   if (!best || best.maxConfidence < minimumConfidence || best.votes < 2) return false;
   const uniquelyBest = !second
@@ -946,6 +1064,26 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   // 检出纸张后只围绕纸张右上角识别，避免佛像、灯焰和边框进入 OCR。
   // 纸张定位失败时才回退旧版固定构图，兼容历史照片。
   const layouts = prioritizedPhotoLayouts(paperEvidence.geometry, paperEvidence.layouts);
+
+  // 便携 ONNX 引擎先行。命中时通常只需读取到编号所在的两个相邻窄行，
+  // 不再等待 Tesseract 多阈值循环或 Windows OCR 进程超时；未命中才进入
+  // 原有成熟回退链，历史照片能力保持不变。
+  if (appRoot) {
+    const local = await recognizeWithPortableLocalOcr({
+      appRoot, file, metadata, paperGeometry: paperEvidence.geometry,
+      expectedPrefix, expectedNumbers, cropDir,
+    });
+    if (local) return {
+      file,
+      reliable: true,
+      number: local.number,
+      paperGeometry: paperEvidence.geometry,
+      visualMetrics,
+      sceneMetrics,
+      evidence: local.evidence,
+      candidates: local.candidates,
+    };
+  }
 
   // 补拍的 597/598 使用另一种较低纸面构图。其短编号在原彩小框中由
   // Windows OCR 可稳定读取，但若先让 Tesseract遍历所有阈值，会在花边细线

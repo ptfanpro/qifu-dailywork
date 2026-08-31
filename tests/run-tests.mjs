@@ -7,11 +7,12 @@ import { calculateQuantities, venueMessage, normalizeText } from '../src/quantit
 import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
-import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, OVERLAPPING_RIGHT_CODE_BANDS, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
+import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localOcrCodeLayoutsForPhoto, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, OVERLAPPING_RIGHT_CODE_BANDS, parseLocalOcrCodeCandidates, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isSceneUploadFrameUrl, isTransientAutomationPage, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick, waitForSceneUploadFrame } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
 import { AutomationApiClient, canonicalTokenRequest, createTokenRequest, normalizeAutomationBaseUrl } from '../src/automation-auth.mjs';
+import { decodePaddleCtc, recognizeLocalTextLine, verifyLocalOcrAssets } from '../src/local-ocr.mjs';
 
 const require = createRequire(import.meta.url);
 const { PDFDocument } = require('pdf-lib');
@@ -687,8 +688,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.87/);
-assert.match(uiSource,/编号与场景自适应回归版/);
+assert.match(uiSource,/V9\.6\.0/);
+assert.match(uiSource,/本地双引擎识别版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -1259,6 +1260,29 @@ assert.throws(
   /禁止使用执行当天或其他日期的场景图/,
 );
 const photoPrepareSource=fs.readFileSync(new URL('../src/photo-prepare.mjs',import.meta.url),'utf8');
+const localOcrAssets=verifyLocalOcrAssets(process.cwd());
+assert.equal(localOcrAssets.available,process.platform==='win32' && process.arch==='x64');
+if(localOcrAssets.available){
+  assert.equal(localOcrAssets.modelSha256,'70b2450eed39599af6b996c27a2f1a0ef30eeb49f9f66dd3e74f28f652befc89');
+  const portableOcrSmoke=path.join(dir,'portable-ocr-smoke.png');
+  await sharp({
+    text:{text:'268-1-631',font:'Arial',width:900,height:120,rgba:true,align:'centre'},
+  }).flatten({background:'white'}).png().toFile(portableOcrSmoke);
+  const portableOcrResult=await recognizeLocalTextLine(process.cwd(),portableOcrSmoke);
+  assert.equal(typeof portableOcrResult.text,'string');
+  assert.ok(Number.isFinite(portableOcrResult.confidence));
+}
+const fakeDictionary=['0','1','2'];
+const fakeProbabilities=new Float32Array(5*5);
+for(const [step,index] of [0,1,1,2,4].entries()) fakeProbabilities[step*5+index]=1;
+assert.deepEqual(decodePaddleCtc({dims:[1,5,5],data:fakeProbabilities},fakeDictionary),{text:'01 ',confidence:1});
+const localExpectedNumbers=new Set(Array.from({length:15},(_,index)=>630+index));
+assert.deepEqual(parseLocalOcrCodeCandidates('631','268',localExpectedNumbers).map((item)=>item.number),[631]);
+assert.deepEqual(new Set(parseLocalOcrCodeCandidates('268-1-6317','268',localExpectedNumbers).map((item)=>item.number)),new Set([631,637]));
+assert.deepEqual(parseLocalOcrCodeCandidates('20260830','268',localExpectedNumbers),[]);
+assert.match(localOcrCodeLayoutsForPhoto({top:0.54,right:1})[0].name,/local-ocr-inner-line/);
+assert.match(localOcrCodeLayoutsForPhoto({top:0.20,right:0.91})[0].name,/local-ocr-right-line/);
+assert.equal(localOcrCodeLayoutsForPhoto({top:0.20,right:0.91}).length,76);
 assert.match(photoPrepareSource,/const secondPassLayouts = layouts\.slice\(0, 2\)/);
 assert.match(photoPrepareSource,/const contrastChannels = \[null\]/);
 assert.match(photoPrepareSource,/const thresholds = \[110, 170\]/);

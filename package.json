@@ -1,6 +1,6 @@
 {
   "name": "prayer-local-runner-v9",
-  "version": "9.5.87",
+  "version": "9.6.0",
   "private": true,
   "type": "module",
   "description": "祈福每日照片与 PDF 双一键断点续跑执行器",
@@ -10,5 +10,8 @@
   },
   "scripts": {
     "test": "node tests/run-tests.mjs"
+  },
+  "dependencies": {
+    "onnxruntime-node": "1.29.0"
   }
 }

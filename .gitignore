@@ -5,6 +5,24 @@ build/
 *.zip
 *.7z
 
+# V9.6 portable OCR runtime is a reviewed release asset. Keep these exceptions
+# after the generic build-output rules so tagged snapshots remain executable on
+# another Windows x64 computer without downloading Node native dependencies.
+!vendor/
+!vendor/onnxruntime-node/
+!vendor/onnxruntime-node/dist/
+!vendor/onnxruntime-node/dist/**
+!vendor/onnxruntime-node/node_modules/
+!vendor/onnxruntime-node/node_modules/onnxruntime-common/
+!vendor/onnxruntime-node/node_modules/onnxruntime-common/**
+vendor/onnxruntime-node/dist/*.d.ts
+vendor/onnxruntime-node/dist/*.map
+vendor/onnxruntime-node/node_modules/onnxruntime-common/README.md
+vendor/onnxruntime-node/node_modules/onnxruntime-common/dist/esm/
+vendor/onnxruntime-node/node_modules/onnxruntime-common/lib/
+vendor/onnxruntime-node/node_modules/onnxruntime-common/dist/cjs/*.d.ts
+vendor/onnxruntime-node/node_modules/onnxruntime-common/dist/cjs/*.map
+
 # Machine-local settings and runtime state
 data/
 祈福运行数据/
