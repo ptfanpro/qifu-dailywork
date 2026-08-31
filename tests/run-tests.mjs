@@ -7,7 +7,7 @@ import { calculateQuantities, venueMessage, normalizeText } from '../src/quantit
 import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
-import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
+import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, OVERLAPPING_RIGHT_CODE_BANDS, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isSceneUploadFrameUrl, isTransientAutomationPage, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick, waitForSceneUploadFrame } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
@@ -236,11 +236,21 @@ assert.equal(contradictedPdfClaim[0].reliable,false);
 assert.equal(contradictedPdfClaim[0].pdfRecheck.reason,'pdf-fingerprint-prefers-another-page');
 const numericFilenameConflict=[{
   file:shapePhoto,reliable:true,number:401,observedOcrNumber:402,candidates:[],visualMetrics:{},
+  observedOcrEvidence:{method:'photo-code-multi-crop-consensus',votes:2,prefixDistance:0,maxConfidence:80},
   evidence:{method:'existing-numeric-filename-claim'},paperGeometry:{},
 }];
 const numericFilenameConflictResult=await recheckReliablePhotoClaimsWithPdf(numericFilenameConflict,shapePages);
 assert.equal(numericFilenameConflictResult.rejected,1);
 assert.equal(numericFilenameConflict[0].pdfRecheck.reason,'visible-code-disagrees-with-filename');
+const weakNumericFilenameConflict=[{
+  file:shapePhoto,reliable:true,number:401,observedOcrNumber:402,candidates:[],visualMetrics:{},
+  observedOcrEvidence:{method:'windows-ocr-strict-lower-code-box',votes:1,prefixDistance:0,maxConfidence:100},
+  evidence:{method:'existing-numeric-filename-claim'},paperGeometry:{},
+}];
+const weakNumericFilenameConflictResult=await recheckReliablePhotoClaimsWithPdf(weakNumericFilenameConflict,shapePages);
+assert.equal(weakNumericFilenameConflictResult.rejected,0);
+assert.equal(weakNumericFilenameConflictResult.inconclusive,1);
+assert.equal(weakNumericFilenameConflict[0].reliable,true);
 const strongVisibleCodeClaim=[{
   file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},paperGeometry:{},
   evidence:{method:'targeted-landscape-code-threshold-consensus',votes:4,maxConfidence:91},
@@ -491,6 +501,15 @@ captchaLoginSite.page={locator:(selector)=>{
 assert.equal(await captchaLoginSite.tryStoredLogin(),'captcha-required');
 assert.deepEqual(filledLoginFields,{username:'admin',password:'secret'});
 assert.equal(submittedCaptchaLogin,false);
+const invalidCredentialLogs=[];
+const invalidCredentialSite=new PrayerSite(os.tmpdir(),{count:()=>{}},(message)=>invalidCredentialLogs.push(message),{
+  credentialPath:loginCredentialMarker,
+  credentialHelperPath:'test-helper.ps1',
+  credentialReader:()=>{throw new Error('cannot decrypt');},
+});
+invalidCredentialSite.page=captchaLoginSite.page;
+assert.equal(await invalidCredentialSite.tryStoredLogin(),'manual-required');
+assert.match(invalidCredentialLogs.join('\n'),/改为手动登录/);
 fs.rmSync(loginCredentialMarker,{force:true});
 const siteSource=fs.readFileSync(new URL('../src/site.mjs',import.meta.url),'utf8');
 const runnerSource=fs.readFileSync(new URL('../src/runner.mjs',import.meta.url),'utf8');
@@ -504,6 +523,8 @@ assert.match(siteSource,/Windows 加密凭据提交登录/);
 assert.match(siteSource,/账号和密码已从 Windows 加密凭据安全填入/);
 assert.match(siteSource,/return 'captcha-required'/);
 assert.match(siteSource,/loginMode === 'captcha-required'/);
+assert.match(siteSource,/return 'manual-required'/);
+assert.match(siteSource,/loginMode === 'manual-required'/);
 assert.match(siteSource,/input\[type=\\?"password\\?"\]/);
 assert.doesNotMatch(siteSource,/--password|process\.env\.(?:PRAYER_)?PASSWORD/);
 assert.match(siteSource,/快速线上检查发现尚未登录/);
@@ -666,8 +687,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.5\.86/);
-assert.match(uiSource,/迟到场景弹窗接管修正版/);
+assert.match(uiSource,/V9\.5\.87/);
+assert.match(uiSource,/编号与场景自适应回归版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -720,8 +741,8 @@ assert.match(uiSource,/一键处理照片/);
 assert.match(uiSource,/一键处理 PDF/);
 assert.match(uiSource,/Start-Initialization 'all'/);
 assert.match(uiSource,/Test-NeedAutomaticPdfInspect/);
-assert.match(uiSource,/\$initialLoginTimeout = if \(Test-PrayerCredential[^\n]+\{ '600000' \} else \{ '5000' \}/);
-assert.match(uiSource,/@\('--login-timeout-ms',\$initialLoginTimeout\)/);
+assert.match(uiSource,/@\('--login-timeout-ms','600000'\)/);
+assert.doesNotMatch(uiSource,/--login-timeout-ms'.*'5000'/);
 assert.doesNotMatch(uiSource,/\$scope -eq 'all' -or \$scope -eq 'pdf'\) \{ \$script:initQueue\.Enqueue\('inspect'\)/);
 assert.match(uiSource,/ui-workflow-state\.json/);
 assert.match(uiSource,/Continue-PhotoFlow/);
@@ -884,6 +905,8 @@ assert.deepEqual(parseLooseWindowsCodeCandidates('768 刁 77','268',new Set(Arra
 // 2026-08-27 实图：Windows OCR 吞掉业务前缀首位，并把 577 拆成“57 7”。
 // 完整三位拼接应优先于把“57”错误补成同批次里的 557。
 assert.deepEqual(parseLooseWindowsCodeCandidates('6R · 57 7','268',new Set(Array.from({length:54},(_,index)=>543+index))),[577]);
+assert.deepEqual(parseLooseWindowsCodeCandidates('268 一 1 乇 30','268',new Set(Array.from({length:15},(_,index)=>630+index))),[630]);
+assert.deepEqual(parseLooseWindowsCodeCandidates('268 一 1 乇 31','268',new Set(Array.from({length:15},(_,index)=>630+index))),[631]);
 assert.deepEqual(parseLooseWindowsCodeCandidates('77 2027','268',new Set([577])),[]);
 assert.deepEqual(parseLooseWindowsCodeCandidates('768 刁 77','268',new Set([577,677])),[]);
 const twoAnchorPhotos=Array.from({length:8},(_,index)=>({
@@ -1045,6 +1068,13 @@ assert.equal(isLikelyScene({
   visualMetrics:{edgeDensity:.15,upperEdgeDensity:.08,uniformity:.45},
   sceneMetrics:{luminance:79.8,warmBrightRatio:.16,darkRatio:.48},
 }),false);
+// 2026-08-30 的两张真实夜间灯阵：金色台阶横跨全幅，旧版一张被当作
+// “不可读福单”，另一张因误报 usablePaper 也没有进入场景分类。
+const august30LampScenes=[
+  {paperGeometry:{rectangularPaper:false,usablePaper:false,width:1,height:.692,boxArea:.692,fill:.214},visualMetrics:{edgeDensity:.146,upperEdgeDensity:.070,uniformity:.438},sceneMetrics:{luminance:78.2,warmBrightRatio:.113,darkRatio:.524}},
+  {paperGeometry:{rectangularPaper:false,usablePaper:true,width:.956,height:.567,boxArea:.542,fill:.350},visualMetrics:{edgeDensity:.123,upperEdgeDensity:.038,uniformity:.487},sceneMetrics:{luminance:70.5,warmBrightRatio:.111,darkRatio:.575}},
+];
+assert.ok(august30LampScenes.every((item)=>isLikelyScene(item)));
 
 // 同批清晰福单的纸色连通域会把木架也包进去，旧版据此误选“竖版”裁框，
 // 并在 y=47.5% 处截到神像底座。新构图的编号实际位于约 y=50%~53%。
@@ -1118,7 +1148,14 @@ assert.equal(classifySceneVisualScore({luminance:92.7817,warmBrightRatio:0.1807,
 // 整体亮度 85.6，仍是明确灯阵；供水全景保持由低暗像素和高亮度识别。
 assert.equal(classifySceneVisualScore({luminance:85.5666,warmBrightRatio:.066823,darkRatio:.375833}),'scene-lamp');
 assert.equal(classifySceneVisualScore({luminance:126.7958,warmBrightRatio:.113958,darkRatio:.098125}),'scene-water');
+// 2026-08-30 顶棚阴影下的供水全景，比旧阈值稍暗但暖色高光很少。
+assert.equal(classifySceneVisualScore({luminance:106.4,warmBrightRatio:.058,darkRatio:.222}),'scene-water');
 assert.equal(classifySceneVisualScore({luminance:102,warmBrightRatio:0.04,darkRatio:0.20}),null);
+// 自适应右侧编号带必须分别以两个重叠窗口覆盖 y≈30% 和 y≈57% 的编号，
+// 防止未来再次通过追加某一天的固定坐标修复清晰编号。
+for (const y of [.30,.57]) {
+  assert.ok(OVERLAPPING_RIGHT_CODE_BANDS.filter((layout)=>layout.top<=y && layout.top+layout.height>=y+.015).length>=2);
+}
 const singleWaterFile=path.join(sameKindSceneRoot,'single-water.jpg');
 await sharp(Buffer.from('<svg width="160" height="120" xmlns="http://www.w3.org/2000/svg"><rect width="160" height="120" fill="#d8c7a0"/><g fill="#d7a536"><circle cx="30" cy="70" r="12"/><circle cx="70" cy="70" r="12"/><circle cx="110" cy="70" r="12"/></g></svg>')).jpeg({quality:92}).toFile(singleWaterFile);
 const singleWaterResult=await classifyScenes([singleWaterFile],new Set());

@@ -247,6 +247,12 @@ export class PrayerSite {
       this.timing.count('browser_action_count');
       this.log('已使用 Windows 加密凭据提交登录，正在验证。');
       return 'submitted';
+    } catch {
+      // DPAPI 凭据只能由创建它的 Windows 用户解密。迁移电脑、重装系统或
+      // 凭据文件损坏时，自动填充不可用不应终止照片/PDF 流程；本次直接
+      // 降级为人工登录，并继续等待本人输入账号、密码和验证码。
+      this.log('本机保存的登录凭据不可用，本次已改为手动登录。请在 Edge 输入账号、密码和验证码，登录后程序会自动继续。');
+      return 'manual-required';
     } finally {
       if (credential) { credential.username = ''; credential.password = ''; }
       credential = null;
@@ -388,6 +394,7 @@ export class PrayerSite {
           const loginMode = await this.tryStoredLogin();
           if (loginMode === 'submitted') { autoLoginSubmittedAt = Date.now(); await sleep(750); continue; }
           if (loginMode === 'captcha-required') { loginPromptLogged = true; await sleep(500); continue; }
+          if (loginMode === 'manual-required') { loginPromptLogged = true; await sleep(500); continue; }
         }
         if (passwordVisible && autoLoginSubmittedAt && Date.now() - autoLoginSubmittedAt > 15000) {
           throw new Error('自动登录未成功。请检查账号密码，或手动处理验证码；程序没有重复尝试。');

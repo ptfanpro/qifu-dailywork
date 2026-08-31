@@ -84,6 +84,18 @@ const CURRENT_CAMERA_CODE_LAYOUTS = {
   ],
 };
 
+// 固定相机框仍可能因纸张高度、缩放或取景轻微变化而漏掉肉眼清晰的编号。
+// 最后的本机兜底不再继续追加某一天的专用坐标，而是在画面右侧编号区使用
+// 四个互相重叠的窄带。每个真实编号至少应落入两个窄带；只有 Windows OCR
+// 在两个独立窄带中读出相同的完整业务前缀，且编号属于当天 PDF 唯一集合，
+// 才允许自动采用。窄带不覆盖姓名、地址和祈愿正文。
+export const OVERLAPPING_RIGHT_CODE_BANDS = [
+  { name: 'right-code-band-upper-a', left: 0.55, top: 0.20, width: 0.40, height: 0.14 },
+  { name: 'right-code-band-upper-b', left: 0.55, top: 0.27, width: 0.40, height: 0.14 },
+  { name: 'right-code-band-lower-a', left: 0.55, top: 0.46, width: 0.40, height: 0.14 },
+  { name: 'right-code-band-lower-b', left: 0.55, top: 0.53, width: 0.40, height: 0.14 },
+];
+
 export function prioritizedPhotoLayouts(geometry, dynamicLayouts) {
   const geometryWidth = Number(geometry?.width || 0);
   const geometryHeight = Number(geometry?.height || 0);
@@ -1210,8 +1222,8 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     }
   }
 
-  const grouped = groupObservations(observations);
-  const best = grouped[0] || null;
+  let grouped = groupObservations(observations);
+  let best = grouped[0] || null;
   const second = grouped[1] || null;
   // 单一裁框/阈值即使置信度较高，也曾把清晰的 580 稳定误读为 569。自动改名
   // 必须至少由两个独立裁框或预处理变体形成共识；单票结果保留为候选，交给
@@ -1220,10 +1232,28 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   // Windows 自带 OCR 对实拍中很小、偏灰的打印编号明显优于 Tesseract。
   // 仅在本地 OCR 仍未可靠收敛时读取两个严格的编号裁框；结果与当天 PDF
   // 唯一编号集相交后也必须只剩一个编号，才允许采用，正文不会进入该裁框。
-  if (!reliable && windowsFallbackFiles.length && appRoot) {
+  if (!reliable && appRoot) {
     // Windows OCR 串行读取文件。旧版把每个布局的彩色、红通道、阈值图都
     // 塞进去，单图可达 14 个，30 秒超时前反而读不到最有效的微型原彩框。
-    // 只保留按实测有效性排序的 6 个严格编号裁框。
+    // 固定框均未形成共识时，再加入四个互相重叠的右侧窄带。它们只读取
+    // 编号区域，并且必须由两个重叠窄带读出同一完整编码才会生效。
+    const rightBandFiles = new Set();
+    for (const layout of OVERLAPPING_RIGHT_CODE_BANDS) {
+      const extract = cropFromRatios(metadata, layout);
+      if (!isUsableOcrExtract(extract)) continue;
+      const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-windows-color.png`);
+      await sharpFile(file)
+        .rotate()
+        .extract(extract)
+        .resize({ height: 420, withoutEnlargement: false })
+        .extend({ top: 36, bottom: 36, left: 36, right: 36, background: 'white' })
+        .png()
+        .toFile(diagnostic);
+      windowsFallbackFiles.push(diagnostic);
+      rightBandFiles.add(path.resolve(diagnostic));
+    }
+    // 只保留按实测有效性排序的 10 个严格编号裁框；其中四个固定名额留给
+    // 重叠窄带，避免它们再次被旧固定框数量上限静默丢弃。
     const windowsPriority = (fileName) => {
       const name = path.basename(fileName);
       // When the paper detector has a usable rectangle, its right-top crop is
@@ -1232,6 +1262,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
       // crops, so Windows OCR never received it.  Prefer the original-colour
       // paper-relative crop before the fixed fallbacks.
       if (/paper-relative-(?:code-only|landscape-code-(?:upper|lower)-right)-windows-color/.test(name)) return 0;
+      if (/right-code-band-.*-windows-color/.test(name)) return 0.5;
       if (/current-temple-(?:upper|lower)-code-(?:line|box)-windows-color/.test(name)) return 1;
       if (/current-outdoor-(?:upper-)?code-line-windows-color/.test(name)) return 1;
       if (/current-temple-code-micro-windows-color/.test(name)) return 2;
@@ -1243,9 +1274,12 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     };
     const orderedWindowsFiles = [...new Set(windowsFallbackFiles)]
       .sort((left, right) => windowsPriority(left) - windowsPriority(right))
-      .slice(0, 6);
+      .slice(0, 10);
     const windows = readWindowsOcrTails(appRoot, orderedWindowsFiles, cropDir);
-    const matches = [...new Set([...windows.values()]
+    const preciseWindows = [...windows.entries()]
+      .filter(([fileName]) => !rightBandFiles.has(path.resolve(fileName)))
+      .map(([, value]) => value);
+    const matches = [...new Set(preciseWindows
       .flatMap((item) => [
         ...(item.numbers || []),
         ...parseLooseWindowsCodeCandidates(item.text, expectedPrefix, expectedNumbers),
@@ -1261,6 +1295,46 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
         sceneMetrics,
         evidence: { method: 'windows-ocr-strict-code-crop', votes: 1, prefixDistance: 0.25, maxConfidence: 100, layouts: ['strict-visible-code-crop'] },
         candidates: [{ number: matches[0], votes: windows.size, prefixDistance: 0.25, maxConfidence: 100, layouts: ['windows-ocr-strict-code-crop'] }],
+      };
+    }
+    const rightBandObservations = [];
+    for (const [fileName, value] of windows) {
+      if (!rightBandFiles.has(path.resolve(fileName))) continue;
+      const exactNumbers = [...new Set([
+        ...parseOcrCandidates(value.text, expectedPrefix, expectedNumbers)
+          .filter((item) => item.prefixDistance <= 0.1)
+          .map((item) => item.number),
+        ...parseLooseWindowsCodeCandidates(value.text, expectedPrefix, expectedNumbers),
+      ])];
+      for (const number of exactNumbers) rightBandObservations.push({
+        number,
+        prefixDistance: 0,
+        confidence: 100,
+        layout: 'windows-overlapping-right-code-band',
+        variant: path.basename(fileName),
+      });
+    }
+    observations.push(...rightBandObservations);
+    grouped = groupObservations(observations);
+    best = grouped[0] || null;
+    const bandSecond = grouped[1] || null;
+    if (isReliableOcrConsensus(best, bandSecond, 20)
+      && best.layouts.includes('windows-overlapping-right-code-band')) {
+      return {
+        file,
+        reliable: true,
+        number: best.number,
+        paperGeometry: paperEvidence.geometry,
+        visualMetrics,
+        sceneMetrics,
+        evidence: {
+          method: 'windows-ocr-overlapping-right-code-bands',
+          votes: best.votes,
+          prefixDistance: best.prefixDistance,
+          maxConfidence: best.maxConfidence,
+          layouts: best.layouts,
+        },
+        candidates: grouped.slice(0, 5),
       };
     }
   }
@@ -1709,6 +1783,53 @@ async function photoShapeFingerprints(item) {
   return result;
 }
 
+// 已规范命名照片的复核只读取右侧编号窄带，不再重新跑整套 Tesseract
+// 纸面/场景识别。两个重叠窄带读出同一完整编号才算可靠；单票或互相冲突
+// 一律返回未决，由既有文件名和 PDF 索引继续兜底。
+export async function auditExistingNumericPhotoCode({ appRoot, file, expectedPrefix, expectedNumbers, cropDir }) {
+  fs.mkdirSync(cropDir, { recursive:true });
+  const metadata = autoOrientedMetadata(await sharpFile(file).metadata());
+  const bandFiles = [];
+  for (const layout of OVERLAPPING_RIGHT_CODE_BANDS) {
+    const extract = cropFromRatios(metadata, layout);
+    if (!isUsableOcrExtract(extract)) continue;
+    const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-existing-windows-color.png`);
+    await sharpFile(file)
+      .rotate()
+      .extract(extract)
+      .resize({ height:420, withoutEnlargement:false })
+      .extend({ top:36, bottom:36, left:36, right:36, background:'white' })
+      .png()
+      .toFile(diagnostic);
+    bandFiles.push(diagnostic);
+  }
+  const windows = readWindowsOcrTails(appRoot,bandFiles,cropDir);
+  const observations = [];
+  for (const [fileName,value] of windows) {
+    const numbers = [...new Set([
+      ...parseOcrCandidates(value.text,expectedPrefix,expectedNumbers)
+        .filter((item)=>item.prefixDistance<=0.1)
+        .map((item)=>item.number),
+      ...parseLooseWindowsCodeCandidates(value.text,expectedPrefix,expectedNumbers),
+    ])];
+    for (const number of numbers) observations.push({
+      number,prefixDistance:0,confidence:100,
+      layout:'windows-overlapping-right-code-band',variant:path.basename(fileName),
+    });
+  }
+  const grouped = groupObservations(observations);
+  const best = grouped[0] || null;
+  const reliable = isReliableOcrConsensus(best,grouped[1] || null,20);
+  return {
+    file,reliable,number:reliable ? best.number : null,
+    evidence:best ? {
+      ...(reliable ? {method:'windows-ocr-overlapping-right-code-bands'} : {}),
+      votes:best.votes,prefixDistance:best.prefixDistance,maxConfidence:best.maxConfidence,layouts:best.layouts,
+    } : null,
+    candidates:grouped.slice(0,5),paperGeometry:{},visualMetrics:{},
+  };
+}
+
 export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = null, claimedNumbers = new Set()) {
   const eligible = recognized.filter((item) => !item.reliable && !isLikelyScene(item)
     && (item.paperGeometry?.usablePaper || item.paperGeometry?.rectangularPaper));
@@ -1799,6 +1920,15 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
     let status = 'confirmed';
     let scores = [];
     const method = String(item?.evidence?.method || '');
+    const observedEvidence = item?.observedOcrEvidence || null;
+    // 已经按数字命名的照片属于上一轮已确认结果。OCR 在单个小裁框上会把
+    // 清晰的 7 读成 1；这种单票结果只能提示复核，不能反向推翻既有编号。
+    // 只有两个独立裁框/预处理结果形成同号共识，才构成真正的可见编号冲突。
+    const strongObservedConflict = Number.isInteger(item.observedOcrNumber)
+      && item.observedOcrNumber !== claimedNumber
+      && Number(observedEvidence?.votes || 0) >= 2
+      && Number(observedEvidence?.prefixDistance ?? 99) <= 1
+      && Number(observedEvidence?.maxConfidence || 0) >= 20;
     const strictVisibleCode = /^windows-ocr-strict-(?:lower-code-box|code-crop)$/.test(method)
       && Number(item?.evidence?.prefixDistance ?? 99) <= 0.25
       && Number(item?.evidence?.maxConfidence || 0) >= 80;
@@ -1815,13 +1945,13 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
         && Number(item?.evidence?.maxConfidence || 0) >= 20) || strictVisibleCode);
     const verifiedCaptureSequence = /^capture-(?:ascending|descending)-sequence-(?:between-code-anchors|forward-edge)$/.test(method)
       && Number(item?.evidence?.votes || 0) >= 2;
-    if (method === 'existing-numeric-filename-claim' && Number.isInteger(item.observedOcrNumber) && item.observedOcrNumber !== claimedNumber) {
+    if (method === 'existing-numeric-filename-claim' && strongObservedConflict) {
       reason = 'visible-code-disagrees-with-filename';
     } else if (claimedPages.length !== 1) {
       reason = 'claimed-pdf-page-not-unique';
     } else if (method === 'existing-numeric-filename-claim' && item.observedOcrNumber === claimedNumber) {
       item.evidence.pdfRecheck={method:'existing-filename-visible-code-and-pdf-index',status:'confirmed'};
-    } else if (method === 'existing-numeric-filename-claim' && !Number.isInteger(item.observedOcrNumber)) {
+    } else if (method === 'existing-numeric-filename-claim') {
       status = 'inconclusive';
       inconclusive += 1;
     } else if (trustedManual(item)) {
@@ -1903,7 +2033,11 @@ function parseWindowsOcrNumbers(text) {
 export function parseLooseWindowsCodeCandidates(text, expectedPrefix, expectedNumbers) {
   const normalized = normalizeOcr(text)
     .replace(/[BRbr]/g, '8')
-    .replace(/[gq]/g, '9');
+    .replace(/[gq]/g, '9')
+    // Windows OCR 会把实拍点阵字体里的 6 稳定读成“乇”。这里只在严格
+    // 右侧编号裁框内归一化，且候选仍必须属于当天 PDF 编号集合；最终还要
+    // 两个重叠裁框读出同一编号，因此不会凭单个汉字猜号。
+    .replace(/乇/g, '6');
   const tokens = [...normalized.matchAll(/\d{1,4}/g)]
     .map((match) => ({ value: match[0], index: match.index || 0 }));
   const candidates = new Set(tokens
@@ -2132,7 +2266,13 @@ async function sceneVisualScore(file) {
 // 一条可单图判定的绝对证据路径：白天供水全景暗像素极少且整体亮度较高；
 // 夜间供灯图暗像素和暖色高光同时明显。处在两者之间的图片保持未决。
 export function classifySceneVisualScore(item) {
+  // 白天供水全景在阴影或顶棚下会比旧样本更暗，但仍没有夜间灯阵的大面积
+  // 暗区和暖色火焰。只在候选已经通过场景结构筛选后使用该分类，因此可用
+  // “低暗像素 + 中高亮度 + 低暖色高光”覆盖这类实际供水照片。
   if (item.darkRatio <= 0.18 && item.luminance >= 110) return 'scene-water';
+  if (item.darkRatio > 0.18 && item.darkRatio <= 0.25
+    && item.luminance >= 104
+    && item.warmBrightRatio >= 0.045 && item.warmBrightRatio <= 0.09) return 'scene-water';
   if (item.darkRatio >= 0.32 && item.warmBrightRatio >= 0.10) return 'scene-lamp';
   // 远一点的灯阵曝光更低，亮焰面积会明显缩小；暗像素、低平均亮度和仍然
   // 可见的暖色高光三项同时成立时，依然是单图可确认的供灯场景。
@@ -2259,6 +2399,17 @@ export function isLikelyScene(item) {
     && Number(scene.warmBrightRatio || 0) >= 0.10
     && Number(metrics.upperEdgeDensity || 1) <= 0.04
     && Number(metrics.edgeDensity || 1) <= 0.105;
+  // 新一批夜间灯阵从近处拍摄，金色台阶横跨全画面，纸色连通域甚至会误报
+  // usablePaper。它与真实红/黄福单的稳定区别是：全宽、极暗、暖色火焰明显，
+  // 且没有矩形纸边。边缘阈值适度放宽以容纳密集灯焰，但仍要求全部强证据
+  // 同时成立，避免吞掉同批清晰福单。
+  const fullWidthDimLampSceneStructure = geometry.rectangularPaper === false
+    && geometry.width >= 0.94
+    && Number(scene.darkRatio || 0) >= 0.45
+    && Number(scene.luminance || 255) <= 85
+    && Number(scene.warmBrightRatio || 0) >= 0.09
+    && Number(metrics.upperEdgeDensity || 1) <= 0.08
+    && Number(metrics.edgeDensity || 1) <= 0.17;
   // 供水场景中，画面下半部的水碗、供桌和远处红纸可能连成一个宽色块。
   // 它从画面中部延伸到底边，但高度不到半幅、没有矩形纸边；真实近景福单
   // 的纸张通常从画面上部开始且高度超过半幅。旧版把这种色块当成福单，
@@ -2281,7 +2432,7 @@ export function isLikelyScene(item) {
     && metrics.upperEdgeDensity <= 0.10
     && metrics.edgeDensity <= 0.13;
   // 灯阵或供水全景会在画面底部形成横跨全宽的红/黄连通块；它不是纸张。
-  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure
+  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure) return true;
   // 纸张偶尔与画面右边缘相接，严格矩形条件会失败；足够大的连续红/黄纸色块仍应判为纸张。
   if (geometry.rectangularPaper || (geometry.score >= 0.085
@@ -2295,7 +2446,7 @@ export function isLikelyScene(item) {
     && metrics.uniformity > 0.47
     && metrics.upperEdgeDensity < 0.08
     && metrics.edgeDensity < 0.16;
-  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure
+  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure || visualScene);
 }
 
@@ -3028,7 +3179,9 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       for (const file of numericAuditFiles) {
         numericAuditIndex += 1;
         onProgress?.(`正在重新核对现有数字照片 ${numericAuditIndex}/${numericAuditFiles.length}：${path.basename(file)}`);
-        const observed = await recognizePreparedImage(worker,file,expectedPrefix,expectedNumbers,cropDir,appRoot);
+        const observed = await auditExistingNumericPhotoCode({
+          appRoot,file,expectedPrefix,expectedNumbers,cropDir,
+        });
         existingNumericAuditItems.push({
           ...observed,
           file,
