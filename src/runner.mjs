@@ -235,7 +235,7 @@ if (args.action === 'cleanup-local-state') {
 const pdfDate = args['pdf-date']; const photoDate = args['photo-date'];
 const loginTimeoutMs = Number(args['login-timeout-ms'] || 10 * 60 * 1000);
 const siteOptions = { loginTimeoutMs, credentialPath, credentialHelperPath };
-if (!photoDate && ['scan','photo-prepare','photo-scan','photo-upload','photo-scenes'].includes(args.action)) { fail('缺少照片业务日期。'); process.exit(2); }
+if (!photoDate && ['scan','photo-prepare','photo-recheck','photo-scan','photo-upload','photo-scenes'].includes(args.action)) { fail('缺少照片业务日期。'); process.exit(2); }
 if (!pdfDate && ['scan','inspect','export','state-change','renewal-state-change'].includes(args.action)) { fail('缺少 PDF 业务日期。'); process.exit(2); }
 
 if (args.action === 'export') {
@@ -298,7 +298,7 @@ if (args.action === 'reconcile-manual-photo-closure') {
   process.exit(0);
 }
 
-if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.action === 'photo-upload' || args.action === 'photo-scenes') {
+if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.action === 'photo-scan' || args.action === 'photo-upload' || args.action === 'photo-scenes') {
   const photoRunDir = path.join(workdaysRoot,photoDate,'photos');
   fs.mkdirSync(photoRunDir, { recursive:true });
   const photoTiming = new Timing(photoRunDir,'photo-only',photoDate);
@@ -307,8 +307,9 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
     photoTiming.start('date-resolution');
     log(`照片业务日期：${photoDate}。只处理该日期目录，不自动关联 PDF 业务日期。`);
     photoTiming.end();
-    if (args.action === 'photo-prepare') {
-      if (args.authorized !== 'yes') throw new Error('自动处理和编号会修改照片目录，缺少本次按钮授权。');
+    if (args.action === 'photo-prepare' || args.action === 'photo-recheck') {
+      const readOnlyRecheck = args.action === 'photo-recheck';
+      if (!readOnlyRecheck && args.authorized !== 'yes') throw new Error('自动处理和编号会修改照片目录，缺少本次按钮授权。');
       const [year, month, day] = photoDate.split('-').map(Number);
       const folder = path.join(root, `${month}月${day}日`);
       const photoDir = path.join(folder, '1');
@@ -347,7 +348,17 @@ if (args.action === 'photo-prepare' || args.action === 'photo-scan' || args.acti
       if (plan.localPageMatch?.attempted) {
         log(`本地 PDF 页面版式复核：尝试 ${plan.localPageMatch.attempted} 张，唯一确认 ${plan.localPageMatch.resolved} 张，仍未决 ${plan.localPageMatch.unresolved} 张。未使用 API 或网络。`);
       }
+      if (plan.pdfClaimRecheck?.attempted) {
+        log(`编号双证据复核：检查 ${plan.pdfClaimRecheck.attempted} 张，确认 ${plan.pdfClaimRecheck.confirmed} 张，冲突 ${plan.pdfClaimRecheck.rejected} 张，纸面暂不可读 ${plan.pdfClaimRecheck.inconclusive || 0} 张。`);
+      }
       log(`自动编号方案：PDF ${plan.pdfPages.length} 页，福单编号 ${plan.assignments.filter((item)=>item.kind === 'blessing').length} 张，场景图 ${plan.assignments.filter((item)=>item.kind.startsWith('scene-')).length} 张。`);
+      if (readOnlyRecheck) {
+        for (const issue of plan.issues || []) log(`复核发现：${issue}`);
+        for (const issue of plan.pendingIssues || []) log(`复核待人工确认：${issue}`);
+        log(`只读编号复核完成：检查 ${plan.pdfClaimRecheck?.attempted || 0} 张，确认 ${plan.pdfClaimRecheck?.confirmed || 0} 张，冲突 ${plan.pdfClaimRecheck?.rejected || 0} 张，纸面暂不可读 ${plan.pdfClaimRecheck?.inconclusive || 0} 张。没有改名、压缩、上传或修改平台。`);
+        photoTiming.finish();
+        process.exit(0);
+      }
       if (!plan.safeToApply) {
         for (const issue of plan.issues) log(`需人工处理：${issue}`);
         throw new Error('自动处理方案未通过一一对应校验，NAS 照片没有被修改。');

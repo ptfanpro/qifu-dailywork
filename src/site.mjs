@@ -18,6 +18,10 @@ const IMAGE_UPLOAD_URL = 'http://admin.stqifu.com/blessing/mind/toUpload/name';
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const SHARED_EDGE_PORT = 19227;
 const SHARED_EDGE_ENDPOINT = `http://127.0.0.1:${SHARED_EDGE_PORT}`;
+export const SCENE_UPLOAD_FRAME_TIMEOUT_MS = 60000;
+export function isSceneUploadFrameUrl(url) {
+  return /\/blessing\/toUploadMore\/scene(?:[/?#]|$)/i.test(String(url || ''));
+}
 export const CAPTCHA_INPUT_SELECTOR = [
   '#code:visible',
   'input[placeholder*="验证码"]:visible',
@@ -53,6 +57,20 @@ export function readEncryptedWindowsCredential(credentialPath, helperPath) {
 
 function hashIds(rows) { return crypto.createHash('sha256').update(rows.map((r) => r.id).sort().join('\n')).digest('hex'); }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+export async function waitForSceneUploadFrame(page, {
+  timeoutMs = SCENE_UPLOAD_FRAME_TIMEOUT_MS,
+  pollMs = 150,
+  sleepFn = sleep,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const candidates = page.frames().filter((frame) => isSceneUploadFrameUrl(frame.url()));
+    const candidate = candidates.at(-1) || null;
+    if (candidate && await candidate.locator('input[type="file"]').count().catch(() => 0) > 0) return candidate;
+    await sleepFn(pollMs);
+  }
+  return null;
+}
 function fileSha256(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
 async function copyFileWithRetry(source, destination) {
   let lastError = null;
@@ -1191,13 +1209,12 @@ export class PrayerSite {
     if (!await button.count()) throw new Error('没有识别到“批量上传场景图”按钮。');
     await button.click();
     this.timing.count('browser_action_count');
-    let uploadFrame = null;
-    const frameDeadline = Date.now() + 10000;
-    while (!uploadFrame && Date.now() < frameDeadline) {
-      uploadFrame = this.page.frames().find((frame) => /\/blessing\/toUploadMore\/scene(?:[/?#]|$)/i.test(frame.url())) || null;
-      if (!uploadFrame) await sleep(100);
-    }
-    if (!uploadFrame) throw new Error('场景图上传窗口没有打开；未选择或上传任何文件。');
+    // 大批量订单时平台会先计算并拼接全部 ids，再延迟挂载 Layui iframe。
+    // 2026-08-30 的 119 条供灯订单实测超过旧版 10 秒；窗口最终正常出现，
+    // 旧版却已报错退出。取最后一个匹配 frame，并等待文件控件真正挂载，
+    // 既能接管迟到窗口，也避免误用上一轮已隐藏的上传 frame。
+    const uploadFrame = await waitForSceneUploadFrame(this.page);
+    if (!uploadFrame) throw new Error(`场景图上传窗口等待 ${SCENE_UPLOAD_FRAME_TIMEOUT_MS / 1000} 秒仍未就绪；未选择或上传任何文件。`);
     const input = uploadFrame.locator('input[type="file"]').first();
     await input.waitFor({ state: 'attached', timeout: 10000 });
     await input.setInputFiles(files);
