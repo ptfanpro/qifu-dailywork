@@ -402,7 +402,9 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
       photoTiming.setCount('pdf_page_count',plan.pdfPages.length);
       photoTiming.count('digit_direct_count',plan.assignments.filter((item)=>item.evidence?.method === 'pdf-range-and-photo-code').length);
       photoTiming.count('text_resolved_count',plan.assignments.filter((item)=>String(item.evidence?.method || '').includes('photo-code')).length);
-      photoTiming.count('fingerprint_fallback_count',plan.assignments.filter((item)=>String(item.evidence?.method || '').includes('local-pdf-page-shape-fingerprint')).length);
+      photoTiming.count('fingerprint_fallback_count',plan.assignments.filter((item)=>
+        String(item.evidence?.method || '').includes('local-pdf-page-shape-fingerprint')
+        || String(item.evidence?.pdfRecheck?.method || '').includes('fingerprint')).length);
       photoTiming.count('duplicate_validation_count',plan.duplicateSources.length);
       photoTiming.count('manual_review_count',(plan.pendingIssues || []).length);
       photoTiming.count('pending_photo_count',plan.missingExpected.length);

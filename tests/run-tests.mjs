@@ -281,6 +281,20 @@ const globallyResolvedVisibleCodeResult=await recheckReliablePhotoClaimsWithPdf(
 assert.equal(globallyResolvedVisibleCodeResult.confirmed,1);
 assert.equal(globallyResolvedVisibleCodeResult.rejected,0);
 assert.equal(globallyResolvedVisibleCodeClaim[0].evidence.pdfRecheck.method,'multi-crop-visible-code-and-pdf-index');
+// 重复号的 7/9 全局修复不能复用原 OCR 的“可见编号已确认”捷径；即使原
+// 证据有两票，也必须进入 PDF 正文指纹。这里照片内容属于 401，却暂列为
+// 402，复核必须拒绝，证明第二层不是只检查编号是否存在。
+const sevenNinePendingFingerprintClaim=[{
+  file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},
+  paperGeometry:{left:0.1,top:140/900,width:0.8,height:640/900,right:0.9,bottom:(140+640)/900,score:0.5,fill:0.95,boxArea:0.56,rectangularPaper:true},
+  // 即使方法名仍属于 normally trusted 的双票 OCR，只要重复号裁决设置了
+  // requiresPdfFingerprintRecheck，就不得走“编号存在即确认”的快捷路径。
+  evidence:{method:'targeted-landscape-code-threshold-consensus',votes:2,prefixDistance:0,maxConfidence:40,requiresPdfFingerprintRecheck:true},
+}];
+const sevenNinePendingFingerprintResult=await recheckReliablePhotoClaimsWithPdf(sevenNinePendingFingerprintClaim,shapePages);
+assert.equal(sevenNinePendingFingerprintResult.confirmed,0);
+assert.equal(sevenNinePendingFingerprintResult.rejected,1);
+assert.equal(sevenNinePendingFingerprintClaim[0].pdfRecheck.reason,'pdf-fingerprint-prefers-another-page');
 const persistedDirectVisibleCodeClaim=[{
   file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},paperGeometry:{},
   evidence:{votes:2,prefixDistance:0,maxConfidence:92,layouts:['current-temple-code-line','current-temple-code-micro']},
@@ -698,12 +712,13 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.6\.1/);
-assert.match(uiSource,/线上闭环复核版/);
+assert.match(uiSource,/V9\.6\.2/);
+assert.match(uiSource,/重复编号强制复核版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
 assert.match(runnerSource,/没有改名、压缩、上传或修改平台/);
+assert.match(runnerSource,/evidence\?\.pdfRecheck\?\.method.*fingerprint/s);
 assert.doesNotMatch(uiSource,/配置机器接口|检查接口\/日清单|清除接口凭据/);
 assert.match(runnerSource,/client\.dailyPlan\(businessDate\)/);
 assert.match(uiSource,/WorkingArea/);
@@ -1015,6 +1030,24 @@ const unsafeHighConfidenceZeroOne=duplicatedZeroOnePhotos.map((item)=>({...item,
 unsafeHighConfidenceZeroOne[1].number=503;
 unsafeHighConfidenceZeroOne[1].evidence={method:'ocr',votes:2,maxConfidence:65};
 assert.deepEqual(reconcileDuplicatePhotoNumbers(unsafeHighConfidenceZeroOne,new Set(Array.from({length:14},(_,index)=>503+index)),occupiedZeroOneNumbers),[]);
+// 2026-08-31 真实故障的脱敏回归：纸面 659 被主/备 OCR 同时读成 657，
+// 另一张真实 657 又使它成为可靠重复号。只有 659 是 PDF 唯一缺号，真实
+// 657 为单票 100 分，误读候选为双票 40 分。允许暂列 659，但必须在后续
+// recheckReliablePhotoClaimsWithPdf 中强制用 PDF 正文指纹确认。
+const duplicatedSevenNinePhotos=[
+  {file:'real-657.jpg',reliable:true,number:657,candidates:[{number:657,votes:1,prefixDistance:0,maxConfidence:100}],paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:0,maxConfidence:100}},
+  {file:'actual-659.jpg',reliable:true,number:657,candidates:[{number:657,votes:2,prefixDistance:0,maxConfidence:40}],paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},evidence:{method:'targeted-landscape-code-threshold-consensus',votes:2,prefixDistance:0,maxConfidence:40}},
+];
+const occupiedSevenNineNumbers=new Set(Array.from({length:12},(_,index)=>650+index).filter((number)=>![657,659].includes(number)));
+assert.deepEqual(reconcileDuplicatePhotoNumbers(duplicatedSevenNinePhotos,new Set(Array.from({length:12},(_,index)=>650+index)),occupiedSevenNineNumbers).map((item)=>[item.from,item.to]),[[657,659]]);
+assert.equal(duplicatedSevenNinePhotos[0].number,657);
+assert.equal(duplicatedSevenNinePhotos[1].number,659);
+assert.equal(duplicatedSevenNinePhotos[1].evidence.method,'global-one-to-one-existing-files-seven-nine-pending-pdf-recheck');
+assert.equal(duplicatedSevenNinePhotos[1].evidence.requiresPdfFingerprintRecheck,true);
+const unsafeSevenNineDuplicate=duplicatedSevenNinePhotos.map((item,index)=>({
+  ...item,number:657,evidence:{method:'ocr',votes:index?2:1,maxConfidence:index?72:78},paperGeometry:{usablePaper:true,rectangularPaper:true},
+}));
+assert.deepEqual(reconcileDuplicatePhotoNumbers(unsafeSevenNineDuplicate,new Set(Array.from({length:12},(_,index)=>650+index)),occupiedSevenNineNumbers),[]);
 // OCR 弱候选若指向已被另一张可靠照片占用的编号，应交给全局一一对应处理，
 // 不得阻断拍摄序列把当前照片归入唯一缺号。
 assert.equal(hasStrongOcrConflict({candidates:[{number:569,votes:2,prefixDistance:0}]},580,new Set([569])),false);

@@ -2077,11 +2077,14 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
     const persistedDirectConsensus = !method
       && Array.isArray(item?.evidence?.layouts) && item.evidence.layouts.length > 0
       && Number(item?.evidence?.prefixDistance ?? 99) <= 1;
-    const visibleConsensus = (/(?:ocr|photo-code|targeted-landscape-code|global-one-to-one-remaining-pdf-candidate)/.test(method)
+    const forcePdfFingerprint = item?.evidence?.requiresPdfFingerprintRecheck === true;
+    const visibleConsensus = !forcePdfFingerprint
+      && (/(?:ocr|photo-code|targeted-landscape-code|global-one-to-one-remaining-pdf-candidate)/.test(method)
         || persistedDirectConsensus)
       && ((Number(item?.evidence?.votes || 0) >= 2
         && Number(item?.evidence?.maxConfidence || 0) >= 20) || strictVisibleCode);
-    const verifiedCaptureSequence = /^capture-(?:ascending|descending)-sequence-(?:between-code-anchors|forward-edge)$/.test(method)
+    const verifiedCaptureSequence = !forcePdfFingerprint
+      && /^capture-(?:ascending|descending)-sequence-(?:between-code-anchors|forward-edge)$/.test(method)
       && Number(item?.evidence?.votes || 0) >= 2;
     if (method === 'existing-numeric-filename-claim' && strongObservedConflict) {
       reason = 'visible-code-disagrees-with-filename';
@@ -2915,7 +2918,7 @@ function singleDigitConfusionKind(left, right) {
     if (a[index] === b[index]) continue;
     differences += 1;
     pair = [a[index], b[index]].sort().join('');
-    if (!['01', '68'].includes(pair)) return null;
+    if (!['01', '68', '79'].includes(pair)) return null;
   }
   return differences === 1 ? pair : null;
 }
@@ -2940,9 +2943,11 @@ function captureSequenceProposal(recognized, sourceIndex, direction) {
   return direction === 1 ? anchors[0].number - firstStep : anchors[0].number + firstStep;
 }
 
-// OCR 的 6/8、0/1 混淆可能同时制造“重复号”和“缺号”。只在重复、缺号、
+// OCR 的 6/8、0/1、7/9 混淆可能同时制造“重复号”和“缺号”。只在重复、缺号、
 // 连续三锚点、单一字符混淆四项同时成立时纠正。0/1 只接受单票低置信度
-// 结果；这样可修复清晰照片中的 513 -> 503，又不会覆盖高置信度真实编号。
+// 结果；7/9 还必须满足“恰好两张同号、唯一缺号、强候选清晰、弱候选低置信”
+// 的严格增量条件，并在后续强制进入 PDF 正文指纹复核。这样既能修复清晰
+// 659 被两套 OCR 同时读成 657，也不会把真正重复拍摄的 657 直接猜成 659。
 export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, occupiedNumbers = new Set()) {
   const numberGroups = new Map();
   for (let index = 0; index < recognized.length; index += 1) {
@@ -2994,7 +2999,8 @@ export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, occu
     // 增量补图时，相邻的 514/515/516 可能已经在前一轮改成数字文件，不再
     // 出现在 recognized 中，三锚点因此不可见。此时仍可利用“PDF 唯一缺号 +
     // 已有数字文件占用集合 + 两张同号候选的证据强弱”完成一一对应：强候选
-    // 保留原号，且只允许明显更弱的单票候选落到唯一 0/1 或 6/8 混淆缺号。
+    // 保留原号，且只允许明显更弱的候选落到唯一 0/1、6/8 或严格 7/9
+    // 混淆缺号。7/9 必须由后续 PDF 正文指纹再次确认，不能只靠集合补号。
     const ranked = indices.map((index) => {
       const item = recognized[index];
       const votes = Number(item.evidence?.votes || 0);
@@ -3008,7 +3014,15 @@ export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, occu
       .filter((number) => {
         const confusion = singleDigitConfusionKind(duplicateNumber, number);
         if (confusion === '68') return true;
-        return confusion === '01' && weak.votes <= 1 && weak.confidence < 25;
+        if (confusion === '01') return weak.votes <= 1 && weak.confidence < 25;
+        return confusion === '79'
+          && indices.length === 2
+          && strong.confidence >= 80
+          && weak.confidence <= 60
+          && strong.item.paperGeometry?.usablePaper
+          && weak.item.paperGeometry?.usablePaper
+          && !isLikelyScene(strong.item)
+          && !isLikelyScene(weak.item);
       });
     if (alternatives.length !== 1) continue;
     const repairedNumber = alternatives[0];
@@ -3018,10 +3032,13 @@ export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, occu
       ...(weak.item.evidence || {}),
       method: singleDigitConfusionKind(duplicateNumber, repairedNumber) === '68'
         ? 'global-one-to-one-existing-files-six-eight-repair'
-        : 'global-one-to-one-existing-files-zero-one-repair',
+        : singleDigitConfusionKind(duplicateNumber, repairedNumber) === '79'
+          ? 'global-one-to-one-existing-files-seven-nine-pending-pdf-recheck'
+          : 'global-one-to-one-existing-files-zero-one-repair',
       originalOcrNumber: duplicateNumber,
       repairedNumber,
       occupiedNumberCount: occupiedNumbers.size,
+      requiresPdfFingerprintRecheck: singleDigitConfusionKind(duplicateNumber, repairedNumber) === '79',
     };
     usedNumbers.add(repairedNumber);
     corrections.push({ index:weak.index, from:duplicateNumber, to:repairedNumber, file:weak.item.file });
@@ -3405,7 +3422,10 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   inferPhotoSequences(recognized, expectedNumbers);
   const globalNumberCorrections = reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, new Set(preassignedNumbers));
   for (const correction of globalNumberCorrections) {
-    onProgress?.(`全局一一对应纠错：${path.basename(correction.file)} 的 OCR 编号 ${correction.from} 已按 PDF 缺号和连续拍摄顺序修正为 ${correction.to}。`);
+    const corrected = recognized[correction.index];
+    onProgress?.(corrected?.evidence?.requiresPdfFingerprintRecheck
+      ? `重复编号升级复核：${path.basename(correction.file)} 的 OCR 编号 ${correction.from} 与另一张冲突，按唯一 PDF 缺号暂列为 ${correction.to}；必须通过 PDF 正文指纹后才会改名。`
+      : `全局一一对应纠错：${path.basename(correction.file)} 的 OCR 编号 ${correction.from} 已按 PDF 缺号和连续拍摄顺序修正为 ${correction.to}。`);
   }
   inferPhotoGapsAroundExistingNumbers(recognized, expectedNumbers, new Set(preassignedNumbers));
   // 纸色与唯一缺号只能缩小候选，不能直接定号；折叠会遮住编号，也会扭曲
