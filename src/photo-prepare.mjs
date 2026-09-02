@@ -2418,6 +2418,11 @@ export function classifySceneVisualScore(item) {
   // 远一点的灯阵曝光更低，亮焰面积会明显缩小；暗像素、低平均亮度和仍然
   // 可见的暖色高光三项同时成立时，依然是单图可确认的供灯场景。
   if (item.darkRatio >= 0.35 && item.luminance <= 95 && item.warmBrightRatio >= 0.055) return 'scene-lamp';
+  // 极低曝光的远景灯阵中，玻璃和暗部会把绝大多数火焰压到 150 以下，
+  // warmBrightRatio 因而可能只有 2%～4%。这条分支只在 isLikelyScene 已由
+  // “非矩形 + 极暗 + 低正文边缘”确认场景结构后使用，避免把暗色福单
+  // 单凭亮度归为供灯。
+  if (item.darkRatio >= 0.62 && item.luminance <= 65 && item.warmBrightRatio >= 0.02) return 'scene-lamp';
   return null;
 }
 
@@ -2551,6 +2556,17 @@ export function isLikelyScene(item) {
     && Number(scene.warmBrightRatio || 0) >= 0.09
     && Number(metrics.upperEdgeDensity || 1) <= 0.08
     && Number(metrics.edgeDensity || 1) <= 0.17;
+  // 2026-09-01 的两张远景供灯图隔着玻璃拍摄，整体极暗，火焰高光面积
+  // 只有 2%～4%；墙面成排红色灯牌又被纸色连通域误报为 usablePaper。
+  // 真正福单仍有矩形纸边或明显更高的正文边缘密度。必须同时满足非矩形、
+  // 极暗、少量暖色火焰、低边缘和高均匀度，才在 OCR 前按场景排除。
+  const veryDarkDistantLampSceneStructure = geometry.rectangularPaper === false
+    && Number(scene.darkRatio || 0) >= 0.62
+    && Number(scene.luminance || 255) <= 65
+    && Number(scene.warmBrightRatio || 0) >= 0.02
+    && Number(metrics.upperEdgeDensity || 1) <= 0.065
+    && Number(metrics.edgeDensity || 1) <= 0.105
+    && Number(metrics.uniformity || 0) >= 0.49;
   // 供水场景中，画面下半部的水碗、供桌和远处红纸可能连成一个宽色块。
   // 它从画面中部延伸到底边，但高度不到半幅、没有矩形纸边；真实近景福单
   // 的纸张通常从画面上部开始且高度超过半幅。旧版把这种色块当成福单，
@@ -2573,7 +2589,7 @@ export function isLikelyScene(item) {
     && metrics.upperEdgeDensity <= 0.10
     && metrics.edgeDensity <= 0.13;
   // 灯阵或供水全景会在画面底部形成横跨全宽的红/黄连通块；它不是纸张。
-  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure
+  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure || veryDarkDistantLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure) return true;
   // 纸张偶尔与画面右边缘相接，严格矩形条件会失败；足够大的连续红/黄纸色块仍应判为纸张。
   if (geometry.rectangularPaper || (geometry.score >= 0.085
@@ -2587,7 +2603,7 @@ export function isLikelyScene(item) {
     && metrics.uniformity > 0.47
     && metrics.upperEdgeDensity < 0.08
     && metrics.edgeDensity < 0.16;
-  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure
+  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure || veryDarkDistantLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure || visualScene);
 }
 

@@ -712,8 +712,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.6\.2/);
-assert.match(uiSource,/重复编号强制复核版/);
+assert.match(uiSource,/V9\.6\.3/);
+assert.match(uiSource,/远景暗场供灯识别修正版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -1127,6 +1127,19 @@ const august30LampScenes=[
   {paperGeometry:{rectangularPaper:false,usablePaper:true,width:.956,height:.567,boxArea:.542,fill:.350},visualMetrics:{edgeDensity:.123,upperEdgeDensity:.038,uniformity:.487},sceneMetrics:{luminance:70.5,warmBrightRatio:.111,darkRatio:.575}},
 ];
 assert.ok(august30LampScenes.every((item)=>isLikelyScene(item)));
+// 2026-09-01 真实故障的匿名结构回归：两张远景灯阵隔着玻璃拍摄，火焰
+// 高光面积很小，墙面红色灯牌又被误成可用纸张。它们必须在 PDF 指纹前
+// 归为场景，不能再制造已经占用编号的假冲突。
+const september1DistantLampScenes=[
+  {paperGeometry:{left:.134375,top:.4375,width:.4125,height:.541667,right:.546875,bottom:.979167,score:.101406,fill:.453846,boxArea:.223438,rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.089818,upperEdgeDensity:.052995,uniformity:.532474},sceneMetrics:{luminance:56.575,warmBrightRatio:.024948,darkRatio:.693646}},
+  {paperGeometry:{left:.153125,top:.379167,width:.75625,height:.45,right:.909375,bottom:.829167,score:.126927,fill:.372972,boxArea:.340313,rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.092461,upperEdgeDensity:.058477,uniformity:.504583},sceneMetrics:{luminance:53.755,warmBrightRatio:.036615,darkRatio:.698438}},
+];
+assert.ok(september1DistantLampScenes.every((item)=>isLikelyScene(item)));
+// 边缘条件分别保护暗色福单、无暖色火焰的夜景和普通低曝光照片，防止
+// 为两张实拍场景放宽成单纯的“图片很暗”。
+assert.equal(isLikelyScene({paperGeometry:{rectangularPaper:true,usablePaper:true},visualMetrics:{edgeDensity:.09,upperEdgeDensity:.05,uniformity:.53},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.03}}),false);
+assert.equal(isLikelyScene({paperGeometry:{rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.09,upperEdgeDensity:.05,uniformity:.53},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.01}}),false);
+assert.equal(isLikelyScene({paperGeometry:{rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.14,upperEdgeDensity:.10,uniformity:.40},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.03}}),false);
 
 // 同批清晰福单的纸色连通域会把木架也包进去，旧版据此误选“竖版”裁框，
 // 并在 y=47.5% 处截到神像底座。新构图的编号实际位于约 y=50%~53%。
@@ -1203,6 +1216,9 @@ assert.equal(classifySceneVisualScore({luminance:126.7958,warmBrightRatio:.11395
 // 2026-08-30 顶棚阴影下的供水全景，比旧阈值稍暗但暖色高光很少。
 assert.equal(classifySceneVisualScore({luminance:106.4,warmBrightRatio:.058,darkRatio:.222}),'scene-water');
 assert.equal(classifySceneVisualScore({luminance:102,warmBrightRatio:0.04,darkRatio:0.20}),null);
+assert.equal(classifySceneVisualScore({luminance:56.575,warmBrightRatio:.024948,darkRatio:.693646}),'scene-lamp');
+assert.equal(classifySceneVisualScore({luminance:53.755,warmBrightRatio:.036615,darkRatio:.698438}),'scene-lamp');
+assert.equal(classifySceneVisualScore({luminance:56,warmBrightRatio:.01,darkRatio:.70}),null);
 // 自适应右侧编号带必须分别以两个重叠窗口覆盖 y≈30% 和 y≈57% 的编号，
 // 防止未来再次通过追加某一天的固定坐标修复清晰编号。
 for (const y of [.30,.57]) {
