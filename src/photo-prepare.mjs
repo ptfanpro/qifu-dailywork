@@ -2086,6 +2086,24 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
     const verifiedCaptureSequence = !forcePdfFingerprint
       && /^capture-(?:ascending|descending)-sequence-(?:between-code-anchors|forward-edge)$/.test(method)
       && Number(item?.evidence?.votes || 0) >= 2;
+    // The leading/trailing gap resolver is also a constrained capture-sequence
+    // proof, but it used to be sent back through the low-discrimination page
+    // fingerprint.  Preserve it when the photo itself contains one exact-prefix
+    // observation for the inferred number.  This is strictly stronger than the
+    // sequence alone and prevents a same-template grayscale ranking from
+    // overturning a visibly printed code.
+    const sequenceGapVisibleCandidate = !forcePdfFingerprint
+      && /^(?:capture-leading-gap-before-code-anchor|capture-gap-after-existing-number-exclusion)$/.test(method)
+      && Number(item?.evidence?.votes || 0) >= 3
+      && (item?.candidates || []).some((candidate) => candidate.number === claimedNumber
+        && Number(candidate.prefixDistance ?? 99) <= 0.1
+        && Number(candidate.maxConfidence || 0) >= 35);
+    const verifiedPdfStructureBijection = method === 'global-one-to-one-pdf-structure-repair'
+      && claimedPages.length === 1
+      && typeof item?.evidence?.photoPortrait === 'boolean'
+      && claimedPages[0].portrait === item.evidence.photoPortrait
+      && item.evidence.claimedPdfPortrait !== item.evidence.repairedPdfPortrait
+      && pdfPaperColor(claimedPages[0]) === item.evidence.paperColor;
     if (method === 'existing-numeric-filename-claim' && strongObservedConflict) {
       reason = 'visible-code-disagrees-with-filename';
     } else if (claimedPages.length !== 1) {
@@ -2097,16 +2115,23 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       inconclusive += 1;
     } else if (trustedManual(item)) {
       item.evidence.pdfRecheck={method:'preserved-manual-pdf-content-review',status:'confirmed'};
+    } else if (verifiedPdfStructureBijection) {
+      item.evidence.pdfRecheck={method:'orientation-color-and-global-pdf-bijection',status:'confirmed'};
     } else if (visibleConsensus) {
       item.evidence.pdfRecheck={method:strictVisibleCode
         ? 'strict-visible-code-box-and-pdf-index'
         : 'multi-crop-visible-code-and-pdf-index',status:'confirmed'};
-    } else if (verifiedCaptureSequence) {
+    } else if (verifiedCaptureSequence || sequenceGapVisibleCandidate) {
       // The sequence builder already requires continuous WeChat capture times,
       // matching paper structure, PDF-range membership, and visible numbered
       // anchors.  A same-template grayscale ranking is not an independent
       // contradiction and must not overturn that stronger one-to-one chain.
-      item.evidence.pdfRecheck={method:'continuous-capture-sequence-and-pdf-index',status:'confirmed'};
+      item.evidence.pdfRecheck={
+        method:sequenceGapVisibleCandidate
+          ? 'exact-visible-code-candidate-plus-capture-gap-and-pdf-index'
+          : 'continuous-capture-sequence-and-pdf-index',
+        status:'confirmed',
+      };
     } else {
       const variants = await photoShapeFingerprints(item);
       if (!variants.length) reason = 'paper-fingerprint-unavailable';
@@ -2567,6 +2592,20 @@ export function isLikelyScene(item) {
     && Number(metrics.upperEdgeDensity || 1) <= 0.065
     && Number(metrics.edgeDensity || 1) <= 0.105
     && Number(metrics.uniformity || 0) >= 0.49;
+  // A closer side-angle lamp photo can contain more flame edges than the
+  // distant-glass rule above while remaining unmistakably a scene: no usable
+  // paper, extremely dark exposure, a small warm flame population, very low
+  // total edge density and a highly uniform dark background.  Keep the tighter
+  // no-paper/dark/uniform requirements instead of merely widening the old
+  // upper-edge threshold, so dim blessing sheets remain protected.
+  const veryDarkDenseLampSceneStructure = !geometry.usablePaper
+    && geometry.rectangularPaper === false
+    && Number(scene.darkRatio || 0) >= 0.65
+    && Number(scene.luminance || 255) <= 60
+    && Number(scene.warmBrightRatio || 0) >= 0.025
+    && Number(metrics.upperEdgeDensity || 1) <= 0.08
+    && Number(metrics.edgeDensity || 1) <= 0.09
+    && Number(metrics.uniformity || 0) >= 0.60;
   // 供水场景中，画面下半部的水碗、供桌和远处红纸可能连成一个宽色块。
   // 它从画面中部延伸到底边，但高度不到半幅、没有矩形纸边；真实近景福单
   // 的纸张通常从画面上部开始且高度超过半幅。旧版把这种色块当成福单，
@@ -2589,7 +2628,7 @@ export function isLikelyScene(item) {
     && metrics.upperEdgeDensity <= 0.10
     && metrics.edgeDensity <= 0.13;
   // 灯阵或供水全景会在画面底部形成横跨全宽的红/黄连通块；它不是纸张。
-  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure || veryDarkDistantLampSceneStructure
+  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure || veryDarkDistantLampSceneStructure || veryDarkDenseLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure) return true;
   // 纸张偶尔与画面右边缘相接，严格矩形条件会失败；足够大的连续红/黄纸色块仍应判为纸张。
   if (geometry.rectangularPaper || (geometry.score >= 0.085
@@ -2603,7 +2642,7 @@ export function isLikelyScene(item) {
     && metrics.uniformity > 0.47
     && metrics.upperEdgeDensity < 0.08
     && metrics.edgeDensity < 0.16;
-  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure || veryDarkDistantLampSceneStructure
+  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure || veryDarkDistantLampSceneStructure || veryDarkDenseLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure || visualScene);
 }
 
@@ -3129,6 +3168,85 @@ export async function dominantPaperColor(file, geometry = null) {
   return null;
 }
 
+function photoPortraitFromGeometry(item) {
+  const width = Number(item?.paperGeometry?.width || 0);
+  const height = Number(item?.paperGeometry?.height || 0);
+  if (!(width > 0) || !(height > 0)) return null;
+  return height > width * 1.25;
+}
+
+function pdfPaperColor(page) {
+  const name = String(page?.pdfName || page?.pdf || '');
+  if (/红纸/.test(name)) return 'red';
+  if (/黄纸/.test(name)) return 'yellow';
+  return null;
+}
+
+// A cropped OCR line can be internally consistent and still come from the
+// wrong region when a JPEG has a horizontal corruption band.  Never let such
+// a claim occupy a landscape page if the detected sheet is portrait (or vice
+// versa).  We may repair it only when the same batch supplies all of the
+// following independent constraints:
+//   1. exactly two photos claim the same PDF number;
+//   2. exactly one photo matches that page's orientation;
+//   3. exactly one still-missing PDF page matches the other photo's orientation
+//      and paper colour; and
+//   4. the missing page changes orientation, so colour alone cannot guess it.
+// Otherwise the duplicate remains for manual review.
+export async function reconcileDuplicatePhotoNumbersByPdfStructure(
+  recognized, pdfPages, expectedNumbers, occupiedNumbers = new Set(),
+  { getPaperColor = dominantPaperColor } = {},
+) {
+  const groups = new Map();
+  for (let index = 0; index < recognized.length; index += 1) {
+    const item = recognized[index];
+    if (!item?.reliable || !Number.isInteger(item.number) || isLikelyScene(item)) continue;
+    if (!groups.has(item.number)) groups.set(item.number, []);
+    groups.get(item.number).push({ index, item });
+  }
+  const claimedNumbers = new Set([...occupiedNumbers, ...groups.keys()]);
+  const missingPages = pdfPages.filter((page) => Number.isInteger(page.number)
+    && expectedNumbers.has(page.number) && !claimedNumbers.has(page.number));
+  const corrections = [];
+  for (const [duplicateNumber, group] of groups) {
+    if (group.length !== 2) continue;
+    const claimedPages = pdfPages.filter((page) => page.number === duplicateNumber);
+    if (claimedPages.length !== 1 || typeof claimedPages[0].portrait !== 'boolean') continue;
+    const claimedPage = claimedPages[0];
+    const structuredGroup = group.map((entry) => ({ ...entry, portrait:photoPortraitFromGeometry(entry.item) }));
+    if (structuredGroup.some(({ portrait }) => typeof portrait !== 'boolean')) continue;
+    const incompatible = structuredGroup.filter(({ portrait }) => portrait !== claimedPage.portrait);
+    const compatible = structuredGroup.filter(({ portrait }) => portrait === claimedPage.portrait);
+    if (incompatible.length !== 1 || compatible.length !== 1) continue;
+    const [{ index, item, portrait }] = incompatible;
+    if (!(item.paperGeometry?.usablePaper || item.paperGeometry?.rectangularPaper)) continue;
+    const color = await getPaperColor(item.file, item.paperGeometry);
+    if (!color || color !== pdfPaperColor(claimedPage)) continue;
+    const candidates = missingPages.filter((page) => !claimedNumbers.has(page.number)
+      && typeof page.portrait === 'boolean'
+      && page.portrait === portrait
+      && page.portrait !== claimedPage.portrait
+      && pdfPaperColor(page) === color);
+    if (candidates.length !== 1) continue;
+    const target = candidates[0];
+    item.originalOcrNumber = duplicateNumber;
+    item.number = target.number;
+    item.evidence = {
+      ...(item.evidence || {}),
+      method:'global-one-to-one-pdf-structure-repair',
+      originalOcrNumber:duplicateNumber,
+      repairedNumber:target.number,
+      photoPortrait:portrait,
+      claimedPdfPortrait:claimedPage.portrait,
+      repairedPdfPortrait:target.portrait,
+      paperColor:color,
+    };
+    claimedNumbers.add(target.number);
+    corrections.push({ index, from:duplicateNumber, to:target.number, file:item.file });
+  }
+  return corrections;
+}
+
 async function applyUniquePdfColorEvidence(recognized, pdfPages, preassignedNumbers = []) {
   const alreadyAssigned = new Set([
     ...preassignedNumbers,
@@ -3442,6 +3560,12 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     onProgress?.(corrected?.evidence?.requiresPdfFingerprintRecheck
       ? `重复编号升级复核：${path.basename(correction.file)} 的 OCR 编号 ${correction.from} 与另一张冲突，按唯一 PDF 缺号暂列为 ${correction.to}；必须通过 PDF 正文指纹后才会改名。`
       : `全局一一对应纠错：${path.basename(correction.file)} 的 OCR 编号 ${correction.from} 已按 PDF 缺号和连续拍摄顺序修正为 ${correction.to}。`);
+  }
+  const structuralNumberCorrections = await reconcileDuplicatePhotoNumbersByPdfStructure(
+    recognized, pdfPages, expectedNumbers, new Set(preassignedNumbers),
+  );
+  for (const correction of structuralNumberCorrections) {
+    onProgress?.(`版式一一对应纠错：${path.basename(correction.file)} 的 OCR 编号 ${correction.from} 与 PDF 横竖版冲突，已按唯一同色缺号页修正为 ${correction.to}。`);
   }
   inferPhotoGapsAroundExistingNumbers(recognized, expectedNumbers, new Set(preassignedNumbers));
   // 纸色与唯一缺号只能缩小候选，不能直接定号；折叠会遮住编号，也会扭曲

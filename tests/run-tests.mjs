@@ -7,7 +7,7 @@ import { calculateQuantities, venueMessage, normalizeText } from '../src/quantit
 import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
-import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localOcrCodeLayoutsForPhoto, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, OVERLAPPING_RIGHT_CODE_BANDS, parseLocalOcrCodeCandidates, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
+import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localOcrCodeLayoutsForPhoto, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, OVERLAPPING_RIGHT_CODE_BANDS, parseLocalOcrCodeCandidates, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, reconcileDuplicatePhotoNumbersByPdfStructure, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isSceneUploadFrameUrl, isTransientAutomationPage, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick, waitForSceneUploadFrame } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
@@ -327,6 +327,28 @@ const continuousAnchoredSequenceResult=await recheckReliablePhotoClaimsWithPdf(c
 assert.equal(continuousAnchoredSequenceResult.confirmed,1);
 assert.equal(continuousAnchoredSequenceResult.rejected,0);
 assert.equal(continuousAnchoredSequenceClaim[0].evidence.pdfRecheck.method,'continuous-capture-sequence-and-pdf-index');
+// 2026-09-02 real failure, anonymized: the first capture visibly contained the
+// exact PDF prefix and suffix, and three continuous anchors proved the leading
+// gap. A grayscale page ranking preferred another same-template page by only a
+// few thousandths and used to overturn the correct printed number.
+const visibleLeadingGapClaim=[{
+  file:shapePhoto,reliable:true,number:402,visualMetrics:{},
+  candidates:[{number:402,votes:1,prefixDistance:0,maxConfidence:46}],
+  paperGeometry:{left:0.1,top:140/900,width:0.8,height:640/900,right:0.9,bottom:(140+640)/900,score:0.5,fill:0.95,boxArea:0.56,usablePaper:true},
+  evidence:{method:'capture-leading-gap-before-code-anchor',votes:3,prefixDistance:null,maxConfidence:null,layouts:[]},
+}];
+const visibleLeadingGapResult=await recheckReliablePhotoClaimsWithPdf(visibleLeadingGapClaim,shapePages);
+assert.equal(visibleLeadingGapResult.confirmed,1);
+assert.equal(visibleLeadingGapResult.rejected,0);
+assert.equal(visibleLeadingGapClaim[0].evidence.pdfRecheck.method,'exact-visible-code-candidate-plus-capture-gap-and-pdf-index');
+const weakLeadingGapClaim=[{
+  ...visibleLeadingGapClaim[0],reliable:true,
+  candidates:[{number:402,votes:1,prefixDistance:0,maxConfidence:34}],
+  evidence:{method:'capture-leading-gap-before-code-anchor',votes:3,prefixDistance:null,maxConfidence:null,layouts:[]},
+}];
+const weakLeadingGapResult=await recheckReliablePhotoClaimsWithPdf(weakLeadingGapClaim,shapePages);
+assert.equal(weakLeadingGapResult.rejected,1);
+assert.equal(weakLeadingGapClaim[0].pdfRecheck.reason,'pdf-fingerprint-prefers-another-page');
 const unreadableExistingFilename=[{
   file:shapePhoto,reliable:true,number:401,observedOcrNumber:null,candidates:[],visualMetrics:{},paperGeometry:{},
   evidence:{method:'existing-numeric-filename-claim'},
@@ -712,8 +734,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.6\.3/);
-assert.match(uiSource,/远景暗场供灯识别修正版/);
+assert.match(uiSource,/V9\.6\.4/);
+assert.match(uiSource,/损坏照片版式一一对应修正版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -1048,6 +1070,45 @@ const unsafeSevenNineDuplicate=duplicatedSevenNinePhotos.map((item,index)=>({
   ...item,number:657,evidence:{method:'ocr',votes:index?2:1,maxConfidence:index?72:78},paperGeometry:{usablePaper:true,rectangularPaper:true},
 }));
 assert.deepEqual(reconcileDuplicatePhotoNumbers(unsafeSevenNineDuplicate,new Set(Array.from({length:12},(_,index)=>650+index)),occupiedSevenNineNumbers),[]);
+// 2026-09-02 real failure, anonymized: a JPEG corruption band made a portrait
+// red tablet crop hallucinate the number of an already claimed landscape red
+// page. The only unclaimed portrait red PDF page closes the full batch exactly.
+const structuralPdfPages=[
+  {number:23,portrait:false,pdfName:'92红纸1.pdf',_localShapeFingerprint:shapePages[0]._localShapeFingerprint},
+  {number:28,portrait:true,pdfName:'92红纸2.pdf',_localShapeFingerprint:shapePages[1]._localShapeFingerprint},
+];
+const structuralDuplicatePhotos=[
+  {file:'landscape-red.jpg',reliable:true,number:23,candidates:[{number:23,votes:1,prefixDistance:0,maxConfidence:100}],paperGeometry:{usablePaper:true,width:.82,height:.58},visualMetrics:{},evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:.25,maxConfidence:100}},
+  {file:'portrait-red-with-corruption-band.jpg',reliable:true,number:23,candidates:[{number:23,votes:3,prefixDistance:.25,maxConfidence:100}],paperGeometry:{usablePaper:true,width:.731,height:.925},visualMetrics:{},evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:.25,maxConfidence:100}},
+];
+const structuralCorrections=await reconcileDuplicatePhotoNumbersByPdfStructure(
+  structuralDuplicatePhotos,structuralPdfPages,new Set([23,28]),new Set(),
+  {getPaperColor:async()=> 'red'},
+);
+assert.deepEqual(structuralCorrections.map((item)=>[item.from,item.to]),[[23,28]]);
+assert.equal(structuralDuplicatePhotos[0].number,23);
+assert.equal(structuralDuplicatePhotos[1].number,28);
+assert.equal(structuralDuplicatePhotos[1].evidence.method,'global-one-to-one-pdf-structure-repair');
+const structuralRecheck=await recheckReliablePhotoClaimsWithPdf(structuralDuplicatePhotos,structuralPdfPages);
+assert.equal(structuralRecheck.rejected,0);
+assert.equal(structuralRecheck.confirmed,2);
+assert.equal(structuralDuplicatePhotos[1].evidence.pdfRecheck.method,'orientation-color-and-global-pdf-bijection');
+const sameOrientationDuplicate=structuralDuplicatePhotos.map((item,index)=>({
+  ...item,number:23,reliable:true,
+  paperGeometry:{usablePaper:true,width:.82,height:.58},
+  evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:.25,maxConfidence:100},
+}));
+assert.deepEqual(await reconcileDuplicatePhotoNumbersByPdfStructure(
+  sameOrientationDuplicate,structuralPdfPages,new Set([23,28]),new Set(),{getPaperColor:async()=> 'red'},
+),[]);
+const wrongColorDuplicate=structuralDuplicatePhotos.map((item,index)=>({
+  ...item,number:23,reliable:true,
+  paperGeometry:index?{usablePaper:true,width:.731,height:.925}:{usablePaper:true,width:.82,height:.58},
+  evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:.25,maxConfidence:100},
+}));
+assert.deepEqual(await reconcileDuplicatePhotoNumbersByPdfStructure(
+  wrongColorDuplicate,structuralPdfPages,new Set([23,28]),new Set(),{getPaperColor:async()=> 'yellow'},
+),[]);
 // OCR 弱候选若指向已被另一张可靠照片占用的编号，应交给全局一一对应处理，
 // 不得阻断拍摄序列把当前照片归入唯一缺号。
 assert.equal(hasStrongOcrConflict({candidates:[{number:569,votes:2,prefixDistance:0}]},580,new Set([569])),false);
@@ -1140,6 +1201,16 @@ assert.ok(september1DistantLampScenes.every((item)=>isLikelyScene(item)));
 assert.equal(isLikelyScene({paperGeometry:{rectangularPaper:true,usablePaper:true},visualMetrics:{edgeDensity:.09,upperEdgeDensity:.05,uniformity:.53},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.03}}),false);
 assert.equal(isLikelyScene({paperGeometry:{rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.09,upperEdgeDensity:.05,uniformity:.53},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.01}}),false);
 assert.equal(isLikelyScene({paperGeometry:{rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.14,upperEdgeDensity:.10,uniformity:.40},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.03}}),false);
+// 2026-09-02 fourth scene, anonymized: the side-angle lamp image has slightly
+// more flame edges than the distant-glass pair but no usable sheet and an even
+// more uniform dark background. It must be reported as the third lamp scene,
+// not as an unreadable blessing photo. The three controls prevent a dim paper,
+// a flame-free night image, or a detailed low-light image from entering it.
+const september2ExtraLampScene={paperGeometry:{left:.25625,top:.170833,width:.53125,height:.475,right:.7875,bottom:.645833,score:.07625,fill:.302167,boxArea:.252344,rectangularPaper:false,usablePaper:false},visualMetrics:{edgeDensity:.077344,upperEdgeDensity:.073542,uniformity:.63832},sceneMetrics:{luminance:54.0144,warmBrightRatio:.03401,darkRatio:.681198}};
+assert.equal(isLikelyScene(september2ExtraLampScene),true);
+assert.equal(isLikelyScene({...september2ExtraLampScene,paperGeometry:{...september2ExtraLampScene.paperGeometry,usablePaper:true}}),false);
+assert.equal(isLikelyScene({...september2ExtraLampScene,sceneMetrics:{...september2ExtraLampScene.sceneMetrics,warmBrightRatio:.015}}),false);
+assert.equal(isLikelyScene({...september2ExtraLampScene,visualMetrics:{...september2ExtraLampScene.visualMetrics,edgeDensity:.12,uniformity:.50}}),false);
 
 // 同批清晰福单的纸色连通域会把木架也包进去，旧版据此误选“竖版”裁框，
 // 并在 y=47.5% 处截到神像底座。新构图的编号实际位于约 y=50%~53%。
