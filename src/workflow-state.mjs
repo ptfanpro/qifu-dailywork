@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { verifyPdf } from './pdf.mjs';
 
 function readJson(file, label) {
@@ -43,6 +44,68 @@ export function evaluatePhotoOrderClosure({ missingBlessingCount = 0, onlineNotU
     onlineNotUploadedCount: onlinePending,
     manualReviewCount: manualPending,
     stage: complete ? 'complete' : 'available-orders-complete-waiting-for-supplement',
+  };
+}
+
+function orderIdHash(rows) {
+  return crypto.createHash('sha256')
+    .update(rows.map((row) => String(row.id)).sort().join('\n'))
+    .digest('hex');
+}
+
+function verifyEmbeddedOrderManifest(manifest, businessDate, label) {
+  if (!manifest || typeof manifest !== 'object') throw new Error(`PDF 凭据缺少${label}订单清单。`);
+  if (manifest.businessDate !== businessDate) throw new Error(`${label}订单清单业务日期不一致。`);
+  const rows = Array.isArray(manifest.rows) ? manifest.rows : [];
+  const ids = rows.map((row) => String(row?.id || '').trim());
+  if (ids.some((id) => !id)) throw new Error(`${label}订单清单包含空订单 ID。`);
+  if (new Set(ids).size !== ids.length) throw new Error(`${label}订单清单包含重复订单 ID。`);
+  if (Number(manifest.orderCount) !== rows.length || manifest.orderIdHash !== orderIdHash(rows)) {
+    throw new Error(`${label}订单清单数量或哈希与 PDF 凭据不一致。`);
+  }
+  return rows;
+}
+
+export function resolvePdfBoundPhotoOrderScope({ businessDate, photoManifest, pdfReceipt } = {}) {
+  if (!businessDate || !photoManifest || !pdfReceipt) {
+    return { proven:false, reason:'missing-pdf-bound-order-evidence', rows:[], includeTablet:false };
+  }
+  if (photoManifest.businessDate !== businessDate || pdfReceipt.businessDate !== businessDate) {
+    throw new Error('照片清单与 PDF 导出凭据的业务日期不一致。');
+  }
+  const photoPdfs = Array.isArray(photoManifest.pdfs) ? photoManifest.pdfs : [];
+  const outputs = Array.isArray(pdfReceipt.outputs) ? pdfReceipt.outputs : [];
+  if (!photoPdfs.length || !outputs.length || photoPdfs.length !== outputs.length) {
+    return { proven:false, reason:'pdf-output-set-not-identical', rows:[], includeTablet:false };
+  }
+  const unmatchedOutputs = [...outputs];
+  for (const pdf of photoPdfs) {
+    const index = unmatchedOutputs.findIndex((output) => output?.sha256 === pdf?.sha256
+      && Number(output?.pageCount) === Number(pdf?.pageCount));
+    if (index < 0) return { proven:false, reason:'pdf-output-hash-not-bound', rows:[], includeTablet:false };
+    unmatchedOutputs.splice(index,1);
+  }
+  if (unmatchedOutputs.length) return { proven:false, reason:'pdf-output-set-not-identical', rows:[], includeTablet:false };
+
+  const lampRows = verifyEmbeddedOrderManifest(pdfReceipt.lamp,businessDate,'供灯');
+  const tabletRows = verifyEmbeddedOrderManifest(pdfReceipt.tablet,businessDate,'牌位');
+  const rows = [...lampRows,...tabletRows];
+  const ids = rows.map((row) => String(row.id));
+  if (!rows.length || new Set(ids).size !== ids.length) {
+    return { proven:false, reason:rows.length ? 'cross-module-order-id-conflict' : 'empty-pdf-order-scope', rows:[], includeTablet:false };
+  }
+  if (Number(pdfReceipt.orderCount) !== rows.length || pdfReceipt.orderIdHash !== orderIdHash(rows)) {
+    throw new Error('PDF 总订单清单数量或哈希与供灯/牌位分项不一致。');
+  }
+  return {
+    proven:true,
+    reason:'exact-pdf-output-hash-and-order-id-set',
+    rows,
+    includeTablet:tabletRows.length > 0,
+    lampOrderCount:lampRows.length,
+    tabletOrderCount:tabletRows.length,
+    orderCount:rows.length,
+    orderIdHash:pdfReceipt.orderIdHash,
   };
 }
 

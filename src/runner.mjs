@@ -1,12 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PrayerSite, resolveBlessingFileUploadStates } from './site.mjs';
+import { PrayerSite, resolveBlessingOrderSetUploadState } from './site.mjs';
 import { Timing } from './timing.mjs';
 import { calculateQuantities, normalizeText, venueMessage } from './quantity.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolder as photoDayFolder, scanPhotoWorkday, splitUploadBatches } from './photos.mjs';
 import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs';
-import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from './workflow-state.mjs';
+import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
 import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
@@ -55,6 +55,24 @@ async function copyFileWithRetry(source,destination) {
   throw lastError;
 }
 function rowIdSet(rows) { return new Set(rows.map((row)=>String(row.id))); }
+async function queryPdfBoundPhotoUploadState(site, date, scope) {
+  if (!scope?.proven) throw new Error('缺少与当前 PDF 哈希绑定的订单 ID 清单，不能自动判定上传结果。');
+  const uploaded = await site.queryUploadedOrders(date,{productMode:'all',allStates:true});
+  const pending = await site.queryNotUploadedOrders(date,{productMode:'all',allStates:true});
+  if (scope.includeTablet) {
+    uploaded.push(...await site.queryUploadedTabletPhotoOrders(date));
+    pending.push(...await site.queryNotUploadedTabletPhotoOrders(date));
+  }
+  return resolveBlessingOrderSetUploadState(scope.rows,uploaded,pending);
+}
+function samePhotoOrderUploadSnapshot(left, right) {
+  return Boolean(left && right
+    && left.state !== 'ambiguous'
+    && right.state !== 'ambiguous'
+    && left.expectedOrderIdHash === right.expectedOrderIdHash
+    && left.uploadedOrderIdHash === right.uploadedOrderIdHash
+    && left.pendingOrderIdHash === right.pendingOrderIdHash);
+}
 async function verifyOutputs(outputs = []) {
   const verifiedOutputs=[];
   for (const output of outputs) {
@@ -581,66 +599,81 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
       photoTiming.start('upload');
       photoSite = new PrayerSite(photoRunDir,photoTiming,log,siteOptions);
       await photoSite.open();
+      const pdfReceipt = readJson(path.join(workdaysRoot,photoDate,'pdf-receipt.json'),null);
+      const uploadOrderScope = resolvePdfBoundPhotoOrderScope({businessDate:photoDate,photoManifest:manifest,pdfReceipt});
+      let latestOrderState = null;
+      const orderStateEvidence = (state) => ({
+        state:state.state,
+        expectedCount:state.expectedCount,
+        uploadedCount:state.uploadedCount,
+        pendingCount:state.pendingCount,
+        conflictCount:state.conflictCount,
+        expectedOrderIdHash:state.expectedOrderIdHash,
+        uploadedOrderIdHash:state.uploadedOrderIdHash,
+        pendingOrderIdHash:state.pendingOrderIdHash,
+      });
+      const markAllAvailableFilesUploaded = (evidence, at = new Date().toISOString()) => {
+        for (const file of manifest.files.blessing) {
+          const name = path.basename(file);
+          receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:at,evidence};
+        }
+        receipt.uploadedCount = manifest.counts.blessing;
+      };
       if (needsOnlineRetryCheck) {
-        const alreadyUploaded = await photoSite.queryUploadedOrders(photoDate,{productMode:'all'});
-        const notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all'});
         const historicalManifestFile = path.join(workdaysRoot,photoDate,'order-manifest.json');
         const historicalManifest = fs.existsSync(historicalManifestFile) ? JSON.parse(fs.readFileSync(historicalManifestFile,'utf8')) : null;
-        // An upload can reach the platform while its short-lived numeric receipt
-        // is lost. Reconcile every local numeric filename against the same-date
-        // online blessing code and upload status before deciding to retransmit.
-        // This works for both complete and partial batches and never relies on a
-        // page total or on ordering.
-        if (alreadyUploaded.length || notUploaded.length) {
-          const onlineStates = resolveBlessingFileUploadStates(manifest.files.blessing,alreadyUploaded,notUploaded);
-          if (onlineStates.conflicts.length) {
-            throw new Error(`线上逐编号对账不唯一：${onlineStates.conflicts.join('、')}。为防止漏传或重复上传，已停止。`);
+        if (uploadOrderScope.proven) {
+          latestOrderState = await queryPdfBoundPhotoUploadState(photoSite,photoDate,uploadOrderScope);
+          receipt.orderScopeEvidence = uploadOrderScope.reason;
+          receipt.orderScopeCount = uploadOrderScope.orderCount;
+          receipt.orderScopeHash = uploadOrderScope.orderIdHash;
+          receipt.lastOnlineOrderState = orderStateEvidence(latestOrderState);
+          if (latestOrderState.state === 'ambiguous') {
+            receipt.stage = 'online-order-set-ambiguous';
+            atomic(receiptFile,receipt);
+            throw new Error(`线上订单集合核对不完整：PDF 凭据内 ${latestOrderState.expectedCount} 条订单有 ${latestOrderState.conflictCount} 条无法在“已上传/未上传”中唯一归类。未上传任何文件。`);
           }
           const reconciledAt = new Date().toISOString();
-          for (const file of onlineStates.uploadedFiles) {
-            const name = path.basename(file);
-            receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:reconciledAt,evidence:'online-code-reconciled'};
-          }
-          receipt.uploadedCount = Object.keys(receipt.uploadedFiles).length;
-          receipt.onlineMatchedOrderCount = alreadyUploaded.length;
-          receipt.onlinePendingOrderCount = notUploaded.length;
-          receipt.stage = onlineStates.uploadedFiles.length ? 'online-code-reconciled' : 'online-confirmed-not-uploaded';
-          pendingFiles = manifest.files.blessing.filter((file) => receipt.uploadedFiles[path.basename(file)]?.sha256 !== manifest.fileHashes?.[path.basename(file)]);
-          batches = splitUploadBatches(pendingFiles);
-          atomic(receiptFile,receipt);
-          if (onlineStates.uploadedFiles.length) {
-            log(`线上逐编号对账完成：本地 ${onlineStates.uploadedFiles.length} 张已确认上传，${onlineStates.pendingFiles.length} 张明确未上传；后续只处理未上传文件。`);
-          }
-          if (!pendingFiles.length) {
+          if (latestOrderState.state === 'all-uploaded') {
+            markAllAvailableFilesUploaded('pdf-bound-order-set-all-uploaded',reconciledAt);
             receipt.complete = true;
             receipt.batchCompleteReady = manifest.batchCompleteReady === true;
-            receipt.onlineClosureCheckReady = notUploaded.length === 0;
-            receipt.stage = manifest.batchCompleteReady ? 'online-code-reconciled-complete' : 'available-files-complete-waiting-for-supplement';
+            receipt.onlineClosureCheckReady = true;
+            receipt.stage = manifest.batchCompleteReady ? 'online-order-set-reconciled-complete' : 'available-files-complete-waiting-for-supplement';
             receipt.completedAt = reconciledAt;
             receipt.batches.push({
               uploadedCount:manifest.counts.blessing,
               month:photoDate.slice(0,7).replace('-',''),
               files:manifest.files.blessing.map((file)=>path.basename(file)),
-              evidence:'online-code-and-upload-status-reconciled',
-              matchedOrderCount:onlineStates.uploadedFiles.length,
+              evidence:'pdf-bound-order-set-all-uploaded',
+              matchedOrderCount:latestOrderState.uploadedCount,
             });
             atomic(receiptFile,receipt);
             photoTiming.end();
-            log(`线上逐编号复核通过：当前 ${manifest.counts.blessing} 张福单图均已上传，本次不会重复提交。`);
+            log(`线上订单集合复核通过：与当前 PDF 哈希绑定的 ${latestOrderState.expectedCount} 条订单均为“福单已上传”；本地 ${manifest.counts.blessing} 张照片不会重复提交。`);
             await photoSite.close();
             photoTiming.finish();
             process.exit(0);
           }
-        }
-        if (alreadyUploaded.length > 0 && notUploaded.length > 0) {
-          receipt.stage = 'online-partial-verified';
-          receipt.onlineMatchedOrderCount = alreadyUploaded.length;
-          receipt.onlinePendingOrderCount = notUploaded.length;
-          receipt.pendingFiles = pendingFiles.map((file)=>path.basename(file));
+          if (latestOrderState.state === 'partial') {
+            receipt.stage = 'online-order-set-partial-stop';
+            atomic(receiptFile,receipt);
+            throw new Error(`线上订单集合显示部分上传：当前 PDF 对应 ${latestOrderState.expectedCount} 条订单中，${latestOrderState.uploadedCount} 条已上传、${latestOrderState.pendingCount} 条未上传。订单与纸张照片不是一对一关系，程序不会猜测或重复上传。`);
+          }
+          if (Object.keys(uploadedFiles).length) {
+            receipt.stage = 'local-receipt-online-state-conflict';
+            atomic(receiptFile,receipt);
+            throw new Error('本地已有成功上传回执，但与当前 PDF 绑定的线上订单全部显示未上传；证据冲突，已停止。');
+          }
+          receipt.stage = 'online-order-set-confirmed-none-uploaded';
           atomic(receiptFile,receipt);
-          log(`线上部分上传状态已逐编号核对：本地已有 ${receipt.uploadedCount} 张上传凭据，只补传 ${pendingFiles.length} 张明确为“未上传”的福单图：${receipt.pendingFiles.join('、')}。`);
-        }
-        if (alreadyUploaded.length === 0 && notUploaded.length === 0) {
+          log(`线上订单集合复核通过：与当前 PDF 哈希绑定的 ${latestOrderState.expectedCount} 条订单全部仍为“福单未上传”，确认上次提交未生效；允许安全重试当前照片集合。`);
+        } else {
+          const alreadyUploaded = await photoSite.queryUploadedOrders(photoDate,{productMode:'all',allStates:true});
+          const notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all',allStates:true});
+          if (alreadyUploaded.length !== 0 || notUploaded.length !== 0) {
+            throw new Error(`当前 PDF 缺少可验证的订单 ID 绑定凭据，线上同时存在 ${alreadyUploaded.length} 条已上传、${notUploaded.length} 条未上传记录；禁止根据照片编号末段重传。`);
+          }
           const pendingRegular = await photoSite.queryLamp(photoDate);
           const pendingTablet = await photoSite.queryDailyTablet(photoDate);
           const closureEvidence = resolveHistoricalPhotoClosureEvidence({ historicalManifest, manifest });
@@ -698,83 +731,121 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
           const evidenceReason = closureEvidence.proven ? '' : '，但缺少历史订单清单或完整的旧版 PDF/照片对应凭据';
           throw new Error(`该日期线上“福单已上传”和“福单未上传”均为 0，供灯待祈福 ${pendingRegular.length} 条、牌位待祈福 ${pendingTablet.length} 条${evidenceReason}，无法安全判定闭环，已停止。`);
         }
-        log(`线上复核为0条“福单已上传”、${notUploaded.length} 条“福单未上传”订单，确认上次没有产生有效上传；允许安全重试。`);
       }
+      let allFilesReconciled = false;
       for (let index=0; index<batches.length; index++) {
         log(`正在上传第 ${index+1}/${batches.length} 批，共 ${batches[index].length} 张。`);
         receipt.currentBatch = index + 1;
         receipt.currentBatchFiles = batches[index].map((file)=>path.basename(file));
         receipt.currentBatchStartedAt = new Date().toISOString();
         receipt.stage = 'starting';
-        atomic(receiptFile,receipt);
-        let result;
-        try {
-          result = await photoSite.uploadBlessingBatch(batches[index],photoDate,(stage) => {
-            receipt.stage = stage;
+        let beforeOrderState = null;
+        if (uploadOrderScope.proven) {
+          beforeOrderState = latestOrderState || await queryPdfBoundPhotoUploadState(photoSite,photoDate,uploadOrderScope);
+          latestOrderState = null;
+          receipt.currentBatchOrderSnapshot = orderStateEvidence(beforeOrderState);
+          if (beforeOrderState.state === 'ambiguous') {
+            receipt.stage = 'pre-upload-order-set-ambiguous';
             atomic(receiptFile,receipt);
-          });
-        } catch (uploadError) {
-          // 数字回执丢失不等于上传失败。按同一业务日期和福单编号逐张
-          // 对账，已上传的补记哈希回执，明确未上传的最多安全重试一次。
-          let alreadyUploaded = [];
-          let notUploaded = [];
+            throw new Error(`上传前线上订单集合不完整：${beforeOrderState.conflictCount} 条订单无法唯一归类，未选择或上传文件。`);
+          }
+          if (beforeOrderState.state === 'all-uploaded') {
+            markAllAvailableFilesUploaded('pre-upload-pdf-bound-order-set-all-uploaded');
+            allFilesReconciled = true;
+          }
+        }
+        atomic(receiptFile,receipt);
+        let result = allFilesReconciled ? {
+          uploadedCount:batches[index].length,
+          month:photoDate.slice(0,7).replace('-',''),
+          files:batches[index].map((file)=>path.basename(file)),
+          evidence:'pre-upload-pdf-bound-order-set-all-uploaded',
+        } : null;
+        if (!allFilesReconciled) {
           try {
-            alreadyUploaded = await photoSite.queryUploadedOrders(photoDate,{productMode:'all'});
-            notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all'});
-          } catch {
-            throw uploadError;
-          }
-          const reconciledAt = new Date().toISOString();
-          let onlineStates = resolveBlessingFileUploadStates(batches[index],alreadyUploaded,notUploaded);
-          if (onlineStates.conflicts.length) {
-            throw new Error(`上传结果无法逐编号对账：${onlineStates.conflicts.join('、')}。为防止漏传或重复上传，已停止。`);
-          }
-          for (const file of onlineStates.uploadedFiles) {
-            const name = path.basename(file);
-            receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:reconciledAt,evidence:'post-timeout-online-code-reconciled'};
-          }
-          receipt.uploadedCount = Object.keys(receipt.uploadedFiles).length;
-          receipt.onlineClosureCheckReady = notUploaded.length === 0;
-          receipt.stage = 'post-timeout-online-code-reconciled';
-          receipt.reconciledAt = reconciledAt;
-          receipt.onlineMatchedOrderCount = alreadyUploaded.length;
-          atomic(receiptFile,receipt);
-          if (onlineStates.pendingFiles.length) {
+            result = await photoSite.uploadBlessingBatch(batches[index],photoDate,(stage) => {
+              receipt.stage = stage;
+              atomic(receiptFile,receipt);
+            });
+          } catch (uploadError) {
             if (uploadError?.code !== 'BLESSING_UPLOAD_OUTCOME_UNCONFIRMED') throw uploadError;
-            log(`上传数字回执缺失；线上逐编号确认 ${onlineStates.uploadedFiles.length} 张已上传、${onlineStates.pendingFiles.length} 张未上传。仅对未上传文件安全重试一次。`);
-            const retryFiles = onlineStates.pendingFiles;
-            try {
-              const retryResult = await photoSite.uploadBlessingBatch(retryFiles,photoDate,(stage) => {
-                receipt.stage = `retry-${stage}`;
-                atomic(receiptFile,receipt);
-              });
-              if (Number(retryResult.uploadedCount) !== retryFiles.length) {
-                throw new Error(`重试批次上传回执 ${retryResult.uploadedCount} 与提交文件 ${retryFiles.length} 不一致。`);
-              }
-            } catch (retryError) {
-              // 第二次仍丢回执时只再做一次线上事实核对，绝不第三次提交。
-              try {
-                alreadyUploaded = await photoSite.queryUploadedOrders(photoDate,{productMode:'all'});
-                notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all'});
-              } catch {
-                throw retryError;
-              }
-              onlineStates = resolveBlessingFileUploadStates(retryFiles,alreadyUploaded,notUploaded);
-              if (onlineStates.conflicts.length || onlineStates.pendingFiles.length) throw retryError;
+            if (!uploadOrderScope.proven || !beforeOrderState) {
+              throw new Error(`${uploadError.message} 当前 PDF 没有可验证的“PDF文件哈希＋订单ID集合”绑定凭据，禁止自动重试。`);
             }
-            const retryCompletedAt = new Date().toISOString();
-            for (const file of retryFiles) {
-              const name = path.basename(file);
-              receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:retryCompletedAt,evidence:'safe-retry-verified'};
+            let afterOrderState;
+            try {
+              afterOrderState = await queryPdfBoundPhotoUploadState(photoSite,photoDate,uploadOrderScope);
+            } catch {
+              throw uploadError;
+            }
+            receipt.lastOnlineOrderState = orderStateEvidence(afterOrderState);
+            receipt.reconciledAt = new Date().toISOString();
+            if (afterOrderState.state === 'ambiguous') {
+              receipt.stage = 'post-upload-order-set-ambiguous';
+              atomic(receiptFile,receipt);
+              throw new Error(`上传回执缺失，且线上有 ${afterOrderState.conflictCount} 条 PDF 订单无法唯一归类；已停止，不会再次提交。`);
+            }
+            if (afterOrderState.state === 'all-uploaded') {
+              markAllAvailableFilesUploaded('post-upload-pdf-bound-order-set-all-uploaded',receipt.reconciledAt);
+              receipt.onlineClosureCheckReady = true;
+              receipt.stage = 'post-upload-order-set-reconciled';
+              allFilesReconciled = true;
+              result = {
+                uploadedCount:batches[index].length,
+                month:photoDate.slice(0,7).replace('-',''),
+                files:batches[index].map((file)=>path.basename(file)),
+                evidence:'post-upload-pdf-bound-order-set-all-uploaded',
+              };
+              log(`上传数字回执缺失，但当前 PDF 对应 ${afterOrderState.expectedCount} 条订单已全部变为“福单已上传”；确认本次提交成功，不会重传。`);
+            } else if (!samePhotoOrderUploadSnapshot(beforeOrderState,afterOrderState)) {
+              receipt.stage = 'post-upload-order-set-changed-partial-stop';
+              atomic(receiptFile,receipt);
+              throw new Error(`上传回执缺失后线上订单集合发生部分变化：${afterOrderState.uploadedCount} 条已上传、${afterOrderState.pendingCount} 条未上传。订单与纸张照片不是一对一关系，无法判断具体哪张成功；已停止且不会重传。`);
+            } else {
+              receipt.stage = 'first-submit-no-online-change';
+              atomic(receiptFile,receipt);
+              log(`上传数字回执缺失，且线上精确订单集合没有发生变化；确认第一次提交未生效，仅安全重试同一批 ${batches[index].length} 张一次。`);
+              photoTiming.count('retry_count');
+              try {
+                result = await photoSite.uploadBlessingBatch(batches[index],photoDate,(stage) => {
+                  receipt.stage = `retry-${stage}`;
+                  atomic(receiptFile,receipt);
+                });
+                result = {...result,evidence:'single-safe-retry-with-unchanged-order-set'};
+              } catch (retryError) {
+                if (retryError?.code !== 'BLESSING_UPLOAD_OUTCOME_UNCONFIRMED') throw retryError;
+                let afterRetryState;
+                try {
+                  afterRetryState = await queryPdfBoundPhotoUploadState(photoSite,photoDate,uploadOrderScope);
+                } catch {
+                  throw retryError;
+                }
+                receipt.lastOnlineOrderState = orderStateEvidence(afterRetryState);
+                receipt.reconciledAt = new Date().toISOString();
+                if (afterRetryState.state === 'all-uploaded') {
+                  markAllAvailableFilesUploaded('post-retry-pdf-bound-order-set-all-uploaded',receipt.reconciledAt);
+                  receipt.onlineClosureCheckReady = true;
+                  receipt.stage = 'post-retry-order-set-reconciled';
+                  allFilesReconciled = true;
+                  result = {
+                    uploadedCount:batches[index].length,
+                    month:photoDate.slice(0,7).replace('-',''),
+                    files:batches[index].map((file)=>path.basename(file)),
+                    evidence:'post-retry-pdf-bound-order-set-all-uploaded',
+                  };
+                  log(`第二次数字回执仍缺失，但线上 ${afterRetryState.expectedCount} 条 PDF 订单已全部上传；已确认成功，绝不进行第三次提交。`);
+                } else {
+                  receipt.stage = samePhotoOrderUploadSnapshot(afterOrderState,afterRetryState)
+                    ? 'retry-no-online-change-stop'
+                    : 'retry-partial-online-change-stop';
+                  atomic(receiptFile,receipt);
+                  throw new Error(samePhotoOrderUploadSnapshot(afterOrderState,afterRetryState)
+                    ? '安全重试后线上精确订单集合仍无变化，确认上传未生效；已停止，绝不进行第三次提交。'
+                    : `安全重试后线上只发生部分变化：${afterRetryState.uploadedCount} 条已上传、${afterRetryState.pendingCount} 条未上传；已停止，绝不进行第三次提交。`);
+                }
+              }
             }
           }
-          result = {
-            uploadedCount:batches[index].length,
-            month:photoDate.slice(0,7).replace('-',''),
-            files:batches[index].map((file)=>path.basename(file)),
-            evidence:'online-code-reconciled-with-at-most-one-safe-retry',
-          };
-          log(`上传回执异常已由线上逐编号对账闭环：本批 ${batches[index].length} 张均确认上传，不会整批重传。`);
         }
         receipt.batches.push(result);
         if (Number(result.uploadedCount) !== batches[index].length) throw new Error(`本批上传回执 ${result.uploadedCount} 与提交文件 ${batches[index].length} 不一致。`);
@@ -789,6 +860,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
         receipt.currentBatchFiles = [];
         receipt.currentBatchCompletedAt = new Date().toISOString();
         atomic(receiptFile,receipt);
+        if (allFilesReconciled) break;
       }
       if (receipt.uploadedCount !== manifest.counts.blessing) throw new Error(`上传总数 ${receipt.uploadedCount} 与福单图 ${manifest.counts.blessing} 不一致。`);
       receipt.complete = true;

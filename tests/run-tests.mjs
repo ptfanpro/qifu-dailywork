@@ -9,8 +9,8 @@ import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
 import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasAdjacentLocalOcrConsensus, hasDirectVisibleCodeEvidence, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localOcrCodeLayoutsForPhoto, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, OVERLAPPING_RIGHT_CODE_BANDS, parseLocalOcrCodeCandidates, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, reconcileDuplicatePhotoNumbersByPdfStructure, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
-import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
-import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, chooseReusablePage, isBlessingUploadTransport, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isSceneUploadFrameUrl, isTransientAutomationPage, resolveBlessingFileUploadStates, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick, waitForSceneUploadFrame, watchBlessingUploadTransport } from '../src/site.mjs';
+import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
+import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, chooseReusablePage, isBlessingUploadTransport, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isSceneUploadFrameUrl, isTransientAutomationPage, resolveBlessingOrderSetUploadState, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick, waitForSceneUploadFrame, watchBlessingUploadTransport } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
 import { AutomationApiClient, canonicalTokenRequest, createTokenRequest, normalizeAutomationBaseUrl } from '../src/automation-auth.mjs';
 import { decodePaddleCtc, recognizeLocalTextLine, verifyLocalOcrAssets } from '../src/local-ocr.mjs';
@@ -737,8 +737,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.6\.6/);
-assert.match(uiSource,/上传逐编号对账闭环版/);
+assert.match(uiSource,/V9\.6\.7/);
+assert.match(uiSource,/PDF订单集合对账修正版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -897,17 +897,62 @@ assert.equal(isBlessingUploadTransport('POST','http://admin.stqifu.com/blessing/
 assert.equal(isBlessingUploadTransport('post','http://admin.stqifu.com/blessing/mind/uploadPic?month=202609'),true);
 assert.equal(isBlessingUploadTransport('GET','http://admin.stqifu.com/blessing/mind/uploadPic/name'),false);
 assert.equal(isBlessingUploadTransport('POST','http://admin.stqifu.com/blessing/mind/toUpload/name'),false);
-const uploadStateFiles=['C:\\staged\\701.jpg','C:\\staged\\702.jpg'];
-assert.deepEqual(resolveBlessingFileUploadStates(
-  uploadStateFiles,
-  [{blessingCode:'268-1-701'}],
-  [{blessingCode:'268-1-702'}],
-),{uploadedFiles:[uploadStateFiles[0]],pendingFiles:[uploadStateFiles[1]],conflicts:[]});
-assert.deepEqual(resolveBlessingFileUploadStates(
-  [uploadStateFiles[0]],
-  [{blessingCode:'268-1-701'},{blessingCode:'269-1-701'}],
+const pdfOrderRows=[{id:'order-a'},{id:'order-b'},{id:'order-c'}];
+assert.equal(resolveBlessingOrderSetUploadState(
+  pdfOrderRows,
+  [{id:'order-a'},{id:'order-b'},{id:'unrelated-new-order'}],
+  [{id:'order-c'}],
+).state,'partial');
+assert.deepEqual(resolveBlessingOrderSetUploadState(
+  pdfOrderRows,
+  [{id:'order-a'},{id:'order-b'},{id:'order-c'}],
+  [{id:'unrelated-new-order'}],
+),{
+  state:'all-uploaded',expectedCount:3,uploadedCount:3,pendingCount:0,conflictCount:0,
+  expectedOrderIdHash:PrayerSite.manifest(pdfOrderRows,'2026-09-03').orderIdHash,
+  uploadedOrderIdHash:PrayerSite.manifest(pdfOrderRows,'2026-09-03').orderIdHash,
+  pendingOrderIdHash:PrayerSite.manifest([],'2026-09-03').orderIdHash,
+  conflictOrderIds:[],
+});
+assert.equal(resolveBlessingOrderSetUploadState(
+  pdfOrderRows,
   [],
-).conflicts,['701.jpg']);
+  pdfOrderRows,
+).state,'none-uploaded');
+assert.equal(resolveBlessingOrderSetUploadState(
+  pdfOrderRows,
+  [{id:'order-a'}],
+  [{id:'order-a'},{id:'order-b'}],
+).state,'ambiguous');
+// Printed page tails are not online order IDs. A coincidental suffix must never
+// be accepted as proof that a particular photo uploaded.
+assert.equal(resolveBlessingOrderSetUploadState(
+  [{id:'long-online-order-29'},{id:'another-online-order-29'}],
+  [{id:'long-online-order-29'}],
+  [{id:'another-online-order-29'}],
+).state,'partial');
+const boundLampManifest=PrayerSite.manifest([{id:'lamp-1'},{id:'lamp-2'}],'2026-09-03');
+const boundTabletManifest=PrayerSite.manifest([{id:'tablet-1'}],'2026-09-03');
+const boundCombinedManifest=PrayerSite.manifest([...boundLampManifest.rows,...boundTabletManifest.rows],'2026-09-03');
+const boundScope=resolvePdfBoundPhotoOrderScope({
+  businessDate:'2026-09-03',
+  photoManifest:{businessDate:'2026-09-03',pdfs:[{sha256:'pdf-a',pageCount:4},{sha256:'pdf-b',pageCount:7}]},
+  pdfReceipt:{
+    businessDate:'2026-09-03',
+    ...boundCombinedManifest,
+    lamp:boundLampManifest,
+    tablet:boundTabletManifest,
+    outputs:[{sha256:'pdf-b',pageCount:7},{sha256:'pdf-a',pageCount:4}],
+  },
+});
+assert.equal(boundScope.proven,true);
+assert.equal(boundScope.orderCount,3);
+assert.equal(boundScope.includeTablet,true);
+assert.equal(resolvePdfBoundPhotoOrderScope({
+  businessDate:'2026-09-03',
+  photoManifest:{businessDate:'2026-09-03',pdfs:[{sha256:'changed-pdf',pageCount:4}]},
+  pdfReceipt:{businessDate:'2026-09-03',outputs:[{sha256:'pdf-a',pageCount:4}]},
+}).proven,false);
 const transportPage=new EventEmitter();
 const transportWatcher=watchBlessingUploadTransport(transportPage,12);
 const uploadRequest={method:()=> 'POST',url:()=> 'http://admin.stqifu.com/blessing/mind/uploadPic/name'};
@@ -935,9 +980,12 @@ assert.equal(transportPage.listenerCount('response'),0);
 assert.match(siteSource,/watchBlessingUploadTransport/);
 assert.doesNotMatch(siteSource,/const uploadResponsePromise = this\.page\.waitForResponse/);
 assert.match(siteSource,/BLESSING_UPLOAD_OUTCOME_UNCONFIRMED/);
-assert.match(runnerSource,/resolveBlessingFileUploadStates/);
-assert.match(runnerSource,/仅对未上传文件安全重试一次/);
-assert.match(runnerSource,/绝不第三次提交/);
+assert.match(runnerSource,/resolveBlessingOrderSetUploadState/);
+assert.match(runnerSource,/resolvePdfBoundPhotoOrderScope/);
+assert.match(runnerSource,/PDF文件哈希＋订单ID集合/);
+assert.match(runnerSource,/精确订单集合没有发生变化/);
+assert.match(runnerSource,/绝不进行第三次提交/);
+assert.doesNotMatch(siteSource,/normalizedBlessingTail|resolveBlessingFileUploadStates/);
 assert.match(siteSource,/allInnerTexts/);
 assert.doesNotMatch(siteSource,/layui-layer-msg:visible[^\n]*\.allTextContents/);
 assert.match(siteSource,/const selects = dialog\.locator\('select'\)/);
@@ -1383,17 +1431,19 @@ assert.deepEqual(resolveAmbiguousPhotosByGlobalSet(exactSingleVotePhoto,new Set(
 const weakSingleVotePhoto=[{file:'weak-580.jpg',reliable:false,number:null,paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},candidates:[{number:580,votes:1,prefixDistance:0,maxConfidence:9}]}];
 assert.deepEqual(resolveAmbiguousPhotosByGlobalSet(weakSingleVotePhoto,new Set([580]),new Set()),[]);
 assert.match(runnerSource,/schemaVersion:2[\s\S]*stage:'not-started'/);
-assert.match(runnerSource,/needsOnlineRetryCheck[\s\S]*queryUploadedOrders/);
+assert.match(runnerSource,/needsOnlineRetryCheck[\s\S]*queryPdfBoundPhotoUploadState/);
 assert.match(runnerSource,/本地已有 \$\{Object\.keys\(uploadedFiles\)\.length\} 张回执/);
-assert.match(runnerSource,/post-timeout-online-code-reconciled/);
+assert.match(runnerSource,/post-upload-order-set-reconciled/);
 assert.match(runnerSource,/queryNotUploadedOrders/);
-assert.match(runnerSource,/online-code-and-upload-status-reconciled/);
-assert.match(runnerSource,/线上逐编号复核通过/);
-assert.match(runnerSource,/online-partial-verified/);
-assert.match(runnerSource,/线上部分上传状态已逐编号核对/);
+assert.match(runnerSource,/pdf-bound-order-set-all-uploaded/);
+assert.match(runnerSource,/线上订单集合复核通过/);
+assert.match(runnerSource,/online-order-set-partial-stop/);
+assert.match(runnerSource,/订单与纸张照片不是一对一关系/);
 assert.match(runnerSource,/pendingFiles = manifest\.files\.blessing\.filter/);
 assert.doesNotMatch(runnerSource,/程序不会自动重传，请先人工核对/);
 assert.match(siteSource,/queryOrdersByBlessingUploadStatus/);
+assert.match(siteSource,/allStates/);
+assert.match(siteSource,/queryUploadedTabletPhotoOrders/);
 assert.match(runnerSource,/上次福单图上传中断/);
 assert.match(siteSource,/toUploadMore/);
 assert.match(siteSource,/\.filelist li/);

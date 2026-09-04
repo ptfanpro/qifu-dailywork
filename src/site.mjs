@@ -190,40 +190,44 @@ export function isBlessingUploadTransport(method, url) {
   return String(method || '').toUpperCase() === 'POST'
     && /\/blessing\/mind\/uploadPic(?:\/name)?\/?$/i.test(pathname);
 }
-function normalizedBlessingTail(value) {
-  const groups = String(value || '').match(/\d+/g);
-  if (!groups?.length) return null;
-  return String(Number(groups.at(-1)));
+function stableOrderIdHash(ids) {
+  return crypto.createHash('sha256').update([...ids].map(String).sort().join('\n')).digest('hex');
 }
-export function resolveBlessingFileUploadStates(files, uploadedRows, notUploadedRows) {
-  const uploadedByTail = new Map();
-  const pendingByTail = new Map();
-  const addRow = (target, row) => {
-    const tail = normalizedBlessingTail(row?.blessingCode);
-    if (!tail) return;
-    target.set(tail, (target.get(tail) || 0) + 1);
-  };
-  for (const row of uploadedRows || []) addRow(uploadedByTail, row);
-  for (const row of notUploadedRows || []) addRow(pendingByTail, row);
-  const uploadedFiles = [];
-  const pendingFiles = [];
-  const conflicts = [];
-  const seenFileTails = new Set();
-  for (const file of files || []) {
-    const stem = path.basename(file, path.extname(file));
-    const tail = /^\d+$/.test(stem) ? String(Number(stem)) : null;
-    if (!tail || seenFileTails.has(tail)) {
-      conflicts.push(path.basename(file));
-      continue;
-    }
-    seenFileTails.add(tail);
-    const uploadedCount = uploadedByTail.get(tail) || 0;
-    const pendingCount = pendingByTail.get(tail) || 0;
-    if (uploadedCount === 1 && pendingCount === 0) uploadedFiles.push(file);
-    else if (uploadedCount === 0 && pendingCount === 1) pendingFiles.push(file);
-    else conflicts.push(path.basename(file));
+export function resolveBlessingOrderSetUploadState(expectedRows, uploadedRows, notUploadedRows) {
+  const expectedIds = (expectedRows || []).map((row) => String(row?.id || '').trim());
+  const duplicateExpected = expectedIds.filter((id, index) => !id || expectedIds.indexOf(id) !== index);
+  const expected = new Set(expectedIds.filter(Boolean));
+  const uploaded = new Set((uploadedRows || []).map((row) => String(row?.id || '').trim()).filter(Boolean));
+  const pending = new Set((notUploadedRows || []).map((row) => String(row?.id || '').trim()).filter(Boolean));
+  const uploadedOrderIds = [];
+  const pendingOrderIds = [];
+  const conflictOrderIds = [...new Set(duplicateExpected)];
+  for (const id of expected) {
+    const isUploaded = uploaded.has(id);
+    const isPending = pending.has(id);
+    if (isUploaded === isPending) conflictOrderIds.push(id);
+    else if (isUploaded) uploadedOrderIds.push(id);
+    else pendingOrderIds.push(id);
   }
-  return { uploadedFiles, pendingFiles, conflicts };
+  const expectedOrderIds = [...expected];
+  const state = !expectedOrderIds.length || conflictOrderIds.length
+    ? 'ambiguous'
+    : uploadedOrderIds.length === expectedOrderIds.length
+      ? 'all-uploaded'
+      : pendingOrderIds.length === expectedOrderIds.length
+        ? 'none-uploaded'
+        : 'partial';
+  return {
+    state,
+    expectedCount:expectedOrderIds.length,
+    uploadedCount:uploadedOrderIds.length,
+    pendingCount:pendingOrderIds.length,
+    conflictCount:conflictOrderIds.length,
+    expectedOrderIdHash:stableOrderIdHash(expectedOrderIds),
+    uploadedOrderIdHash:stableOrderIdHash(uploadedOrderIds),
+    pendingOrderIdHash:stableOrderIdHash(pendingOrderIds),
+    conflictOrderIds,
+  };
 }
 export function watchBlessingUploadTransport(page, expectedCount) {
   const state = { requestCount:0, responseCount:0, receipts:[], tasks:[] };
@@ -1220,7 +1224,7 @@ export class PrayerSite {
     await select.selectOption(value ?? { index });
     return true;
   }
-  async queryOrdersByBlessingUploadStatus(date, uploadStatus, { productMode = 'all', sceneStatus = null, url = LIST_URL, state = null } = {}) {
+  async queryOrdersByBlessingUploadStatus(date, uploadStatus, { productMode = 'all', sceneStatus = null, url = LIST_URL, state = null, allStates = false } = {}) {
     await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     this.timing.count('browser_action_count');
     await this.waitForLogin(url);
@@ -1236,7 +1240,8 @@ export class PrayerSite {
     }
     await this.page.locator('#startTime').evaluate((element, value) => { element.removeAttribute('readonly'); element.value=value; element.dispatchEvent(new Event('input',{bubbles:true})); element.dispatchEvent(new Event('change',{bubbles:true})); }, date);
     await this.page.locator('#endTime').evaluate((element, value) => { element.removeAttribute('readonly'); element.value=value; element.dispatchEvent(new Event('input',{bubbles:true})); element.dispatchEvent(new Event('change',{bubbles:true})); }, endDate);
-    if (state) await this.selectOptionByVisibleText('#state', state);
+    if (allStates && await this.page.locator('#state').count()) await this.page.locator('#state').selectOption('');
+    else if (state) await this.selectOptionByVisibleText('#state', state);
     await this.selectOptionByVisibleText('#upload', uploadStatus);
     if (sceneStatus) await this.selectOptionByVisibleText('#upload1', sceneStatus);
     if (productMode === 'water') await this.selectOptionByVisibleText('#supportName', '供水养净');
@@ -1251,6 +1256,12 @@ export class PrayerSite {
   }
   async queryNotUploadedOrders(date, options = {}) {
     return this.queryOrdersByBlessingUploadStatus(date, '未上传', options);
+  }
+  async queryUploadedTabletPhotoOrders(date) {
+    return this.queryOrdersByBlessingUploadStatus(date, '已上传', { url:TABLET_LIST_URL, allStates:true });
+  }
+  async queryNotUploadedTabletPhotoOrders(date) {
+    return this.queryOrdersByBlessingUploadStatus(date, '未上传', { url:TABLET_LIST_URL, allStates:true });
   }
   async queryUploadedTabletOrders(date) {
     // 牌位没有场景图。回传图片由统一福单图入口匹配后，在牌位福单页表现为
