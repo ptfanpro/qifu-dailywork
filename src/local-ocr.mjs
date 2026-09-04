@@ -16,10 +16,11 @@ function sha256(file) {
 }
 
 function runtimePaths(appRoot) {
+  const resolvedRoot = path.resolve(appRoot);
   return {
-    runtimeRoot: path.join(appRoot, 'vendor', 'onnxruntime-node'),
-    model: path.join(appRoot, 'models', 'paddleocr-en-v5', 'inference.onnx'),
-    dictionary: path.join(appRoot, 'models', 'paddleocr-en-v5', 'ppocrv5_en_dict.txt'),
+    runtimeRoot: path.join(resolvedRoot, 'vendor', 'onnxruntime-node'),
+    model: path.join(resolvedRoot, 'models', 'paddleocr-en-v5', 'inference.onnx'),
+    dictionary: path.join(resolvedRoot, 'models', 'paddleocr-en-v5', 'ppocrv5_en_dict.txt'),
   };
 }
 

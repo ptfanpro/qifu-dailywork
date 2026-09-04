@@ -7,7 +7,7 @@ import { calculateQuantities, venueMessage, normalizeText } from '../src/quantit
 import { verifyPdf } from '../src/pdf.mjs';
 import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
-import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localOcrCodeLayoutsForPhoto, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, OVERLAPPING_RIGHT_CODE_BANDS, parseLocalOcrCodeCandidates, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, reconcileDuplicatePhotoNumbersByPdfStructure, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
+import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasAdjacentLocalOcrConsensus, hasDirectVisibleCodeEvidence, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localOcrCodeLayoutsForPhoto, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, OVERLAPPING_RIGHT_CODE_BANDS, parseLocalOcrCodeCandidates, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, reconcileDuplicatePhotoNumbersByPdfStructure, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
 import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isSceneUploadFrameUrl, isTransientAutomationPage, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick, waitForSceneUploadFrame } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
@@ -218,8 +218,10 @@ assert.equal(shiftedShapeResult.resolved,1);
 assert.equal(shiftedShapeItems[0].number,401);
 const claimedShapeItems=[{file:shapePhoto,reliable:false,number:null,candidates:[],visualMetrics:{},paperGeometry:{left:0.1,top:140/900,width:0.8,height:640/900,right:0.9,bottom:(140+640)/900,score:0.5,fill:0.95,boxArea:0.56,rectangularPaper:true}}];
 const claimedShapeResult=await matchPdfPagesLocally(claimedShapeItems,shapePages,null,new Set([402]));
-assert.equal(claimedShapeResult.resolved,1);
-assert.equal(claimedShapeItems[0].number,401);
+// One unclaimed page is not a measurable fingerprint margin.  It must remain
+// unresolved instead of manufacturing a score difference against zero.
+assert.equal(claimedShapeResult.resolved,0);
+assert.equal(claimedShapeItems[0].number,null);
 assert.deepEqual(claimedShapeResult.diagnostics[0].top.map((item)=>item.number),[401]);
 const allClaimedShapeItems=[{file:shapePhoto,reliable:false,number:null,candidates:[],visualMetrics:{},paperGeometry:{left:0.1,top:140/900,width:0.8,height:640/900,right:0.9,bottom:(140+640)/900,score:0.5,fill:0.95,boxArea:0.56,rectangularPaper:true}}];
 const allClaimedShapeResult=await matchPdfPagesLocally(allClaimedShapeItems,shapePages,null,new Set([401,402]));
@@ -734,8 +736,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.6\.4/);
-assert.match(uiSource,/损坏照片版式一一对应修正版/);
+assert.match(uiSource,/V9\.6\.5/);
+assert.match(uiSource,/编号证据优先闭环修正版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -1211,6 +1213,19 @@ assert.equal(isLikelyScene(september2ExtraLampScene),true);
 assert.equal(isLikelyScene({...september2ExtraLampScene,paperGeometry:{...september2ExtraLampScene.paperGeometry,usablePaper:true}}),false);
 assert.equal(isLikelyScene({...september2ExtraLampScene,sceneMetrics:{...september2ExtraLampScene.sceneMetrics,warmBrightRatio:.015}}),false);
 assert.equal(isLikelyScene({...september2ExtraLampScene,visualMetrics:{...september2ExtraLampScene.visualMetrics,edgeDensity:.12,uniformity:.50}}),false);
+// 2026-09-03 real failure, anonymized: the central stepped water altar formed
+// a large bright page-coloured component. It is a scene when no code is read,
+// while a full adjacent-line code consensus is conclusive paper evidence and
+// must override even deliberately scene-like colour/brightness metrics.
+const september3CentralWaterScene={
+  paperGeometry:{left:.15,top:.391667,width:.69375,height:.5875,right:.84375,bottom:.979167,score:.239727,fill:.588173,boxArea:.407578,rectangularPaper:false,usablePaper:true},
+  visualMetrics:{edgeDensity:.16,upperEdgeDensity:.11,uniformity:.42},
+  sceneMetrics:{luminance:125.09,warmBrightRatio:.03,darkRatio:.123},
+};
+assert.equal(isLikelyScene(september3CentralWaterScene),true);
+const directCodeOverScene={...september3CentralWaterScene,reliable:true,number:37,evidence:{method:'paddleocr-onnx-adaptive-right-line-consensus',votes:2,prefixDistance:0,maxConfidence:90}};
+assert.equal(hasDirectVisibleCodeEvidence(directCodeOverScene),true);
+assert.equal(isLikelyScene(directCodeOverScene),false);
 
 // 同批清晰福单的纸色连通域会把木架也包进去，旧版据此误选“竖版”裁框，
 // 并在 y=47.5% 处截到神像底座。新构图的编号实际位于约 y=50%~53%。
@@ -1418,9 +1433,21 @@ const localExpectedNumbers=new Set(Array.from({length:15},(_,index)=>630+index))
 assert.deepEqual(parseLocalOcrCodeCandidates('631','268',localExpectedNumbers).map((item)=>item.number),[631]);
 assert.deepEqual(new Set(parseLocalOcrCodeCandidates('268-1-6317','268',localExpectedNumbers).map((item)=>item.number)),new Set([631,637]));
 assert.deepEqual(parseLocalOcrCodeCandidates('20260830','268',localExpectedNumbers),[]);
-assert.match(localOcrCodeLayoutsForPhoto({top:0.54,right:1})[0].name,/local-ocr-inner-line/);
-assert.match(localOcrCodeLayoutsForPhoto({top:0.20,right:0.91})[0].name,/local-ocr-right-line/);
-assert.equal(localOcrCodeLayoutsForPhoto({top:0.20,right:0.91}).length,76);
+assert.match(localOcrCodeLayoutsForPhoto({top:0.54,right:1})[0].name,/local-ocr-left-line/);
+assert.match(localOcrCodeLayoutsForPhoto({top:0.54,right:1})[1].name,/local-ocr-center-line/);
+assert.match(localOcrCodeLayoutsForPhoto({top:0.20,right:0.91})[0].name,/local-ocr-left-line/);
+assert.equal(localOcrCodeLayoutsForPhoto({top:0.20,right:0.91}).length,304);
+assert.equal(hasAdjacentLocalOcrConsensus([
+  {number:35,variant:'local-ocr-center-line-52:color',prefixDistance:0,confidence:94},
+  {number:35,variant:'local-ocr-center-line-52:normalized',prefixDistance:0,confidence:88},
+],35),true);
+assert.equal(hasAdjacentLocalOcrConsensus([
+  {number:35,variant:'local-ocr-center-line-52:color',prefixDistance:0,confidence:94},
+],35),false);
+assert.equal(hasAdjacentLocalOcrConsensus([
+  {number:31,variant:'local-ocr-left-line-100:color',prefixDistance:0,confidence:91},
+  {number:31,variant:'local-ocr-left-line-102:color',prefixDistance:0,confidence:64},
+],31),true);
 assert.match(photoPrepareSource,/const secondPassLayouts = layouts\.slice\(0, 2\)/);
 assert.match(photoPrepareSource,/const contrastChannels = \[null\]/);
 assert.match(photoPrepareSource,/const thresholds = \[110, 170\]/);

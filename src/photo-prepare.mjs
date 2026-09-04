@@ -101,18 +101,43 @@ export const OVERLAPPING_RIGHT_CODE_BANDS = [
 // 右侧，因此用相邻窄行从上到下滑动；同一个真实编号会落入至少两条相邻
 // 窄行。只有两个独立窄行识别为同号、完整前缀近似成立且编号存在于当天
 // PDF 唯一集合时才采信。全部图像与文字只在本机内存和临时目录中处理。
-function makeLocalOcrVerticalSweep(name, left, width) {
-  return Array.from({ length: 38 }, (_, index) => ({
+function makeLocalOcrVerticalSweep(name, left, width, {
+  count = 38, top = 0.15, step = 0.0125, height = 0.040,
+} = {}) {
+  return Array.from({ length: count }, (_, index) => ({
     name: `${name}-${String(index + 1).padStart(2, '0')}`,
     left,
-    top: 0.15 + index * 0.0125,
+    top: top + index * step,
     width,
-    height: 0.040,
+    height,
   }));
 }
 
 export const LOCAL_OCR_RIGHT_CODE_SWEEP = makeLocalOcrVerticalSweep('local-ocr-right-line', 0.69, 0.21);
 export const LOCAL_OCR_INNER_CODE_SWEEP = makeLocalOcrVerticalSweep('local-ocr-inner-line', 0.52, 0.21);
+// The code itself is frequently centred around x=61%..75%.  The old right
+// sweep started too far right while the inner sweep included a large ornament
+// area; both contained the visibly clear code but diluted it enough for the
+// recognizer to return blank.  This overlapping centre sweep is a geometric
+// search lane, not a date-specific crop.  Two adjacent rows must still agree
+// on the full prefix and a number from the unique PDF set.
+const localOcrLeftCodeSweep = makeLocalOcrVerticalSweep(
+  'local-ocr-left-line', 0.54, 0.12,
+  // A 4% high crop included the decorative border immediately below the code
+  // and turned a clear `269-1-37` into `269-1372`.  Narrow, heavily-overlapping
+  // rows isolate the printed line while still tolerating vertical camera drift.
+  { count: 114, top: 0.145, step: 0.005, height: 0.025 },
+);
+const localOcrCenterCodeSweep = makeLocalOcrVerticalSweep(
+  'local-ocr-center-line', 0.57, 0.12,
+  { count: 114, top: 0.145, step: 0.005, height: 0.025 },
+);
+// Alternate the two narrow horizontal lanes at each height.  A wide crop makes
+// the recognizer compress a small code together with the paper border; one lane
+// alone can clip either the prefix or suffix when the camera shifts.  Interleaving
+// finds the first complete code without paying for a full second vertical pass.
+export const LOCAL_OCR_CENTER_CODE_SWEEP = localOcrLeftCodeSweep
+  .flatMap((layout, index) => [layout, localOcrCenterCodeSweep[index]]);
 
 export function localOcrCodeLayoutsForPhoto(paperGeometry) {
   // 纸面明显落在画面下半部且连到右边界时，是 8 月 30 日供灯构图，编号
@@ -121,8 +146,8 @@ export function localOcrCodeLayoutsForPhoto(paperGeometry) {
   const innerFirst = Number(paperGeometry?.top || 0) >= 0.45
     && Number(paperGeometry?.right || 0) >= 0.97;
   return innerFirst
-    ? [...LOCAL_OCR_INNER_CODE_SWEEP, ...LOCAL_OCR_RIGHT_CODE_SWEEP]
-    : [...LOCAL_OCR_RIGHT_CODE_SWEEP, ...LOCAL_OCR_INNER_CODE_SWEEP];
+    ? [...LOCAL_OCR_CENTER_CODE_SWEEP, ...LOCAL_OCR_INNER_CODE_SWEEP, ...LOCAL_OCR_RIGHT_CODE_SWEEP]
+    : [...LOCAL_OCR_CENTER_CODE_SWEEP, ...LOCAL_OCR_RIGHT_CODE_SWEEP, ...LOCAL_OCR_INNER_CODE_SWEEP];
 }
 
 export function prioritizedPhotoLayouts(geometry, dynamicLayouts) {
@@ -675,15 +700,32 @@ export function parseLocalOcrCodeCandidates(text, expectedPrefix, expectedNumber
   return [{ number, prefixDistance: 1, normalized: compact, tailOnly: true }];
 }
 
-function hasAdjacentLocalOcrConsensus(observations, number) {
+export function hasAdjacentLocalOcrConsensus(observations, number) {
   const indexesBySweep = new Map();
+  const variantsByCrop = new Map();
   for (const item of observations.filter((value) => value.number === number)) {
-    const match = /^(local-ocr-(?:right|inner)-line)-(\d{2})$/.exec(item.variant || '');
+    const match = /^(local-ocr-(?:left|center|right|inner)-line)-(\d{2,3})(?::(color|normalized))?$/.exec(item.variant || '');
     if (!match) continue;
     if (!indexesBySweep.has(match[1])) indexesBySweep.set(match[1], new Set());
     indexesBySweep.get(match[1]).add(Number(match[2]));
+    const cropKey = `${match[1]}-${match[2]}`;
+    if (!variantsByCrop.has(cropKey)) variantsByCrop.set(cropKey, new Set());
+    if (match[3] && Number(item.prefixDistance ?? 99) <= 0.1
+      && Number(item.confidence || 0) >= 65) variantsByCrop.get(cropKey).add(match[3]);
   }
-  return [...indexesBySweep.values()].some((indexes) => [...indexes].some((index) => indexes.has(index + 1)));
+  // Rows are 2.5% high but advance only 0.5%; a one-row miss between two
+  // successful reads still leaves about 60% vertical overlap and is stronger
+  // evidence than two unrelated large crops.  The two narrow horizontal lanes
+  // at the same height are also independent clipping views of the same line.
+  if ([...indexesBySweep.values()].some((indexes) => [...indexes]
+    .some((index) => indexes.has(index + 1) || indexes.has(index + 2)))) return true;
+  const left = indexesBySweep.get('local-ocr-left-line') || new Set();
+  const center = indexesBySweep.get('local-ocr-center-line') || new Set();
+  if ([...left].some((index) => center.has(index))) return true;
+  // A clear full-prefix code that survives both the colour crop and an
+  // independently normalized greyscale crop is also a two-view consensus.
+  // Tail-only reads are excluded above because their prefixDistance is 1.
+  return [...variantsByCrop.values()].some((variants) => variants.has('color') && variants.has('normalized'));
 }
 
 function parsePdfTailCandidate(text) {
@@ -974,6 +1016,32 @@ async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeo
   const assets = verifyLocalOcrAssets(appRoot);
   if (!assets.available) return null;
   const observations = [];
+  const appendObservations = (parsedItems, result, layout, variant) => {
+    for (const item of parsedItems) observations.push({
+      ...item,
+      confidence: Math.max(0, Math.min(100, Number(result.confidence || 0) * 100)),
+      layout: 'paddleocr-onnx-adaptive-right-line',
+      variant: `${layout.name}:${variant}`,
+    });
+  };
+  const resolvedConsensus = () => {
+    const groups = groupObservations(observations);
+    const best = groups[0] || null;
+    if (!isReliableOcrConsensus(best, groups[1] || null, 55)
+      || !hasAdjacentLocalOcrConsensus(observations, best.number)) return null;
+    return {
+      number: best.number,
+      evidence: {
+        method: 'paddleocr-onnx-adaptive-right-line-consensus',
+        votes: best.votes,
+        prefixDistance: best.prefixDistance,
+        maxConfidence: best.maxConfidence,
+        layouts: best.layouts,
+        modelSha256: assets.modelSha256,
+      },
+      candidates: groups.slice(0, 5),
+    };
+  };
   for (const layout of localOcrCodeLayoutsForPhoto(paperGeometry)) {
     const extract = cropFromRatios(metadata, layout);
     if (!isUsableOcrExtract(extract)) continue;
@@ -986,28 +1054,29 @@ async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeo
       if (process.env.PRAYER_LOCAL_OCR_TRACE === 'yes' && parsedItems.length) {
         console.error(`[local-ocr] ${layout.name}: ${parsedItems.map((item) => item.number).join(',')} @ ${Math.round(result.confidence * 100)}`);
       }
-      for (const item of parsedItems) observations.push({
-        ...item,
-        confidence: Math.max(0, Math.min(100, Number(result.confidence || 0) * 100)),
-        layout: 'paddleocr-onnx-adaptive-right-line',
-        variant: layout.name,
-      });
-      const groups = groupObservations(observations);
-      const best = groups[0] || null;
-      if (isReliableOcrConsensus(best, groups[1] || null, 55)
-        && hasAdjacentLocalOcrConsensus(observations, best.number)) {
-        return {
-          number: best.number,
-          evidence: {
-            method: 'paddleocr-onnx-adaptive-right-line-consensus',
-            votes: best.votes,
-            prefixDistance: best.prefixDistance,
-            maxConfidence: best.maxConfidence,
-            layouts: best.layouts,
-            modelSha256: assets.modelSha256,
-          },
-          candidates: groups.slice(0, 5),
-        };
+      appendObservations(parsedItems, result, layout, 'color');
+      const colorConsensus = resolvedConsensus();
+      if (colorConsensus) return colorConsensus;
+
+      // When one colour crop contains a high-confidence full code, verify that
+      // exact physical strip through a second local preprocessing path.  This
+      // closes the common case where perspective makes only one vertical row
+      // readable, without weakening the two-view requirement or using network
+      // OCR.  We do not spend this extra inference on blank or tail-only crops.
+      if (parsedItems.some((item) => Number(item.prefixDistance ?? 99) <= 0.1)
+        && Number(result.confidence || 0) >= 0.65) {
+        const normalizedDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-paddle-normalized.png`);
+        await sharpFile(file).rotate().extract(extract)
+          .greyscale().normalize().sharpen({ sigma: 1 }).png().toFile(normalizedDiagnostic);
+        const normalizedResult = await recognizeLocalTextLine(appRoot, normalizedDiagnostic);
+        const normalizedItems = Number(normalizedResult.confidence || 0) >= 0.55
+          ? parseLocalOcrCodeCandidates(normalizedResult.text, expectedPrefix, expectedNumbers) : [];
+        if (process.env.PRAYER_LOCAL_OCR_TRACE === 'yes' && normalizedItems.length) {
+          console.error(`[local-ocr] ${layout.name}:normalized: ${normalizedItems.map((item) => item.number).join(',')} @ ${Math.round(normalizedResult.confidence * 100)}`);
+        }
+        appendObservations(normalizedItems, normalizedResult, layout, 'normalized');
+        const normalizedConsensus = resolvedConsensus();
+        if (normalizedConsensus) return normalizedConsensus;
       }
     } catch {
       // 运行库级错误只触发旧引擎降级；不写入图片、OCR 全文或账号信息。
@@ -1049,18 +1118,13 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   const paperEvidence = await detectPaperEvidence(file);
   const visualMetrics = await imageVisualMetrics(file);
   const sceneMetrics = await sceneVisualScore(file);
-  if (isLikelyScene({ paperGeometry: paperEvidence.geometry, visualMetrics, sceneMetrics })) {
-    return {
-      file,
-      reliable: false,
-      number: null,
-      paperGeometry: paperEvidence.geometry,
-      visualMetrics,
-      sceneMetrics,
-      evidence: { method: 'scene-visual-fast-path' },
-      candidates: [],
-    };
-  }
+  // Scene heuristics are deliberately provisional.  A blessing sheet photographed
+  // in front of lit candles can have the same dark/warm/global-colour metrics as a
+  // lamp scene.  Returning here used to prevent the number strip from ever being
+  // read and allowed that one visual guess to remove a real sheet from the PDF
+  // bijection.  Keep the scene evidence, but let the independent, tightly-cropped
+  // code readers run before the role is committed.
+  const preliminaryScene = isLikelyScene({ paperGeometry: paperEvidence.geometry, visualMetrics, sceneMetrics });
   // 检出纸张后只围绕纸张右上角识别，避免佛像、灯焰和边框进入 OCR。
   // 纸张定位失败时才回退旧版固定构图，兼容历史照片。
   const layouts = prioritizedPhotoLayouts(paperEvidence.geometry, paperEvidence.layouts);
@@ -1084,6 +1148,21 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
       candidates: local.candidates,
     };
   }
+
+  // A scene decision is committed only after the portable reader has searched
+  // the full narrow-code grid and found no two-crop consensus.  This preserves
+  // the direct-code override for candle-lit blessing sheets while preventing a
+  // genuine altar scene from entering the much slower, noisier legacy OCR chain.
+  if (preliminaryScene) return {
+    file,
+    reliable: false,
+    number: null,
+    paperGeometry: paperEvidence.geometry,
+    visualMetrics,
+    sceneMetrics,
+    evidence: { method: 'scene-visual-after-full-local-code-exclusion' },
+    candidates: [],
+  };
 
   // 补拍的 597/598 使用另一种较低纸面构图。其短编号在原彩小框中由
   // Windows OCR 可稳定读取，但若先让 Tesseract遍历所有阈值，会在花边细线
@@ -1486,7 +1565,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     evidence: best ? {
       ...(reliable ? { method: 'photo-code-multi-crop-consensus' } : {}),
       votes: best.votes, prefixDistance: best.prefixDistance, maxConfidence: best.maxConfidence, layouts: best.layouts,
-    } : null,
+    } : (preliminaryScene ? { method: 'scene-visual-after-code-exclusion' } : null),
     candidates: grouped.slice(0, 5),
   };
 }
@@ -1969,8 +2048,19 @@ export async function auditExistingNumericPhotoCode({ appRoot, file, expectedPre
 }
 
 export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = null, claimedNumbers = new Set()) {
-  const eligible = recognized.filter((item) => !item.reliable && !isLikelyScene(item)
-    && (item.paperGeometry?.usablePaper || item.paperGeometry?.rectangularPaper));
+  // Scene colour/brightness is not allowed to veto independent paper evidence.
+  // A sheet behind candle flames can trip the scene heuristic even when it has
+  // a large, page-shaped colour region.  Let those role-conflict items compete
+  // against PDF pages, but keep tiny true-scene colour islands out of the much
+  // more expensive matcher.
+  const eligible = recognized.filter((item) => {
+    if (item.reliable) return false;
+    const geometry = item.paperGeometry || {};
+    return Boolean(geometry.usablePaper || geometry.rectangularPaper
+      || (Number(geometry.score || 0) >= 0.09
+        && Number(geometry.boxArea || 0) >= 0.14
+        && Number(geometry.height || 0) >= 0.30));
+  });
   // 已有数字文件和已由强 OCR 确认的照片已经占用了对应页面。未决照片只应
   // 在尚缺编号中竞争；若仍拿整本 PDF 比对，模板相近的已占用页面会成为
   // 假阳性第一名，反而把可以由“缺号 + 页面版式”唯一确认的补图留在人工项。
@@ -2004,9 +2094,13 @@ export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = nu
   for (const row of rows) {
     const best = row.scores[0];
     const second = row.scores[1];
-    const margin = best.score - (second?.score ?? 0);
-    // 阈值刻意保守：只有纸张布局有明显唯一性才采用，低质量或模板相似时保留人工清单。
-    if (best.score < 0.26 || margin < 0.035) continue;
+    // A single candidate is not a measurable margin: treating the absent
+    // runner-up as score zero manufactured certainty.  Keep the workflow V17
+    // contract here (score >= .35 and real runner-up margin >= .05).  A shape
+    // fingerprint is allowed to confirm only a genuinely distinctive page;
+    // it can never turn a scene or a same-template page into a sequence anchor.
+    const margin = second ? best.score - second.score : 0;
+    if (!second || best.score < 0.35 || margin < 0.05) continue;
     if (!claims.has(best.page.number)) claims.set(best.page.number, []);
     claims.get(best.page.number).push({ row, best, margin });
   }
@@ -2517,7 +2611,25 @@ async function imageVisualMetrics(file) {
   return { edgeDensity: edges / pixels, upperEdgeDensity: upperEdges / pixels, uniformity: uniformPairs / pixels };
 }
 
+export function hasDirectVisibleCodeEvidence(item) {
+  if (!item?.reliable || !Number.isInteger(item.number)) return false;
+  const method = String(item?.evidence?.method || '');
+  if (/^(?:paddleocr-onnx-adaptive-right-line-consensus|targeted-landscape-code-threshold-consensus|photo-code-multi-crop-consensus|windows-ocr-(?:strict-(?:lower-code-box|code-crop)|overlapping-right-code-bands))$/.test(method)) return true;
+  // Existing numeric files are not trusted merely because of their filename;
+  // only the independent overlapping-band audit may override a scene guess.
+  if (method === 'existing-numeric-filename-claim') {
+    return Number.isInteger(item.observedOcrNumber)
+      && item.observedOcrNumber === item.number
+      && Number(item?.observedOcrEvidence?.votes || 0) >= 2;
+  }
+  return false;
+}
+
 export function isLikelyScene(item) {
+  // Role evidence is ordered, not blended: a full visible business code that
+  // was independently read in adjacent/strict code crops is conclusive paper
+  // evidence.  Global colour and brightness heuristics may never overrule it.
+  if (hasDirectVisibleCodeEvidence(item)) return false;
   const metrics = item.visualMetrics || {};
   const geometry = item.paperGeometry || {};
   const scene = item.sceneMetrics || {};
@@ -2552,6 +2664,22 @@ export function isLikelyScene(item) {
     && geometry.height >= 0.60
     && geometry.boxArea >= 0.60
     && geometry.fill >= 0.58;
+  // A stepped water altar can form one central gold/red connected component
+  // that looks deceptively page-shaped.  It differs from a photographed sheet
+  // in that the component covers a large central box with very high colour
+  // fill while remaining non-rectangular and bright, yet does not span the
+  // whole frame.  Direct code evidence above always wins, so a real sheet with
+  // a readable number cannot be swallowed by this visual fallback.
+  const centralSteppedWaterScene = geometry.rectangularPaper === false
+    && geometry.usablePaper === true
+    && Number(geometry.score || 0) >= 0.20
+    && Number(geometry.boxArea || 0) >= 0.34
+    && Number(geometry.fill || 0) >= 0.55
+    && Number(geometry.width || 0) >= 0.62
+    && Number(geometry.width || 0) <= 0.80
+    && Number(geometry.top || 0) >= 0.32
+    && Number(scene.darkRatio ?? 1) <= 0.18
+    && Number(scene.luminance || 0) >= 110;
   // 暗场灯阵的金色台阶可能被纸色检测标成“可用纸张”。真实福单虽然也会
   // 较暗，但不会同时满足窄于 78% 画幅、低上半部边缘和 5.5% 以上暖色灯焰。
   const dimLampSceneStructure = geometry.rectangularPaper === false
@@ -2628,7 +2756,7 @@ export function isLikelyScene(item) {
     && metrics.upperEdgeDensity <= 0.10
     && metrics.edgeDensity <= 0.13;
   // 灯阵或供水全景会在画面底部形成横跨全宽的红/黄连通块；它不是纸张。
-  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure || veryDarkDistantLampSceneStructure || veryDarkDenseLampSceneStructure
+  if (sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || centralSteppedWaterScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure || veryDarkDistantLampSceneStructure || veryDarkDenseLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure) return true;
   // 纸张偶尔与画面右边缘相接，严格矩形条件会失败；足够大的连续红/黄纸色块仍应判为纸张。
   if (geometry.rectangularPaper || (geometry.score >= 0.085
@@ -2642,7 +2770,7 @@ export function isLikelyScene(item) {
     && metrics.uniformity > 0.47
     && metrics.upperEdgeDensity < 0.08
     && metrics.edgeDensity < 0.16;
-  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure || veryDarkDistantLampSceneStructure || veryDarkDenseLampSceneStructure
+  return Boolean(sprawlingLights || shallowBottomSceneBand || strongFullFrameScene || fullWidthSteppedScene || centralSteppedWaterScene || dimLampSceneStructure || wideDimLampSceneStructure || fullWidthDimLampSceneStructure || veryDarkDistantLampSceneStructure || veryDarkDenseLampSceneStructure
     || lowerFrameSceneStructure || compactWarmSceneStructure || visualScene);
 }
 
