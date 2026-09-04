@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { calculateQuantities, venueMessage, normalizeText } from '../src/quantity.mjs';
 import { verifyPdf } from '../src/pdf.mjs';
@@ -9,7 +10,7 @@ import { Timing } from '../src/timing.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, scanPhotoWorkday, splitUploadBatches } from '../src/photos.mjs';
 import { applyPhotoPreparation, classifyScenes, classifySceneVisualScore, dominantPaperColor, hasAdjacentLocalOcrConsensus, hasDirectVisibleCodeEvidence, hasStrongOcrConflict, inferPhotoGapsAroundExistingNumbers, inferPhotoSequences, inferSequentialPdfCodes, inferTrailingUnreadPdfCodes, isContinuousPhotoCapture, isLikelyScene, isReliableOcrConsensus, localOcrCodeLayoutsForPhoto, localShapeFingerprint, matchPdfPagesLocally, moveFileVerified, OVERLAPPING_RIGHT_CODE_BANDS, parseLocalOcrCodeCandidates, parseLooseWindowsCodeCandidates, parseWindowsOcrTail, photoCaptureTimestamp, prioritizedPhotoLayouts, reconcileDuplicatePhotoNumbers, reconcileDuplicatePhotoNumbersByPdfStructure, recheckReliablePhotoClaimsWithPdf, repairSingleAdjacentDuplicatePdfCode, resolveAmbiguousPhotosByGlobalSet, resolvePhotoNumbersWithCloudVision, sortPdfDescriptorsByBusinessOrder, targetedCurrentCodeLayouts } from '../src/photo-prepare.mjs';
 import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, upsertPhotoCompletionBatch } from '../src/workflow-state.mjs';
-import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, chooseReusablePage, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isSceneUploadFrameUrl, isTransientAutomationPage, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick, waitForSceneUploadFrame } from '../src/site.mjs';
+import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, chooseReusablePage, isBlessingUploadTransport, isCaptchaInputDescriptor, isClosedBrowserError, isNavigationRaceError, isSceneUploadFrameUrl, isTransientAutomationPage, resolveBlessingFileUploadStates, resolveBlessingUploadCount, resolveBlessingUploadResponseCount, resolveRenewalTerminalDialog, scheduleSiteClick, waitForSceneUploadFrame, watchBlessingUploadTransport } from '../src/site.mjs';
 import { cleanupLocalState } from '../src/cleanup.mjs';
 import { AutomationApiClient, canonicalTokenRequest, createTokenRequest, normalizeAutomationBaseUrl } from '../src/automation-auth.mjs';
 import { decodePaddleCtc, recognizeLocalTextLine, verifyLocalOcrAssets } from '../src/local-ocr.mjs';
@@ -736,8 +737,8 @@ assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
-assert.match(uiSource,/V9\.6\.5/);
-assert.match(uiSource,/编号证据优先闭环修正版/);
+assert.match(uiSource,/V9\.6\.6/);
+assert.match(uiSource,/上传逐编号对账闭环版/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -892,8 +893,51 @@ assert.deepEqual(resolveBlessingUploadResponseCount('{"result":{"message":"10"}}
 });
 assert.equal(resolveBlessingUploadResponseCount({result:{message:'36'},orderId:10},10).uploadedCount,undefined);
 assert.equal(resolveBlessingUploadResponseCount("$('#years').val(laydate.now(0,'YYYYMM'));",10).uploadedCount,undefined);
-assert.match(siteSource,/waitForResponse/);
-assert.match(siteSource,/uploadPic\\\/name/);
+assert.equal(isBlessingUploadTransport('POST','http://admin.stqifu.com/blessing/mind/uploadPic/name'),true);
+assert.equal(isBlessingUploadTransport('post','http://admin.stqifu.com/blessing/mind/uploadPic?month=202609'),true);
+assert.equal(isBlessingUploadTransport('GET','http://admin.stqifu.com/blessing/mind/uploadPic/name'),false);
+assert.equal(isBlessingUploadTransport('POST','http://admin.stqifu.com/blessing/mind/toUpload/name'),false);
+const uploadStateFiles=['C:\\staged\\701.jpg','C:\\staged\\702.jpg'];
+assert.deepEqual(resolveBlessingFileUploadStates(
+  uploadStateFiles,
+  [{blessingCode:'268-1-701'}],
+  [{blessingCode:'268-1-702'}],
+),{uploadedFiles:[uploadStateFiles[0]],pendingFiles:[uploadStateFiles[1]],conflicts:[]});
+assert.deepEqual(resolveBlessingFileUploadStates(
+  [uploadStateFiles[0]],
+  [{blessingCode:'268-1-701'},{blessingCode:'269-1-701'}],
+  [],
+).conflicts,['701.jpg']);
+const transportPage=new EventEmitter();
+const transportWatcher=watchBlessingUploadTransport(transportPage,12);
+const uploadRequest={method:()=> 'POST',url:()=> 'http://admin.stqifu.com/blessing/mind/uploadPic/name'};
+transportPage.emit('request',uploadRequest);
+transportPage.emit('response',{
+  request:()=>uploadRequest,
+  url:()=>uploadRequest.url(),
+  ok:()=>true,
+  status:()=>200,
+  text:async()=>'{"result":{"message":"loading"}}',
+});
+transportPage.emit('response',{
+  request:()=>uploadRequest,
+  url:()=>uploadRequest.url(),
+  ok:()=>true,
+  status:()=>200,
+  text:async()=>'{"result":{"message":"12"}}',
+});
+assert.equal(await transportWatcher.uploadedCount(),12);
+assert.equal(transportWatcher.state.requestCount,1);
+assert.equal(transportWatcher.state.responseCount,2);
+transportWatcher.stop();
+assert.equal(transportPage.listenerCount('request'),0);
+assert.equal(transportPage.listenerCount('response'),0);
+assert.match(siteSource,/watchBlessingUploadTransport/);
+assert.doesNotMatch(siteSource,/const uploadResponsePromise = this\.page\.waitForResponse/);
+assert.match(siteSource,/BLESSING_UPLOAD_OUTCOME_UNCONFIRMED/);
+assert.match(runnerSource,/resolveBlessingFileUploadStates/);
+assert.match(runnerSource,/仅对未上传文件安全重试一次/);
+assert.match(runnerSource,/绝不第三次提交/);
 assert.match(siteSource,/allInnerTexts/);
 assert.doesNotMatch(siteSource,/layui-layer-msg:visible[^\n]*\.allTextContents/);
 assert.match(siteSource,/const selects = dialog\.locator\('select'\)/);
@@ -1341,14 +1385,13 @@ assert.deepEqual(resolveAmbiguousPhotosByGlobalSet(weakSingleVotePhoto,new Set([
 assert.match(runnerSource,/schemaVersion:2[\s\S]*stage:'not-started'/);
 assert.match(runnerSource,/needsOnlineRetryCheck[\s\S]*queryUploadedOrders/);
 assert.match(runnerSource,/本地已有 \$\{Object\.keys\(uploadedFiles\)\.length\} 张回执/);
-assert.match(runnerSource,/post-timeout-online-reconciled/);
+assert.match(runnerSource,/post-timeout-online-code-reconciled/);
 assert.match(runnerSource,/queryNotUploadedOrders/);
-assert.match(runnerSource,/online-uploaded-positive-and-not-uploaded-zero/);
-assert.match(runnerSource,/线上自动复核通过/);
+assert.match(runnerSource,/online-code-and-upload-status-reconciled/);
+assert.match(runnerSource,/线上逐编号复核通过/);
 assert.match(runnerSource,/online-partial-verified/);
-assert.match(runnerSource,/线上部分上传状态已精确核对/);
-assert.match(runnerSource,/provenFileCount \+ pendingFiles\.length === manifest\.counts\.blessing/);
-assert.match(runnerSource,/onlineOrderCount === expectedOrderCount/);
+assert.match(runnerSource,/线上部分上传状态已逐编号核对/);
+assert.match(runnerSource,/pendingFiles = manifest\.files\.blessing\.filter/);
 assert.doesNotMatch(runnerSource,/程序不会自动重传，请先人工核对/);
 assert.match(siteSource,/queryOrdersByBlessingUploadStatus/);
 assert.match(runnerSource,/上次福单图上传中断/);

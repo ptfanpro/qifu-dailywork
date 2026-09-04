@@ -184,6 +184,78 @@ export function resolveBlessingUploadResponseCount(payload, expectedCount) {
   }
   return resolveBlessingUploadCount(candidates, expectedCount);
 }
+export function isBlessingUploadTransport(method, url) {
+  let pathname = '';
+  try { pathname = new URL(String(url || '')).pathname; } catch { return false; }
+  return String(method || '').toUpperCase() === 'POST'
+    && /\/blessing\/mind\/uploadPic(?:\/name)?\/?$/i.test(pathname);
+}
+function normalizedBlessingTail(value) {
+  const groups = String(value || '').match(/\d+/g);
+  if (!groups?.length) return null;
+  return String(Number(groups.at(-1)));
+}
+export function resolveBlessingFileUploadStates(files, uploadedRows, notUploadedRows) {
+  const uploadedByTail = new Map();
+  const pendingByTail = new Map();
+  const addRow = (target, row) => {
+    const tail = normalizedBlessingTail(row?.blessingCode);
+    if (!tail) return;
+    target.set(tail, (target.get(tail) || 0) + 1);
+  };
+  for (const row of uploadedRows || []) addRow(uploadedByTail, row);
+  for (const row of notUploadedRows || []) addRow(pendingByTail, row);
+  const uploadedFiles = [];
+  const pendingFiles = [];
+  const conflicts = [];
+  const seenFileTails = new Set();
+  for (const file of files || []) {
+    const stem = path.basename(file, path.extname(file));
+    const tail = /^\d+$/.test(stem) ? String(Number(stem)) : null;
+    if (!tail || seenFileTails.has(tail)) {
+      conflicts.push(path.basename(file));
+      continue;
+    }
+    seenFileTails.add(tail);
+    const uploadedCount = uploadedByTail.get(tail) || 0;
+    const pendingCount = pendingByTail.get(tail) || 0;
+    if (uploadedCount === 1 && pendingCount === 0) uploadedFiles.push(file);
+    else if (uploadedCount === 0 && pendingCount === 1) pendingFiles.push(file);
+    else conflicts.push(path.basename(file));
+  }
+  return { uploadedFiles, pendingFiles, conflicts };
+}
+export function watchBlessingUploadTransport(page, expectedCount) {
+  const state = { requestCount:0, responseCount:0, receipts:[], tasks:[] };
+  const onRequest = (request) => {
+    if (isBlessingUploadTransport(request.method(), request.url())) state.requestCount += 1;
+  };
+  const onResponse = (response) => {
+    if (!isBlessingUploadTransport(response.request().method(), response.url())) return;
+    state.responseCount += 1;
+    const task = (async () => {
+      const body = await response.text().catch(() => '');
+      const receipt = response.ok()
+        ? resolveBlessingUploadResponseCount(body, expectedCount)
+        : { uploadedCount:undefined, numericMessages:[] };
+      state.receipts.push({ ...receipt, ok:response.ok(), status:response.status() });
+    })();
+    state.tasks.push(task);
+  };
+  page.on('request', onRequest);
+  page.on('response', onResponse);
+  return {
+    state,
+    async uploadedCount() {
+      await Promise.allSettled([...state.tasks]);
+      return state.receipts.find((receipt) => receipt.uploadedCount === Number(expectedCount))?.uploadedCount;
+    },
+    stop() {
+      page.off('request', onRequest);
+      page.off('response', onResponse);
+    },
+  };
+}
 function nextDateToken(date) {
   const [year, month, day] = date.split('-').map(Number);
   const value = new Date(Date.UTC(year, month - 1, day + 1));
@@ -1069,69 +1141,68 @@ export class PrayerSite {
     if (!await chooseButton.count()) throw new Error('月份窗口没有识别到确定按钮；未提交上传。');
     try { await chooseButton.waitFor({ state:'visible', timeout:5000 }); }
     catch { throw new Error('月份窗口的确定按钮不可见；未提交上传。'); }
-    // Arm the authoritative AJAX receipt before submitting the month layer.
-    // The site posts the batch to this endpoint and returns
-    // { result: { message: "N" } }. This is more stable than trying to read a
-    // short-lived Layui message after native alerts have already been accepted.
-    const uploadResponsePromise = this.page.waitForResponse((response) => {
-      let pathname = '';
-      try { pathname = new URL(response.url()).pathname; } catch {}
-      return response.request().method() === 'POST' && /\/blessing\/mind\/uploadPic\/name\/?$/i.test(pathname);
-    }, { timeout:65000 }).then(async (response) => {
-      const body = await response.text().catch(() => '');
-      const result = response.ok()
-        ? resolveBlessingUploadResponseCount(body, files.length)
-        : { uploadedCount:undefined, numericMessages:[] };
-      return { ...result, ok:response.ok(), status:response.status() };
-    }).catch((error) => ({ uploadedCount:undefined, numericMessages:[], ok:false, status:0, error }));
+    // Observe the complete upload transaction rather than resolving on the
+    // first matching response. Some deployments emit an intermediate response
+    // before the final numeric JSON receipt, and the endpoint may omit /name.
+    const uploadTransport = watchBlessingUploadTransport(this.page, files.length);
     // 这个按钮的处理函数会同步打开下一层确认框。CDP 复用 Edge 时，
     // Playwright 的常规 click 偶尔会一直等待该处理链结束并在 30 秒后超时，
     // 即使 DOM 元素本身已经可用。直接调用元素 click 可立即交还控制权，
     // 后续确认框仍由已安装的 dialog/layer 监听器自动接受。
-    onStage('month-submit-started');
-    await scheduleSiteClick(chooseButton, { markConsumed:true });
-    onStage('month-submitted');
-    this.timing.count('browser_action_count');
-    await sleep(150);
-    const dialogStart = this.dialogs.length;
-    // 月份窗口关闭有动画延迟。已点击按钮带消费标记，自动确认只会处理
-    // 后续新出现的确认层，不会再次点击旧月份按钮。
-    const confirmedLayers = await this.autoSiteConfirm(5000);
-    const confirmDialogs = this.dialogs.slice(dialogStart).filter((message) => /上传|确定|确认/.test(normalizeText(message)));
-    if (confirmedLayers || confirmDialogs.length) onStage('upload-confirmed');
+    try {
+      // Capture the dialog index before the click; native confirm can appear
+      // and be accepted within the first 150 ms.
+      const dialogStart = this.dialogs.length;
+      onStage('month-submit-started');
+      await scheduleSiteClick(chooseButton, { markConsumed:true });
+      onStage('month-submitted');
+      this.timing.count('browser_action_count');
+      await sleep(150);
+      // 月份窗口关闭有动画延迟。已点击按钮带消费标记，自动确认只会处理
+      // 后续新出现的确认层，不会再次点击旧月份按钮。
+      const confirmedLayers = await this.autoSiteConfirm(5000);
+      const confirmDialogs = this.dialogs.slice(dialogStart).filter((message) => /上传|确定|确认/.test(normalizeText(message)));
+      const confirmationSeen = confirmedLayers > 0 || confirmDialogs.length > 0;
+      if (confirmationSeen) onStage('upload-confirmed');
 
-    // 上传完成数可能通过原生 alert 返回，也可能在 Layui 消息层稍晚出现。
-    // 轮询具体结果，避免在确认框已经被全局 dialog 监听器接受时误报“未确认”。
-    const resultDeadline = Date.now() + 60000;
-    let uploadedCount;
-    let responseReceiptRead = false;
-    while (Date.now() < resultDeadline && uploadedCount === undefined) {
-      const responseReceipt = await Promise.race([
-        uploadResponsePromise,
-        sleep(100).then(() => null),
-      ]);
-      if (responseReceipt && !responseReceiptRead) {
-        responseReceiptRead = true;
-        uploadedCount = responseReceipt.uploadedCount;
-        if (uploadedCount === files.length) this.log(`已从上传接口回执确认本批 ${uploadedCount} 张。`);
+      // 上传完成数可能通过接口 JSON、原生 alert 或 Layui 消息层返回。
+      // 持续读取全部匹配响应，不能让中间响应抢先结束监听。
+      const resultDeadline = Date.now() + 60000;
+      let uploadedCount;
+      let interfaceReceiptLogged = false;
+      while (Date.now() < resultDeadline && uploadedCount === undefined) {
+        uploadedCount = await uploadTransport.uploadedCount();
+        if (uploadedCount === files.length && !interfaceReceiptLogged) {
+          interfaceReceiptLogged = true;
+          this.log(`已从上传接口回执确认本批 ${uploadedCount} 张。`);
+        }
+        const resultMessages = await this.page.locator('.layui-layer-msg:visible .layui-layer-content').allInnerTexts().catch(() => []);
+        for (const message of resultMessages.map((value) => normalizeText(value)).filter(Boolean)) {
+          if (!this.layerMessages.includes(message)) this.layerMessages.push(message);
+        }
+        if (uploadedCount === undefined) {
+          const result = resolveBlessingUploadCount([...this.dialogs, ...this.layerMessages], files.length);
+          uploadedCount = result.uploadedCount;
+        }
+        if (uploadedCount === undefined) await sleep(100);
       }
-      const resultMessages = await this.page.locator('.layui-layer-msg:visible .layui-layer-content').allInnerTexts().catch(() => []);
-      for (const message of resultMessages.map((value) => normalizeText(value)).filter(Boolean)) {
-        if (!this.layerMessages.includes(message)) this.layerMessages.push(message);
+      if (uploadedCount !== files.length) {
+        const summary = [...this.dialogs,...this.layerMessages].join('；');
+        const error = new Error(`系统没有返回与本批一致的上传数量：本批 ${files.length} 张${summary ? `，提示：${summary}` : ''}。程序将按编号查询线上逐张对账。`);
+        error.code = 'BLESSING_UPLOAD_OUTCOME_UNCONFIRMED';
+        error.uploadEvidence = {
+          confirmationSeen,
+          requestStarted:uploadTransport.state.requestCount > 0,
+          responseSeen:uploadTransport.state.responseCount > 0,
+        };
+        throw error;
       }
-      if (uploadedCount === undefined) {
-        const result = resolveBlessingUploadCount([...this.dialogs, ...this.layerMessages], files.length);
-        uploadedCount = result.uploadedCount;
-      }
-      if (uploadedCount === undefined) await sleep(100);
+      onStage('verified');
+      this.log(`福单图上传成功：${uploadedCount} 张，月份 ${monthText}。`);
+      return { uploadedCount, month: monthText, files: files.map((file) => path.basename(file)) };
+    } finally {
+      uploadTransport.stop();
     }
-    if (uploadedCount !== files.length) {
-      const summary = [...this.dialogs,...this.layerMessages].join('；');
-      throw new Error(`系统没有返回与本批一致的上传数量：本批 ${files.length} 张${summary ? `，提示：${summary}` : ''}。请在后台核对后再继续。`);
-    }
-    onStage('verified');
-    this.log(`福单图上传成功：${uploadedCount} 张，月份 ${monthText}。`);
-    return { uploadedCount, month: monthText, files: files.map((file) => path.basename(file)) };
   }
   async selectOptionByVisibleText(selector, wantedText, { exact = true, required = true } = {}) {
     const select = this.page.locator(selector).first();

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PrayerSite } from './site.mjs';
+import { PrayerSite, resolveBlessingFileUploadStates } from './site.mjs';
 import { Timing } from './timing.mjs';
 import { calculateQuantities, normalizeText, venueMessage } from './quantity.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolder as photoDayFolder, scanPhotoWorkday, splitUploadBatches } from './photos.mjs';
@@ -546,9 +546,9 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
             : `检测到相同图片集合上次在 ${previous.stage || '未知阶段'} 中断，本地已有 ${Object.keys(uploadedFiles).length} 张回执；将先只读核对线上状态，不会盲目重传。`);
         }
       }
-      const pendingFiles = manifest.files.blessing.filter((file) => uploadedFiles[path.basename(file)]?.sha256 !== manifest.fileHashes?.[path.basename(file)]);
+      let pendingFiles = manifest.files.blessing.filter((file) => uploadedFiles[path.basename(file)]?.sha256 !== manifest.fileHashes?.[path.basename(file)]);
       const isSupplementRun = previous?.complete === true && Object.keys(uploadedFiles).length > 0 && pendingFiles.length > 0;
-      const batches = splitUploadBatches(pendingFiles);
+      let batches = splitUploadBatches(pendingFiles);
       const receipt = {
         schemaVersion:3,
         businessDate:photoDate,
@@ -586,49 +586,59 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
         const notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all'});
         const historicalManifestFile = path.join(workdaysRoot,photoDate,'order-manifest.json');
         const historicalManifest = fs.existsSync(historicalManifestFile) ? JSON.parse(fs.readFileSync(historicalManifestFile,'utf8')) : null;
-        if (alreadyUploaded.length > 0 && notUploaded.length === 0) {
-          receipt.complete = true;
-          receipt.batchCompleteReady = manifest.batchCompleteReady === true;
-          receipt.stage = 'online-reconciled';
-          receipt.uploadedCount = manifest.counts.blessing;
-          for (const file of manifest.files.blessing) {
-            const name = path.basename(file);
-            receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:new Date().toISOString(),evidence:'online-reconciled'};
+        // An upload can reach the platform while its short-lived numeric receipt
+        // is lost. Reconcile every local numeric filename against the same-date
+        // online blessing code and upload status before deciding to retransmit.
+        // This works for both complete and partial batches and never relies on a
+        // page total or on ordering.
+        if (alreadyUploaded.length || notUploaded.length) {
+          const onlineStates = resolveBlessingFileUploadStates(manifest.files.blessing,alreadyUploaded,notUploaded);
+          if (onlineStates.conflicts.length) {
+            throw new Error(`线上逐编号对账不唯一：${onlineStates.conflicts.join('、')}。为防止漏传或重复上传，已停止。`);
           }
+          const reconciledAt = new Date().toISOString();
+          for (const file of onlineStates.uploadedFiles) {
+            const name = path.basename(file);
+            receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:reconciledAt,evidence:'online-code-reconciled'};
+          }
+          receipt.uploadedCount = Object.keys(receipt.uploadedFiles).length;
           receipt.onlineMatchedOrderCount = alreadyUploaded.length;
-          receipt.reconciledAt = new Date().toISOString();
-          receipt.batches = [{
-            uploadedCount:manifest.counts.blessing,
-            month:photoDate.slice(0,7).replace('-',''),
-            files:manifest.files.blessing.map((file)=>path.basename(file)),
-            evidence:'online-uploaded-positive-and-not-uploaded-zero',
-            matchedOrderCount:alreadyUploaded.length,
-          }];
+          receipt.onlinePendingOrderCount = notUploaded.length;
+          receipt.stage = onlineStates.uploadedFiles.length ? 'online-code-reconciled' : 'online-confirmed-not-uploaded';
+          pendingFiles = manifest.files.blessing.filter((file) => receipt.uploadedFiles[path.basename(file)]?.sha256 !== manifest.fileHashes?.[path.basename(file)]);
+          batches = splitUploadBatches(pendingFiles);
           atomic(receiptFile,receipt);
-          photoTiming.end();
-          log(`线上自动复核通过：该日期福单已上传 ${alreadyUploaded.length} 条、未上传 0 条；本地 ${manifest.counts.blessing} 张福单图已补记为上传完成，不会重复上传。`);
-          await photoSite.close();
-          photoTiming.finish();
-          process.exit(0);
+          if (onlineStates.uploadedFiles.length) {
+            log(`线上逐编号对账完成：本地 ${onlineStates.uploadedFiles.length} 张已确认上传，${onlineStates.pendingFiles.length} 张明确未上传；后续只处理未上传文件。`);
+          }
+          if (!pendingFiles.length) {
+            receipt.complete = true;
+            receipt.batchCompleteReady = manifest.batchCompleteReady === true;
+            receipt.onlineClosureCheckReady = notUploaded.length === 0;
+            receipt.stage = manifest.batchCompleteReady ? 'online-code-reconciled-complete' : 'available-files-complete-waiting-for-supplement';
+            receipt.completedAt = reconciledAt;
+            receipt.batches.push({
+              uploadedCount:manifest.counts.blessing,
+              month:photoDate.slice(0,7).replace('-',''),
+              files:manifest.files.blessing.map((file)=>path.basename(file)),
+              evidence:'online-code-and-upload-status-reconciled',
+              matchedOrderCount:onlineStates.uploadedFiles.length,
+            });
+            atomic(receiptFile,receipt);
+            photoTiming.end();
+            log(`线上逐编号复核通过：当前 ${manifest.counts.blessing} 张福单图均已上传，本次不会重复提交。`);
+            await photoSite.close();
+            photoTiming.finish();
+            process.exit(0);
+          }
         }
         if (alreadyUploaded.length > 0 && notUploaded.length > 0) {
-          const provenFileCount = Object.keys(uploadedFiles).length;
-          const expectedOrderCount = Number(historicalManifest?.orderCount || 0);
-          const onlineOrderCount = alreadyUploaded.length + notUploaded.length;
-          const exactLocalPartition = provenFileCount > 0
-            && pendingFiles.length > 0
-            && provenFileCount + pendingFiles.length === manifest.counts.blessing;
-          const exactOnlinePartition = expectedOrderCount > 0 && onlineOrderCount === expectedOrderCount;
-          if (!exactLocalPartition || !exactOnlinePartition) {
-            throw new Error(`线上状态不完整：该日期福单已上传 ${alreadyUploaded.length} 条、未上传 ${notUploaded.length} 条；本地回执或订单总数无法形成唯一闭环。为防止漏传或重复上传，已停止。`);
-          }
           receipt.stage = 'online-partial-verified';
           receipt.onlineMatchedOrderCount = alreadyUploaded.length;
           receipt.onlinePendingOrderCount = notUploaded.length;
-          receipt.onlineExpectedOrderCount = expectedOrderCount;
           receipt.pendingFiles = pendingFiles.map((file)=>path.basename(file));
           atomic(receiptFile,receipt);
-          log(`线上部分上传状态已精确核对：总订单 ${expectedOrderCount} 条 = 已上传 ${alreadyUploaded.length} 条 + 未上传 ${notUploaded.length} 条；本地 ${provenFileCount} 张已有逐文件回执，只补传 ${pendingFiles.length} 张无回执福单图：${receipt.pendingFiles.join('、')}。`);
+          log(`线上部分上传状态已逐编号核对：本地已有 ${receipt.uploadedCount} 张上传凭据，只补传 ${pendingFiles.length} 张明确为“未上传”的福单图：${receipt.pendingFiles.join('、')}。`);
         }
         if (alreadyUploaded.length === 0 && notUploaded.length === 0) {
           const pendingRegular = await photoSite.queryLamp(photoDate);
@@ -704,8 +714,8 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
             atomic(receiptFile,receipt);
           });
         } catch (uploadError) {
-          // 站点可能已接收文件，但确认层的 DOM 按钮在 Playwright 等待中超时。
-          // 先用业务日期严格查询线上状态；只有“已上传>0 且未上传=0”才补记回执。
+          // 数字回执丢失不等于上传失败。按同一业务日期和福单编号逐张
+          // 对账，已上传的补记哈希回执，明确未上传的最多安全重试一次。
           let alreadyUploaded = [];
           let notUploaded = [];
           try {
@@ -714,33 +724,65 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
           } catch {
             throw uploadError;
           }
-          if (!(alreadyUploaded.length > 0 && notUploaded.length === 0)) throw uploadError;
           const reconciledAt = new Date().toISOString();
-          for (const file of manifest.files.blessing) {
-            const name = path.basename(file);
-            receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:reconciledAt,evidence:'post-timeout-online-reconciled'};
+          let onlineStates = resolveBlessingFileUploadStates(batches[index],alreadyUploaded,notUploaded);
+          if (onlineStates.conflicts.length) {
+            throw new Error(`上传结果无法逐编号对账：${onlineStates.conflicts.join('、')}。为防止漏传或重复上传，已停止。`);
           }
-          receipt.uploadedCount = manifest.counts.blessing;
-          receipt.onlineClosureCheckReady = true;
-          receipt.stage = 'post-timeout-online-reconciled';
+          for (const file of onlineStates.uploadedFiles) {
+            const name = path.basename(file);
+            receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:reconciledAt,evidence:'post-timeout-online-code-reconciled'};
+          }
+          receipt.uploadedCount = Object.keys(receipt.uploadedFiles).length;
+          receipt.onlineClosureCheckReady = notUploaded.length === 0;
+          receipt.stage = 'post-timeout-online-code-reconciled';
           receipt.reconciledAt = reconciledAt;
           receipt.onlineMatchedOrderCount = alreadyUploaded.length;
-          receipt.batches.push({
+          atomic(receiptFile,receipt);
+          if (onlineStates.pendingFiles.length) {
+            if (uploadError?.code !== 'BLESSING_UPLOAD_OUTCOME_UNCONFIRMED') throw uploadError;
+            log(`上传数字回执缺失；线上逐编号确认 ${onlineStates.uploadedFiles.length} 张已上传、${onlineStates.pendingFiles.length} 张未上传。仅对未上传文件安全重试一次。`);
+            const retryFiles = onlineStates.pendingFiles;
+            try {
+              const retryResult = await photoSite.uploadBlessingBatch(retryFiles,photoDate,(stage) => {
+                receipt.stage = `retry-${stage}`;
+                atomic(receiptFile,receipt);
+              });
+              if (Number(retryResult.uploadedCount) !== retryFiles.length) {
+                throw new Error(`重试批次上传回执 ${retryResult.uploadedCount} 与提交文件 ${retryFiles.length} 不一致。`);
+              }
+            } catch (retryError) {
+              // 第二次仍丢回执时只再做一次线上事实核对，绝不第三次提交。
+              try {
+                alreadyUploaded = await photoSite.queryUploadedOrders(photoDate,{productMode:'all'});
+                notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all'});
+              } catch {
+                throw retryError;
+              }
+              onlineStates = resolveBlessingFileUploadStates(retryFiles,alreadyUploaded,notUploaded);
+              if (onlineStates.conflicts.length || onlineStates.pendingFiles.length) throw retryError;
+            }
+            const retryCompletedAt = new Date().toISOString();
+            for (const file of retryFiles) {
+              const name = path.basename(file);
+              receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:retryCompletedAt,evidence:'safe-retry-verified'};
+            }
+          }
+          result = {
             uploadedCount:batches[index].length,
             month:photoDate.slice(0,7).replace('-',''),
             files:batches[index].map((file)=>path.basename(file)),
-            evidence:'post-timeout-online-uploaded-positive-and-not-uploaded-zero',
-            matchedOrderCount:alreadyUploaded.length,
-          });
-          atomic(receiptFile,receipt);
-          log(`上传确认层超时，但线上自动对账通过：福单已上传 ${alreadyUploaded.length} 条、未上传 0 条；已补记本批回执，不会重传。`);
-          break;
+            evidence:'online-code-reconciled-with-at-most-one-safe-retry',
+          };
+          log(`上传回执异常已由线上逐编号对账闭环：本批 ${batches[index].length} 张均确认上传，不会整批重传。`);
         }
         receipt.batches.push(result);
         if (Number(result.uploadedCount) !== batches[index].length) throw new Error(`本批上传回执 ${result.uploadedCount} 与提交文件 ${batches[index].length} 不一致。`);
         for (const file of batches[index]) {
           const name = path.basename(file);
-          receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:new Date().toISOString(),evidence:'batch-verified'};
+          if (receipt.uploadedFiles[name]?.sha256 !== manifest.fileHashes[name]) {
+            receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:new Date().toISOString(),evidence:'batch-verified'};
+          }
         }
         receipt.uploadedCount = manifest.files.blessing.filter((file) => receipt.uploadedFiles[path.basename(file)]?.sha256 === manifest.fileHashes[path.basename(file)]).length;
         receipt.stage = 'batch-verified';
