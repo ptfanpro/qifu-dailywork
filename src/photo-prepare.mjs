@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -7,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { recognizeLocalTextLine, verifyLocalOcrAssets } from './local-ocr.mjs';
 import { measureFlameStructure } from './scene-structure.mjs';
 import { getMachineLocalStateRoot } from './runtime-paths.mjs';
-import {decodeOcrSource,extractOcrCrop} from './ocr-image.mjs';
+import {decodeOcrSource,extractOcrCrop,writeImageFile} from './ocr-image.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
 
 const require = createRequire(import.meta.url);
@@ -1173,6 +1174,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   // 自动互换；直接使用会把横向微信照片的比例框裁到完全错误的位置。
   const metadata = autoOrientedMetadata(await sharpFile(file).metadata());
   const observations = [];
+  const windowsCodeDiagnostics = [];
   const windowsFallbackFiles = [];
   const paperEvidence = await detectPaperEvidence(file);
   const visualMetrics = await imageVisualMetrics(file);
@@ -1227,8 +1229,8 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   // 补拍的 597/598 使用另一种较低纸面构图。其短编号在原彩小框中由
   // Windows OCR 可稳定读取，但若先让 Tesseract遍历所有阈值，会在花边细线
   // 上反复分割并耗时约 30 秒。只有纸面明显下移或高度显著增大时才先跑这
-  // 两个小框；且只接受同时包含近似业务前缀、并唯一落入当天 PDF 编号集的
-  // 结果。其他构图继续走原有多裁框共识，不扩大误判面。
+  // 小框；必须至少两框读到相同完整业务码且没有其他完整码冲突，然后才
+  // 检查当天 PDF 编号集合。只有尾号或前缀残片不能定号。
   const lowerCodeBoxLikely = Number(paperEvidence.geometry?.top || 0) >= 0.48
     || Number(paperEvidence.geometry?.height || 0) >= 0.56;
   if (appRoot && lowerCodeBoxLikely) {
@@ -1237,23 +1239,23 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
       const extract = cropFromRatios(metadata, layout);
       if (!isUsableOcrExtract(extract)) continue;
       const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-windows-color.png`);
-      await sharpFile(file).rotate().extract(extract).png().toFile(diagnostic);
+      await writeImageFile(sharpFile(file).rotate().extract(extract).png(),diagnostic);
       strictBoxFiles.push(diagnostic);
     }
     const windows = readWindowsOcrTails(appRoot, strictBoxFiles, cropDir);
-    const matches = [...new Set([...windows.values()]
-      .flatMap((item) => parseLooseWindowsCodeCandidates(item.text, expectedPrefix, expectedNumbers))
-      .filter((number) => expectedNumbers.has(number)))];
-    if (matches.length === 1) {
+    const reading = summarizeWindowsCodeObservations(
+      [...windows].map(([crop,value])=>({crop,text:value.text})),expectedPrefix);
+    windowsCodeDiagnostics.push(...reading.observations);
+    if (reading.reliable && expectedNumbers.has(reading.number)) {
       return {
         file,
         reliable: true,
-        number: matches[0],
+        number: reading.number,
         paperGeometry: paperEvidence.geometry,
         visualMetrics,
         sceneMetrics,
-        evidence: { method: 'windows-ocr-strict-lower-code-box', votes: windows.size, prefixDistance: 0, maxConfidence: 100, layouts: ['current-temple-lower-code-box'] },
-        candidates: [{ number: matches[0], votes: windows.size, prefixDistance: 0, maxConfidence: 100, layouts: ['current-temple-lower-code-box'] }],
+        evidence: reading.evidence,
+        candidates: reading.candidates,
       };
     }
   }
@@ -1282,13 +1284,12 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
       || /^paper-relative-(?:code-only|landscape-code-(?:upper|lower)-right)$/.test(landscapeCodeLayout.name);
     if (strictVisibleLayout) {
       const colorDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-focused-color.png`);
-      await sharpFile(file)
+      await writeImageFile(sharpFile(file)
         .rotate()
         .extract(extract)
         .resize({ height: 420, withoutEnlargement: false })
         .extend({ top: 50, bottom: 50, left: 50, right: 50, background: 'white' })
-        .png()
-        .toFile(colorDiagnostic);
+        .png(),colorDiagnostic);
       const colorResult = await worker.recognize(colorDiagnostic);
       const colorParsed = parseOcrCandidates(colorResult.data.text, expectedPrefix, expectedNumbers)
         .filter((item) => item.prefixDistance <= 1.1);
@@ -1300,13 +1301,13 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
       });
       if (appRoot) {
         const windowsColorDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-windows-color.png`);
-        await sharpFile(file).rotate().extract(extract).png().toFile(windowsColorDiagnostic);
+        await writeImageFile(sharpFile(file).rotate().extract(extract).png(),windowsColorDiagnostic);
         windowsFallbackFiles.push(windowsColorDiagnostic);
       }
     }
     if (appRoot) {
       const windowsDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-windows-red.png`);
-      await sharpFile(file)
+      await writeImageFile(sharpFile(file)
         .rotate()
         .extract(extract)
         .resize({ width: 1600, withoutEnlargement: false })
@@ -1314,8 +1315,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
         .normalize()
         .sharpen({ sigma: 1 })
         .extend({ top: 48, bottom: 48, left: 48, right: 48, background: 'white' })
-        .png()
-        .toFile(windowsDiagnostic);
+        .png(),windowsDiagnostic);
       windowsFallbackFiles.push(windowsDiagnostic);
     }
     // 8 月 28 日微型编号带在红通道自然对比下清晰可读；旧阈值 65–85 会
@@ -1325,15 +1325,14 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     if (currentMicroBand) {
       for (const height of [300, 420]) {
         const redNaturalDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${landscapeCodeLayout.name}-focused-red-natural-${height}.png`);
-        await sharpFile(file)
+        await writeImageFile(sharpFile(file)
           .rotate()
           .extract(extract)
           .resize({ height, withoutEnlargement: false })
           .extractChannel(0)
           .normalize()
           .sharpen({ sigma: 0.7 })
-          .png()
-          .toFile(redNaturalDiagnostic);
+          .png(),redNaturalDiagnostic);
         const redNaturalResult = await worker.recognize(redNaturalDiagnostic);
         const redNaturalParsed = parseOcrCandidates(redNaturalResult.data.text, expectedPrefix, expectedNumbers)
           .filter((item) => item.prefixDistance <= 0.1);
@@ -1367,14 +1366,13 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
           .resize({ width: 1600, withoutEnlargement: false });
         pipeline = channel === 'red' ? pipeline.extractChannel(0) : pipeline.greyscale();
         if (channel === 'clahe') pipeline = pipeline.clahe({ width: 3, height: 3, maxSlope: 2 }).median(3);
-        await pipeline
+        await writeImageFile(pipeline
           .normalize()
           .threshold(threshold)
-          .png()
-          .toFile(diagnostic);
+          .png(),diagnostic);
         // 将肉眼最清晰的红通道 75 阈值紧裁图同时交给 Windows OCR。
         // Tesseract 在部分打印字体上会把清晰的短编码分割为空；Windows OCR
-        // 只允许返回当天 PDF 编号集合中的唯一值，因此不会扩大误匹配范围。
+        // 先验证完整码跨框无冲突，再核验 PDF 范围；范围本身不是识别证据。
         if (channel === 'red' && threshold === 75 && appRoot) windowsFallbackFiles.push(diagnostic);
         const result = await worker.recognize(diagnostic);
         const parsed = parseOcrCandidates(result.data.text, expectedPrefix, expectedNumbers)
@@ -1418,15 +1416,14 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     const extract = cropFromRatios(metadata, layout);
     if (!isUsableOcrExtract(extract)) continue;
     const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}.png`);
-    await sharpFile(file)
+    await writeImageFile(sharpFile(file)
       .rotate()
       .extract(extract)
       .resize({ width: 1200, withoutEnlargement: false })
       .greyscale()
       .normalize()
       .sharpen({ sigma: 1 })
-      .png()
-      .toFile(diagnostic);
+      .png(),diagnostic);
     // 保存两种最可能构图的窄框和宽框供 Windows OCR 兜底。旧版只保存前
     // 两个文件；一旦 geometry 把横版误排成竖版，真正的 temple 裁框虽已
     // 生成却永远不会进入 Windows OCR。
@@ -1488,7 +1485,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
         thresholdCrop = contrastChannel === null
           ? thresholdCrop.greyscale()
           : thresholdCrop.extractChannel(contrastChannel);
-        await thresholdCrop.normalize().threshold(threshold).png().toFile(diagnostic);
+        await writeImageFile(thresholdCrop.normalize().threshold(threshold).png(),diagnostic);
         if (layout.sparse) await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
         const result = await worker.recognize(diagnostic);
         if (layout.sparse) await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
@@ -1507,27 +1504,24 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   // PDF 唯一缺号和连续拍摄序列复核，不能直接成为“已确认”。
   const reliable = isReliableOcrConsensus(best, second, 20);
   // Windows 自带 OCR 对实拍中很小、偏灰的打印编号明显优于 Tesseract。
-  // 仅在本地 OCR 仍未可靠收敛时读取两个严格的编号裁框；结果与当天 PDF
-  // 唯一编号集相交后也必须只剩一个编号，才允许采用，正文不会进入该裁框。
+  // 仅在本地 OCR 仍未可靠收敛时读取编号裁框；完整码共识先于 PDF 范围
+  // 校验，不能因其他观察不在当前 PDF 中而把它从冲突集合删掉。
   if (!reliable && appRoot) {
     // Windows OCR 串行读取文件。旧版把每个布局的彩色、红通道、阈值图都
     // 塞进去，单图可达 14 个，30 秒超时前反而读不到最有效的微型原彩框。
     // 固定框均未形成共识时，再加入四个互相重叠的右侧窄带。它们只读取
     // 编号区域，并且必须由两个重叠窄带读出同一完整编码才会生效。
-    const rightBandFiles = new Set();
     for (const layout of OVERLAPPING_RIGHT_CODE_BANDS) {
       const extract = cropFromRatios(metadata, layout);
       if (!isUsableOcrExtract(extract)) continue;
       const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-windows-color.png`);
-      await sharpFile(file)
+      await writeImageFile(sharpFile(file)
         .rotate()
         .extract(extract)
         .resize({ height: 420, withoutEnlargement: false })
         .extend({ top: 36, bottom: 36, left: 36, right: 36, background: 'white' })
-        .png()
-        .toFile(diagnostic);
+        .png(),diagnostic);
       windowsFallbackFiles.push(diagnostic);
-      rightBandFiles.add(path.resolve(diagnostic));
     }
     // 只保留按实测有效性排序的 10 个严格编号裁框；其中四个固定名额留给
     // 重叠窄带，避免它们再次被旧固定框数量上限静默丢弃。
@@ -1553,67 +1547,26 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
       .sort((left, right) => windowsPriority(left) - windowsPriority(right))
       .slice(0, 10);
     const windows = readWindowsOcrTails(appRoot, orderedWindowsFiles, cropDir);
-    const preciseWindows = [...windows.entries()]
-      .filter(([fileName]) => !rightBandFiles.has(path.resolve(fileName)))
-      .map(([, value]) => value);
-    const matches = [...new Set(preciseWindows
-      .flatMap((item) => [
-        ...(item.numbers || []),
-        ...parseLooseWindowsCodeCandidates(item.text, expectedPrefix, expectedNumbers),
-      ])
-      .filter((number) => expectedNumbers.has(number)))];
-    if (matches.length === 1) {
+    // Do not turn a tail/year that happens to be in the PDF set into a full
+    // code. Read all returned crops before testing set membership: otherwise
+    // an out-of-range contradictory crop silently disappears.
+    const reading = summarizeWindowsCodeObservations(
+      [...windows].map(([crop,value])=>({crop,text:value.text})),expectedPrefix);
+    if (reading.reliable && expectedNumbers.has(reading.number)) {
       return {
         file,
         reliable: true,
-        number: matches[0],
+        number: reading.number,
         paperGeometry: paperEvidence.geometry,
         visualMetrics,
         sceneMetrics,
-        evidence: { method: 'windows-ocr-strict-code-crop', votes: 1, prefixDistance: 0.25, maxConfidence: 100, layouts: ['strict-visible-code-crop'] },
-        candidates: [{ number: matches[0], votes: windows.size, prefixDistance: 0.25, maxConfidence: 100, layouts: ['windows-ocr-strict-code-crop'] }],
+        evidence: reading.evidence,
+        candidates: reading.candidates,
       };
     }
-    const rightBandObservations = [];
-    for (const [fileName, value] of windows) {
-      if (!rightBandFiles.has(path.resolve(fileName))) continue;
-      const exactNumbers = [...new Set([
-        ...parseOcrCandidates(value.text, expectedPrefix, expectedNumbers)
-          .filter((item) => item.prefixDistance <= 0.1)
-          .map((item) => item.number),
-        ...parseLooseWindowsCodeCandidates(value.text, expectedPrefix, expectedNumbers),
-      ])];
-      for (const number of exactNumbers) rightBandObservations.push({
-        number,
-        prefixDistance: 0,
-        confidence: 100,
-        layout: 'windows-overlapping-right-code-band',
-        variant: path.basename(fileName),
-      });
-    }
-    observations.push(...rightBandObservations);
-    grouped = groupObservations(observations);
-    best = grouped[0] || null;
-    const bandSecond = grouped[1] || null;
-    if (isReliableOcrConsensus(best, bandSecond, 20)
-      && best.layouts.includes('windows-overlapping-right-code-band')) {
-      return {
-        file,
-        reliable: true,
-        number: best.number,
-        paperGeometry: paperEvidence.geometry,
-        visualMetrics,
-        sceneMetrics,
-        evidence: {
-          method: 'windows-ocr-overlapping-right-code-bands',
-          votes: best.votes,
-          prefixDistance: best.prefixDistance,
-          maxConfidence: best.maxConfidence,
-          layouts: best.layouts,
-        },
-        candidates: grouped.slice(0, 5),
-      };
-    }
+    // Keep raw code evidence separate from scored Tesseract votes. WinRT has
+    // no confidence score, and two WinRT crops are not two OCR engines.
+    windowsCodeDiagnostics.push(...reading.observations);
   }
   return {
     file,
@@ -1622,6 +1575,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     paperGeometry: paperEvidence.geometry,
     visualMetrics,
     sceneMetrics,
+    windowsCodeObservations: windowsCodeDiagnostics,
     evidence: best ? {
       ...(reliable ? { method: 'photo-code-multi-crop-consensus' } : {}),
       votes: best.votes, prefixDistance: best.prefixDistance, maxConfidence: best.maxConfidence, layouts: best.layouts,
@@ -2060,9 +2014,62 @@ async function photoShapeFingerprints(item) {
   return result;
 }
 
-// 已规范命名照片的复核只读取右侧编号窄带，不再重新跑整套 Tesseract
-// 纸面/场景识别。两个重叠窄带读出同一完整编号才算可靠；单票或互相冲突
-// 一律返回未决，由既有文件名和 PDF 索引继续兜底。
+// Source observations deliberately have no PDF expected-set parameter. In
+// particular, 32 and 33 from different crops must stay contradictory even if
+// the current PDF contains only 32. WinRT does not return confidence values.
+export function summarizeWindowsCodeObservations(readings,expectedPrefix) {
+  const observations=[],groups=new Map();
+  const prefix=String(expectedPrefix||'');
+  if(!/^\d{3,4}$/.test(prefix))return {reliable:false,number:null,observations,candidates:[],evidence:null};
+  let incompleteTailObserved=false;
+  for (const reading of readings) {
+    if (!reading?.crop) continue;
+    const crop=String(reading.crop);
+    // WinRT may transcribe the two printed hyphens as middle dots. Normalize
+    // separators only; do not join separated tail digits or complete a prefix.
+    const text=normalizeOcr(reading.text||'').replace(/[·•﹣－−]/g,'-').replace(/\s*-\s*/g,'-');
+    // This high-trust path requires both separators. Optional-separator OCR
+    // repair would turn "269-123" into the invented full code "269-1-23".
+    const matches=[...text.matchAll(new RegExp(`(?<![\\d-])${prefix}-1-(\\d{1,4})(?![\\d-])`,'g'))];
+    const numbers=[];
+    for(const match of matches) {
+      const after=text.slice(match.index+match[0].length);
+      if(/^\s+\d/.test(after)&&!new RegExp(`^\\s+${prefix}-1-\\d`).test(after)) {
+        incompleteTailObserved=true;
+        continue;
+      }
+      if(Number(match[1])>0)numbers.push(Number(match[1]));
+    }
+    for (const number of new Set(numbers)) {
+      if (!groups.has(number)) groups.set(number,new Set());
+      groups.get(number).add(crop);
+      observations.push({number,crop,engine:'windows-ocr',confidence:null,prefixDistance:0,fullCodeValidated:true});
+    }
+  }
+  const candidates=[...groups].sort(([a],[b])=>a-b).map(([number,crops])=>({
+    number,votes:crops.size,prefixDistance:0,maxConfidence:null,layouts:[...crops],
+  }));
+  const reliable=!incompleteTailObserved&&candidates.length===1&&candidates[0].votes>=2;
+  const number=reliable?candidates[0].number:null;
+  return {reliable,number,observations,candidates,evidence:reliable?{
+    method:'windows-ocr-full-code-multi-crop',votes:candidates[0].votes,prefixDistance:0,
+    maxConfidence:null,fullCodeValidated:true,independentEngines:['windows-ocr'],
+    layouts:candidates[0].layouts,observations,
+  }:null};
+}
+
+function hasWindowsFullCodeEvidence(item) {
+  const evidence=item?.evidence;
+  return evidence?.method==='windows-ocr-full-code-multi-crop'
+    && evidence.fullCodeValidated===true && Number.isInteger(item.number)
+    && evidence.observations?.length>=2
+    && evidence.observations.every(o=>o.engine==='windows-ocr'&&o.fullCodeValidated===true
+      &&o.prefixDistance===0&&o.number===item.number&&o.crop)
+    && new Set(evidence.observations.map(o=>o.crop)).size>=2;
+}
+
+// Existing names are comparison references, not OCR input. Preserve full-code
+// observations even when outside the current PDF set; never repair from tails.
 export async function auditExistingNumericPhotoCode({ appRoot, file, expectedPrefix, expectedNumbers, cropDir }) {
   fs.mkdirSync(cropDir, { recursive:true });
   const metadata = autoOrientedMetadata(await sharpFile(file).metadata());
@@ -2071,39 +2078,19 @@ export async function auditExistingNumericPhotoCode({ appRoot, file, expectedPre
     const extract = cropFromRatios(metadata, layout);
     if (!isUsableOcrExtract(extract)) continue;
     const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-existing-windows-color.png`);
-    await sharpFile(file)
+    await writeImageFile(sharpFile(file)
       .rotate()
       .extract(extract)
       .resize({ height:420, withoutEnlargement:false })
       .extend({ top:36, bottom:36, left:36, right:36, background:'white' })
-      .png()
-      .toFile(diagnostic);
+      .png(),diagnostic);
     bandFiles.push(diagnostic);
   }
   const windows = readWindowsOcrTails(appRoot,bandFiles,cropDir);
-  const observations = [];
-  for (const [fileName,value] of windows) {
-    const numbers = [...new Set([
-      ...parseOcrCandidates(value.text,expectedPrefix,expectedNumbers)
-        .filter((item)=>item.prefixDistance<=0.1)
-        .map((item)=>item.number),
-      ...parseLooseWindowsCodeCandidates(value.text,expectedPrefix,expectedNumbers),
-    ])];
-    for (const number of numbers) observations.push({
-      number,prefixDistance:0,confidence:100,
-      layout:'windows-overlapping-right-code-band',variant:path.basename(fileName),
-    });
-  }
-  const grouped = groupObservations(observations);
-  const best = grouped[0] || null;
-  const reliable = isReliableOcrConsensus(best,grouped[1] || null,20);
+  const reading=summarizeWindowsCodeObservations(
+    [...windows].map(([crop,value])=>({crop,text:value.text})),expectedPrefix);
   return {
-    file,reliable,number:reliable ? best.number : null,
-    evidence:best ? {
-      ...(reliable ? {method:'windows-ocr-overlapping-right-code-bands'} : {}),
-      votes:best.votes,prefixDistance:best.prefixDistance,maxConfidence:best.maxConfidence,layouts:best.layouts,
-    } : null,
-    candidates:grouped.slice(0,5),paperGeometry:{},visualMetrics:{},
+    file,...reading,ocrDiagnostics:windows.ocrDiagnostics,paperGeometry:{},visualMetrics:{},
   };
 }
 
@@ -2138,7 +2125,7 @@ export async function auditConflictingPhotoCode({worker,appRoot,item,expectedPre
     seen.add(key);
     const buffer=await extractOcrCrop(decoded,extract);
     const file=path.join(cropDir,`${crypto.randomUUID()}-independent-code.png`);
-    await sharp(buffer).resize({height:120}).withMetadata({density:300}).png().toFile(file);
+    await writeImageFile(sharp(buffer).resize({height:120}).withMetadata({density:300}).png(),file);
     files.push(file);
   }
   try {
@@ -2274,7 +2261,8 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       && item.observedOcrNumber !== claimedNumber
       && Number(observedEvidence?.votes || 0) >= 2
       && Number(observedEvidence?.prefixDistance ?? 99) <= 1
-      && Number(observedEvidence?.maxConfidence || 0) >= 20;
+      && (hasWindowsFullCodeEvidence({number:item.observedOcrNumber,evidence:observedEvidence})
+        || Number(observedEvidence?.maxConfidence || 0) >= 20);
     const strictVisibleCode = /^windows-ocr-strict-(?:lower-code-box|code-crop)$/.test(method)
       && Number(item?.evidence?.prefixDistance ?? 99) <= 0.25
       && Number(item?.evidence?.maxConfidence || 0) >= 80;
@@ -2287,7 +2275,7 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       && Number(item?.evidence?.prefixDistance ?? 99) <= 1;
     const forcePdfFingerprint = item?.evidence?.requiresPdfFingerprintRecheck === true;
     const visibleConsensus = !forcePdfFingerprint
-      && (hasIndependentFullCodeEvidence(item) || ((/(?:ocr|photo-code|targeted-landscape-code|global-one-to-one-remaining-pdf-candidate)/.test(method)
+      && (hasIndependentFullCodeEvidence(item) || hasWindowsFullCodeEvidence(item) || ((/(?:ocr|photo-code|targeted-landscape-code|global-one-to-one-remaining-pdf-candidate)/.test(method)
         || persistedDirectConsensus)
       && ((Number(item?.evidence?.votes || 0) >= 2
         && Number(item?.evidence?.maxConfidence || 0) >= 20) || strictVisibleCode)));
@@ -2452,37 +2440,67 @@ export function parseLooseWindowsCodeCandidates(text, expectedPrefix, expectedNu
   return [...candidates];
 }
 
-function readWindowsOcrTails(appRoot, files, workDir) {
-  if (process.platform !== 'win32' || !appRoot || !files.length) return new Map();
+export function readWindowsOcrTails(appRoot, files, workDir) {
+  const values = new Map();
+  values.ocrDiagnostics={status:'unavailable',inputCount:files.length,errorCount:0,emptyTextCount:0};
+  if (process.platform !== 'win32' || !appRoot || !files.length) return values;
   const script = path.join(appRoot, 'ui', 'Read-WindowsOcr.ps1');
-  if (!fs.existsSync(script)) return new Map();
-  const inputList = path.join(workDir, `windows-ocr-input-${crypto.randomUUID()}.txt`);
-  let result;
+  if (!fs.existsSync(script)) return values;
+  // Windows PowerShell/WinRT can reject long paths even after Node/libvips
+  // successfully wrote the crop. Use short, per-call local aliases only when
+  // needed, and map every result back to its original crop identity.
+  const bridgeDir=fs.mkdtempSync(path.join(os.tmpdir(),'qfw-'));
+  const inputList=path.join(bridgeDir,'input.txt'),originalByReaderPath=new Map();
   try {
-    fs.writeFileSync(inputList, files.join('\n'), 'utf8');
-    result = spawnSync('powershell.exe', [
+    const readerFiles=[];
+    for(const [index,file] of files.entries()) {
+      try {
+        const original=path.resolve(file);
+        let readerPath=original;
+        if(original.length>=240) {
+          readerPath=path.join(bridgeDir,`${index}${path.extname(original)}`);
+          fs.copyFileSync(original,readerPath);
+        }
+        originalByReaderPath.set(readerPath.toLowerCase(),original);
+        readerFiles.push(readerPath);
+      } catch {
+        // Alias preparation has the same per-file isolation as WinRT itself.
+        // A missing or inaccessible crop must not erase other observations.
+        values.ocrDiagnostics.errorCount++;
+      }
+    }
+    if(!readerFiles.length) {
+      values.ocrDiagnostics.status='input-failed';
+      return values;
+    }
+    fs.writeFileSync(inputList, readerFiles.join('\n'), 'utf8');
+    const result = spawnSync('powershell.exe', [
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-InputListPath', inputList,
     ], { encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024 });
+    if (result.error || result.status !== 0) {
+      values.ocrDiagnostics.status='process-failed';
+      return values;
+    }
+    values.ocrDiagnostics.status='completed';
+    for (const line of String(result.stdout || '').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const item = JSON.parse(line);
+        const original=item.path&&originalByReaderPath.get(path.resolve(item.path).toLowerCase());
+        const normalizedText=normalizeOcr(item.text);
+        if(item.status==='error')values.ocrDiagnostics.errorCount++;
+        else if(!normalizedText)values.ocrDiagnostics.emptyTextCount++;
+        if(original&&normalizedText) values.set(original,{
+          number:parseWindowsOcrTail(item.text),numbers:parseWindowsOcrNumbers(item.text),text:normalizedText,
+        });
+      } catch {values.ocrDiagnostics.errorCount++;}
+    }
+    return values;
   } finally {
-    fs.rmSync(inputList, { force: true });
+    // Only this call's freshly created bridge directory is owned here. Never
+    // remove caller crops, work directories, or original business photos.
+    fs.rmSync(bridgeDir, { recursive:true, force: true });
   }
-  if (result.error || result.status !== 0) return new Map();
-  const values = new Map();
-  for (const line of String(result.stdout || '').split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    try {
-      const item = JSON.parse(line);
-      const number = parseWindowsOcrTail(item.text);
-      const numbers = parseWindowsOcrNumbers(item.text);
-      const normalizedText = normalizeOcr(item.text);
-      // “6R · 57 7”这类结果没有连续三位数字，旧版在进入宽松但受 PDF
-      // 集合约束的解析器之前就把整条 OCR 结果丢弃，导致后面的安全还原逻辑
-      // 永远没有机会运行。保留非空的严格编号裁框文本；候选是否可采信仍由
-      // parseLooseWindowsCodeCandidates 和当天 PDF 唯一编号集合决定。
-      if (item.path && normalizedText) values.set(path.resolve(item.path), { number, numbers, text: normalizedText });
-    } catch {}
-  }
-  return values;
 }
 
 function pdfSeriesNumber(file) {
@@ -2557,7 +2575,7 @@ export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, a
           .normalize()
           .sharpen({ sigma: 1 });
         if (layout.threshold) crop = crop.threshold(layout.threshold);
-        await crop.png().toFile(diagnostic);
+        await writeImageFile(crop.png(),diagnostic);
         if (layout.name === (portrait ? 'portrait-wide' : 'landscape-wide')) windowsFallbackFile = diagnostic;
         if (layout.sparse) await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
         const result = await worker.recognize(diagnostic);
@@ -2774,6 +2792,7 @@ function hasIndependentFullCodeEvidence(item) {
 export function hasDirectVisibleCodeEvidence(item) {
   if (!item?.reliable || !Number.isInteger(item.number)) return false;
   if(hasIndependentFullCodeEvidence(item))return true;
+  if(hasWindowsFullCodeEvidence(item))return true;
   const method = String(item?.evidence?.method || '');
   if (/^(?:paddleocr-onnx-adaptive-right-line-consensus|targeted-landscape-code-threshold-consensus|photo-code-multi-crop-consensus|windows-ocr-(?:strict-(?:lower-code-box|code-crop)|overlapping-right-code-bands))$/.test(method)) return true;
   // Existing numeric files are not trusted merely because of their filename;
@@ -3317,6 +3336,7 @@ export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, occu
     let repaired = false;
     for (const index of indices) {
       const item = recognized[index];
+      if (hasWindowsFullCodeEvidence(item)) continue;
       if (!item.paperGeometry?.usablePaper || isLikelyScene(item)) continue;
       const proposals = [captureSequenceProposal(recognized, index, 1), captureSequenceProposal(recognized, index, -1)]
         .filter(Number.isInteger);
@@ -3363,6 +3383,9 @@ export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, occu
     }).sort((a, b) => b.strength - a.strength);
     const [strong, weak] = ranked;
     if (!strong || !weak || strong.strength - weak.strength < 8) continue;
+    // Unknown confidence is not low confidence. A recorded full-code reading
+    // cannot be moved to the remaining tail merely to make the set complete.
+    if (hasWindowsFullCodeEvidence(weak.item)) continue;
     const alternatives = [...expectedNumbers]
       .filter((number) => !usedNumbers.has(number))
       .filter((number) => {
@@ -4140,11 +4163,10 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
 async function makeProcessedJpeg(source, destination) {
   let quality = 90;
   for (;;) {
-    await sharpFile(source)
+    await writeImageFile(sharpFile(source)
       .rotate()
       .resize(1800, 1350, { fit: 'cover', position: 'centre' })
-      .jpeg({ quality, chromaSubsampling: '4:4:4', mozjpeg: true })
-      .toFile(destination);
+      .jpeg({ quality, chromaSubsampling: '4:4:4', mozjpeg: true }),destination);
     const bytes = fs.statSync(destination).size;
     if (bytes <= MAX_IMAGE_BYTES) return { bytes, quality };
     quality -= 2;

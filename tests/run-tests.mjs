@@ -21,6 +21,8 @@ import './ocr-crop-regression.mjs';
 import './code-coverage-regression.mjs';
 import './annual-contract-regression.mjs';
 import './recognition-provenance-regression.mjs';
+import './windows-code-evidence-regression.mjs';
+import './ocr-long-path-regression.mjs';
 import './photo-input-binding-regression.mjs';
 import './experiments/text-regions-regression.mjs';
 import './audit-paths-regression.mjs';

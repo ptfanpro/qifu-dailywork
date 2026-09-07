@@ -23,5 +23,7 @@ $root = Split-Path -Parent $PSScriptRoot
 & (Join-Path $root 'tests\ui-state-tests.ps1')
 & $runtime.Node (Join-Path $root 'tests\run-tests.mjs')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $runtime.Node (Join-Path $root 'tests\windows-ocr-long-path-integration.mjs')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $runtime.Node (Join-Path $root 'tests\list-query-browser.mjs')
 exit $LASTEXITCODE

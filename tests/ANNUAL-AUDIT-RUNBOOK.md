@@ -20,3 +20,7 @@ node tests/audit-status.mjs PRIVATE_OUTPUT
 历史文件名只是参考答案；任何冲突必须对照打印编号、PDF 或人工可见证据，不可直接按旧文件名改回。已经命中人工哈希证据的照片应单独统计，不能算作自动识别成功。
 
 普通回归：`node tests/run-tests.mjs`。Windows 实测：`powershell.exe -NoProfile -File ui/Run-Tests.ps1` 与 `node tests/windows-ocr-batch-regression.mjs`。DPAPI 被测试沙箱跳过时应标为跳过，并在经授权的桌面用户上下文补测。
+
+UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读取超过 300 字符路径的合成图，并验证中间文件缺失不影响其他文件。只创建、清理本次测试自己的 TEMP 子目录。
+
+`node tests/windows-code-real-replay.mjs PRIVATE_OUTPUT PHOTO_SHA256 [...]` 只对指定库存照片探测严格 WinRT 窄框。SHA 只选择输入，不提供目标答案；报告另存为唯一轮次，不覆盖失败结果。`0` 个完整码与引擎异常分别统计，此专项不能代替整个产品流程或跨修订归属验收。
