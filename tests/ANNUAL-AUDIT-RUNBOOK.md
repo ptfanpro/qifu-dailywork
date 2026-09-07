@@ -26,3 +26,9 @@ UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读
 `node tests/windows-code-real-replay.mjs PRIVATE_OUTPUT PHOTO_SHA256 [...]` 只对指定库存照片探测严格 WinRT 窄框。SHA 只选择输入，不提供目标答案；报告另存为唯一轮次，不覆盖失败结果。`0` 个完整码与引擎异常分别统计，此专项不能代替整个产品流程或跨修订归属验收。
 
 `node tests/experiments/inspect-detected-code.mjs PRIVATE_OUTPUT DETECTION_ROUND PHOTO_SHA256 [...]` 只按已保存的检测框生成私有查看副本，并核验源哈希未变化。它不重新 OCR、不改名、不向引擎提供参考编号。几十像素的小编号即使放大也不能当作恢复了原始笔画；应同时核对完整 PDF 正文，保留无法确认的类别。某些直接 JPEG 预览异常可用同一解码器输出的缩放 PNG 交叉检查，不能仅凭预览异常认定原文件损坏。
+
+`node tests/experiments/body-text-probe.mjs PRIVATE_OUTPUT [--chinese] PHOTO_SHA256 [...]` 是独立正文证据试验，绝不生成改名/上传计划。默认以 Windows OCR 三个宽视图比较当日所有 PDF 文字页；`--chinese` 另用固定中文行识别模型及文字检测器。两个中文裁框是同引擎不同视图，不是双引擎。报告只有计数、PDF 内容哈希与页身份，不含客户正文。数字码不进入正文匹配，共用模板不算页面特有证据；最高计数、单个独有词或同名客户也不能直接确认为订单归属。
+
+中文试验模型仅位于 `PRIVATE_OUTPUT/models/`：检测模型仍为上文固定版本；识别模型 `ch_PP-OCRv4_rec_mobile.onnx` 使用 RapidAI v3.9.2 清单中的 SHA-256 `48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b`。脚本不下载模型，拒绝哈希不一致；使用模型内嵌 6,623 项字典，不能用现用英文 436 项字典。`node tests/experiments/chinese-reader-smoke.mjs PRIVATE_OUTPUT/models` 是实际模型合成中文烟雾测试，缺模型时失败，不伪装跳过为成功。
+
+`audit-status` 的 `bodyProbeRounds` 另列中文正文试验的证据可用性，不混入产品识别确认数。汇总只接受完成报告、相同源码/模型指纹及未变原件；缺少视图、读取异常、截断和 PDF 文字层不全分别标记。`stable-diagnostic-candidate` 只是同引擎两个边距视图的首选一致；即使只有一个特有片段也可能出现这一状态，所以绝不能当自动绑定或发布门槛。正文重复、旧页拆成多页以及背景文字仍需独立反例验证。

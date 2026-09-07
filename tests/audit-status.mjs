@@ -3,10 +3,33 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {requirePrivateAuditRoot} from './audit-paths.mjs';
+import {summarizeBodyProbeReports} from './experiments/body-probe-summary.mjs';
 const root=requirePrivateAuditRoot(process.argv[2]);
 const inventory=JSON.parse(fs.readFileSync(path.join(root,'inventory.json')));
-const rounds=[];
+const rounds=[],bodyProbeRounds=[];
 for(const entry of fs.readdirSync(root,{withFileTypes:true})) {
+  if(entry.isDirectory()&&/^body-text-probe-[A-Za-z0-9]+$/.test(entry.name)) {
+    const dir=path.join(root,entry.name),completion=path.join(dir,'summary.json');
+    if(!fs.existsSync(completion)) {
+      bodyProbeRounds.push({round:entry.name,status:'INCOMPLETE_PROBE_NOT_SCORED'});
+    } else try {
+      const complete=JSON.parse(fs.readFileSync(completion));
+      const reports=fs.readdirSync(dir,{withFileTypes:true})
+        .filter(item=>item.isDirectory()&&/^[a-f0-9]{12}$/.test(item.name))
+        .map(item=>JSON.parse(fs.readFileSync(path.join(dir,item.name,'report.json'))));
+      if(reports.length!==complete.summaries?.length||reports.some(r=>r.sourceFingerprint!==complete.sourceFingerprint))throw Error('Incomplete probe');
+      if(reports.every(r=>r.modelSha256===null||r.modelSha256===undefined)) {
+        bodyProbeRounds.push({round:entry.name,status:'WINDOWS_ONLY_PROBE_NOT_SCORED',photos:reports.length});
+      } else {
+        const summary=summarizeBodyProbeReports(reports);
+        bodyProbeRounds.push({round:entry.name,status:summary.status,sourceFingerprint:summary.sourceFingerprint,
+          modelSha256:summary.modelSha256,photos:summary.photos,counts:summary.counts,note:summary.note});
+      }
+    } catch {
+      // Never echo parse/model errors that might include private paths or text.
+      bodyProbeRounds.push({round:entry.name,status:'INVALID_PROBE_NOT_SCORED'});
+    }
+  }
   if(!entry.isDirectory()||! /^(?:replay|structure|pdf-index|detection)-[a-f\d]+$/.test(entry.name))continue;
   const round=path.join(root,entry.name),reports=[];
   let checkpointPhotos=0;
@@ -29,6 +52,6 @@ for(const entry of fs.readdirSync(root,{withFileTypes:true})) {
     note:'Reference labels are historical filenames, not independent ground truth. Coverage is not acceptance.'});
 }
 const status={generatedAt:new Date().toISOString(),status:'INCOMPLETE_NOT_RELEASE_ACCEPTANCE',
-  inventory:{days:inventory.days.length,photos:inventory.days.reduce((n,d)=>n+d.photos.length,0),pdfs:inventory.days.reduce((n,d)=>n+d.pdfs.length,0)},rounds};
+  inventory:{days:inventory.days.length,photos:inventory.days.reduce((n,d)=>n+d.photos.length,0),pdfs:inventory.days.reduce((n,d)=>n+d.pdfs.length,0)},rounds,bodyProbeRounds};
 const output=path.join(root,'current-status.json');fs.writeFileSync(output+'.tmp',JSON.stringify(status,null,2));fs.renameSync(output+'.tmp',output);
 console.log(JSON.stringify(status));
