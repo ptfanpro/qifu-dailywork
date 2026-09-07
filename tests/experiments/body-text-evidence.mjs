@@ -26,7 +26,12 @@ export function rankBodyTextEvidence(photoText, pages) {
     const id = `${page.pdfSha256}:${page.pageNumber}`;
     if (ids.has(id)) throw Error('Duplicate PDF page identity');
     ids.add(id);
-    return {id, pdfSha256: page.pdfSha256, pageNumber: page.pageNumber, grams: bodyTextGrams(page.text)};
+    if (page.supplementalText !== undefined && (!Array.isArray(page.supplementalText)
+      || page.supplementalText.some(text => typeof text !== 'string'))) throw Error('Invalid supplemental body text');
+    // Union sources rather than concatenating them. A phrase split between a
+    // text layer and an OCR view is not an observed phrase on the actual page.
+    const grams = new Set([page.text || '', ...(page.supplementalText || [])].flatMap(text => [...bodyTextGrams(text)]));
+    return {id, pdfSha256: page.pdfSha256, pageNumber: page.pageNumber, grams};
   });
   const frequency = new Map();
   for (const page of records) for (const gram of page.grams) frequency.set(gram, (frequency.get(gram) || 0) + 1);

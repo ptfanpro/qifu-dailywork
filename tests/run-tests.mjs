@@ -31,6 +31,7 @@ import './experiments/body-text-evidence-regression.mjs';
 import './experiments/chinese-reader-regression.mjs';
 import './experiments/body-probe-summary-regression.mjs';
 import './experiments/vertical-body-regions-regression.mjs';
+import './experiments/pdf-visual-body-evidence-regression.mjs';
 import './audit-paths-regression.mjs';
 import './pdf-line-normalization-regression.mjs';
 import './pdf-index-integration.mjs';

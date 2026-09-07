@@ -15,6 +15,16 @@ assert.equal(rankBodyTextEvidence('祈福共用模板', pages).topUniqueTieCount
 assert.equal(rankBodyTextEvidence('', pages).topUniqueTieCount, 2);
 assert.equal(rankBodyTextEvidence('春山测试甲乙', [pages[0], {...pages[0], pageNumber: 2}]).topUniqueTieCount, 2);
 assert.equal(rankBodyTextEvidence('春山测试甲乙', [{...pages[0], text: ''}]).textBearingPages, 0);
+const mixedLayerPages = [
+  {pdfSha256, pageNumber: 1, text: '共用模板测试。春山测试甲乙'},
+  {pdfSha256, pageNumber: 2, text: '秋水测试丙丁', supplementalText: ['共用模板测试']},
+];
+assert.equal(rankBodyTextEvidence('共用模板测试', mixedLayerPages).ranked[0].uniqueMatchedGrams, 0,
+  'Visible template text absent from one PDF text layer is not unique to another page');
+assert.equal(rankBodyTextEvidence('秋水测试丙丁。共用模板测试', mixedLayerPages).ranked[0].pageNumber, 2);
+assert.equal(rankBodyTextEvidence('春山测试', [{pdfSha256, pageNumber: 1, text: '春山', supplementalText: ['测试']}]).ranked[0].matchedGrams, 0,
+  'Do not invent body phrases by concatenating separate extraction sources');
+assert.throws(() => rankBodyTextEvidence('', [{...pages[0], supplementalText: 'invalid'}]), /supplemental/i);
 assert.equal(bodyTextGrams('春山123测试').size, 0, 'Do not create matches across numeric boundaries');
 assert.deepEqual(bodyTextGrams('春 山 测 试'), bodyTextGrams('春山测试'));
 assert.throws(() => rankBodyTextEvidence('', [pages[0], pages[0]]), /Duplicate/);
