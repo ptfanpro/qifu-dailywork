@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {componentRegions} from './text-regions.mjs';
+const map=new Float32Array(64*32);
+for(let y=5;y<10;y++)for(let x=10;x<30;x++)map[y*64+x]=.9;
+for(let y=20;y<25;y++)for(let x=40;x<60;x++)map[y*64+x]=.4;
+const boxes=componentRegions(map,64,32);
+assert.equal(boxes.length,1);
+assert.deepEqual([boxes[0].left,boxes[0].top,boxes[0].width,boxes[0].height],[10,5,20,5]);
+assert.equal(componentRegions(new Float32Array(64*32),64,32).length,0);
+assert.throws(()=>componentRegions(map,1,1));
+console.log('Experimental text region components PASS');

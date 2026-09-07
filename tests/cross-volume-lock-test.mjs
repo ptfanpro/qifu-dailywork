@@ -3,21 +3,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { applyPhotoPreparation } from '../src/photo-prepare.mjs';
+import {createPhotoInputBinding} from '../src/recognition-provenance.mjs';
 
 const require = createRequire(import.meta.url);
 const sharp = require('sharp');
 
-const sourceRoot = path.resolve('D:\\CodexPrayerCrossDeviceLockTest-v9524');
-const workRoot = path.resolve(process.argv[2]);
-const allowedSource = path.parse(sourceRoot).root.toLowerCase() === 'd:\\';
-const allowedWork = workRoot.startsWith(path.resolve(process.cwd(), '..'));
-assert.equal(allowedSource, true);
-assert.equal(allowedWork, true);
-
-fs.rmSync(sourceRoot, { recursive: true, force: true });
-fs.rmSync(workRoot, { recursive: true, force: true });
-fs.mkdirSync(sourceRoot, { recursive: true });
-fs.mkdirSync(workRoot, { recursive: true });
+const [sourceParent,workParent]=process.argv.slice(2);
+if(!sourceParent||!workParent)throw Error('Provide two existing test parent directories on different volumes');
+assert.notEqual(path.parse(path.resolve(sourceParent)).root.toLowerCase(),path.parse(path.resolve(workParent)).root.toLowerCase());
+// Never delete a supplied directory. Only fresh test-owned children are used.
+const sourceRoot=fs.mkdtempSync(path.join(path.resolve(sourceParent),'qifu-cross-source-'));
+const workRoot=fs.mkdtempSync(path.join(path.resolve(workParent),'qifu-cross-work-'));
 
 const source = path.join(sourceRoot, '微信原图.jpg');
 await sharp({ create: { width: 2400, height: 1800, channels: 3, background: '#b93344' } })
@@ -42,6 +38,7 @@ try {
     issues: [],
     businessDate: '2026-08-13',
     photoDir: sourceRoot,
+    photoInputBinding:createPhotoInputBinding(sourceRoot,[source]),
     assignments: [{ source, targetName: '284.jpg', kind: 'blessing', evidence: { method: 'cross-volume-lock-test' } }],
   }, workRoot);
   assert.equal(simulatedLocks, 6);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {localOcrCodeLayoutsForPhoto,hasAdjacentLocalOcrConsensus,independentCodeConsensus,recheckReliablePhotoClaimsWithPdf} from '../src/photo-prepare.mjs';
+import {localOcrCodeLayoutsForPhoto,hasAdjacentLocalOcrConsensus,independentCodeConsensus,recheckReliablePhotoClaimsWithPdf,hasDirectVisibleCodeEvidence,isLikelyScene} from '../src/photo-prepare.mjs';
 const layouts=localOcrCodeLayoutsForPhoto({});
 const preferred=localOcrCodeLayoutsForPhoto({},['local-ocr-grid4-line-30','not-a-valid-crop']);
 assert.equal(preferred[0].name,'local-ocr-grid4-line-30');
@@ -22,4 +22,11 @@ assert.equal(independentCodeConsensus(correct.map(({prefixDistance,...x})=>x)),n
 const verified={file:'synthetic.jpg',number:68,reliable:true,evidence:{method:'independent-ocr-engines-full-code-consensus',votes:2,maxConfidence:88,prefixDistance:0,independentEngines:['paddle','tesseract']}};
 const check=await recheckReliablePhotoClaimsWithPdf([verified],[{number:68,_localShapeFingerprint:[1]}]);
 assert.equal(check.confirmed,1,'independent full-code evidence must survive later PDF index recheck');
+const candleBackground={...verified,evidence:{...verified.evidence,votes:1},
+  paperGeometry:{usablePaper:false,rectangularPaper:false},visualMetrics:{edgeDensity:.08},
+  sceneMetrics:{darkRatio:.5,warmBrightRatio:.14,luminance:70,flameStructure:{distributed:true}}};
+assert.equal(hasDirectVisibleCodeEvidence(candleBackground),true);
+assert.equal(isLikelyScene(candleBackground),false,'real two-engine code evidence must veto background lamp heuristics');
+assert.equal((await recheckReliablePhotoClaimsWithPdf([candleBackground],[{number:68,_localShapeFingerprint:[1]}])).confirmed,1,'a verified replacement must not inherit the previous proposal\'s weak vote count');
+assert.equal(hasDirectVisibleCodeEvidence({...candleBackground,evidence:{...candleBackground.evidence,independentEngines:['paddle','paddle']}}),false);
 console.log('Two-dimensional code coverage and independent-engine conflict tests PASS');

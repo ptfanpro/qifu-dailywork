@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {normalizePdfCodeLine} from '../src/photo-prepare.mjs';
+const require=createRequire(import.meta.url),sharp=require('sharp');
+const line=Buffer.from('<svg width="1400" height="280" xmlns="http://www.w3.org/2000/svg"><rect width="1400" height="280" fill="white"/><text x="350" y="250" font-family="Arial" font-size="110" fill="black">261-1-118</text></svg>');
+const input=await sharp(line).png().toBuffer();
+const normalized=await normalizePdfCodeLine(input),meta=await sharp(normalized).metadata();
+assert.ok(meta.width<1000&&meta.height<180,'background must not dominate the recognizer input');
+const blackPixels=async bytes=>{const {data,info}=await sharp(bytes).removeAlpha().raw().toBuffer({resolveWithObject:true});let count=0;for(let i=0;i<data.length;i+=info.channels)if(data[i]<100)count++;return count;};
+assert.equal(await blackPixels(normalized),await blackPixels(input),'normalization must not clip or invent any dark glyph pixels');
+console.log('PDF code-line whitespace normalization PASS');

@@ -8,6 +8,7 @@ import { recognizeLocalTextLine, verifyLocalOcrAssets } from './local-ocr.mjs';
 import { measureFlameStructure } from './scene-structure.mjs';
 import { getMachineLocalStateRoot } from './runtime-paths.mjs';
 import {decodeOcrSource,extractOcrCrop} from './ocr-image.mjs';
+import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
 
 const require = createRequire(import.meta.url);
 const sharp = require('sharp');
@@ -651,7 +652,10 @@ function candidateNumberVariants(text) {
 function parseOcrCandidates(text, expectedPrefix, expectedNumbers = null) {
   const normalized = normalizeOcr(text);
   const found = [];
-  const fullPattern = /(\d{2,3})-?1-?(\d{1,4})(?!\d)/g;
+  // YY + unpadded month is 3 OR 4 digits; never match a numeric suffix.
+  const fullPattern = /(?<!\d)(\d{2,4})-?1-?(\d{1,4})(?!\d)/g;
+  const prefixDigits = String(expectedPrefix).replace(/[^0-9]/g,'');
+  const exactPattern = new RegExp(`(?<!\\d)(${prefixDigits})-?1-?(\\d{1,4})(?!\\d)`,'g');
   // 先在保留空格边界的文本上匹配，防止把编号尾号与下一行日期开头粘连
   // （例如 "268-1-333 1--2027" 被压成 "268-1-3331--2027"）。
   // 只有分隔符内部存在空格时才做轻量归一；完全压紧文本作为最后回退并加罚分。
@@ -664,7 +668,10 @@ function parseOcrCandidates(text, expectedPrefix, expectedNumbers = null) {
   for (const form of forms) {
     if (seenForms.has(form.value)) continue;
     seenForms.add(form.value);
-    for (const match of form.value.matchAll(fullPattern)) {
+    const exactMatches = [...form.value.matchAll(exactPattern)];
+    // Without separators, greedy 4-digit parsing would consume the middle 1
+    // in a 3-digit month prefix. Try the explicit business prefix first.
+    for (const match of exactMatches.length ? exactMatches : form.value.matchAll(fullPattern)) {
       for (const variant of candidateNumberVariants(match[2])) {
         const number = Number(variant.value);
         if (!Number.isInteger(number) || number <= 0 || (expectedNumbers && !expectedNumbers.has(number))) continue;
@@ -778,16 +785,54 @@ function rawNumberCost(rawNumber, expectedNumber) {
   return Math.min(...rawNumberAlternatives(rawNumber).map((item) => item.penalty + editDistance(item.number, expectedNumber)));
 }
 
+// Page-local full codes outrank a sequence inferred from other pages. Later
+// export fragments may contain genuine gaps; keep the original observations.
+function supportedPdfObservation(item,minimumConfidence=50) {
+  // WinRT supplies no numeric confidence. Preserve that fact instead of
+  // manufacturing 100% confidence for any number found in its text.
+  if(item.engine==='windows-ocr'&&item.fullCodeValidated===true&&Number(item.prefixDistance)===0)return true;
+  return Number(item.confidence||0)>=minimumConfidence;
+}
+
+export function confirmedPdfPageNumber(page) {
+  const groups = new Map();
+  for (const item of page.ocrObservations || []) {
+    if (!Number.isInteger(item.number) || item.number <= 0
+      || Number(item.prefixDistance ?? 99) > 0.1 || !supportedPdfObservation(item)) continue;
+    if (!groups.has(item.number)) groups.set(item.number, new Set());
+    if (item.layout) groups.get(item.number).add(item.layout);
+  }
+  if (groups.size !== 1) return null;
+  const [[number, views]] = groups;
+  return views.size >= 2 ? number : null;
+}
+
+function respectsPdfPageEvidence(page, number) {
+  const confirmed = confirmedPdfPageNumber(page);
+  return confirmed === null || confirmed === number;
+}
+
+function pdfSequenceRaw(page) {
+  // Legacy standalone diagnostics may supply rawNumber alone. Actual OCR
+  // pages always carry observations: a date/tail without a business prefix
+  // must not become a sequence anchor just because it is an integer.
+  if (Array.isArray(page.ocrObservations) && !page.ocrObservations.some(item =>
+    item.number === page.rawNumber && Number(item.prefixDistance ?? 99) <= 1
+      && supportedPdfObservation(item,20))) return null;
+  return page.rawNumber;
+}
+
 function bestSequentialStart(group) {
   const starts = new Set();
   for (const page of group) {
-    for (const alternative of rawNumberAlternatives(page.rawNumber)) {
+    for (const alternative of rawNumberAlternatives(pdfSequenceRaw(page))) {
       const start = alternative.number - (page.pageNumber - 1);
       if (start > 0 && start <= 9999) starts.add(start);
     }
   }
-  const scored = [...starts].map((start) => {
-    const costs = group.map((page) => rawNumberCost(page.rawNumber, start + page.pageNumber - 1));
+  const scored = [...starts].filter(start => group.every(page =>
+    respectsPdfPageEvidence(page, start + page.pageNumber - 1))).map((start) => {
+    const costs = group.map((page) => rawNumberCost(pdfSequenceRaw(page), start + page.pageNumber - 1));
     return {
       start,
       total: costs.reduce((sum, value) => sum + value, 0),
@@ -800,13 +845,20 @@ function bestSequentialStart(group) {
   if (!best) return null;
   const margin = second ? second.total - best.total : Infinity;
   const accepted = group.length === 1
-    ? best.total <= 0.7 && margin >= 0.5 && group[0]?.rawNumber <= 999
+    ? best.total <= 0.7 && margin >= 0.5 && pdfSequenceRaw(group[0]) <= 999
     : best.near >= Math.ceil(group.length * 0.7) && best.total / group.length <= 1.1 && margin >= 0.5;
-  return accepted ? { ...best, margin } : null;
+  // An unread interior page needs two observed endpoints in THIS PDF.
+  const fillsUnread = group.some(page => !Number.isInteger(pdfSequenceRaw(page)));
+  const bounded = group.length >= 3
+    && pdfSequenceRaw(group[0]) === best.start + group[0].pageNumber - 1
+    && pdfSequenceRaw(group.at(-1)) === best.start + group.at(-1).pageNumber - 1;
+  return accepted && (!fillsUnread || bounded) ? { ...best, margin } : null;
 }
 
 export function repairSinglePdfOutlier(pages) {
   if (pages.length < 5 || pages.some((page) => !Number.isInteger(page.number))) return false;
+  const existing=pages.map(page=>page.number);
+  if(new Set(existing).size===existing.length&&Math.max(...existing)-Math.min(...existing)+1===existing.length)return false;
   const repairs = [];
   for (let outlierIndex = 0; outlierIndex < pages.length; outlierIndex += 1) {
     const others = pages.filter((_, index) => index !== outlierIndex).map((page) => page.number);
@@ -821,6 +873,7 @@ export function repairSinglePdfOutlier(pages) {
       if (missing.length !== 1) continue;
       const current = pages[outlierIndex].number;
       const replacement = missing[0];
+      if (!respectsPdfPageEvidence(pages[outlierIndex], replacement)) continue;
       // 仅修复“其余页面形成唯一稠密区间 + 单个 OCR 字符混淆”的离群点。
       // 跨导出片段的真实编号缺口不会满足这个条件，不能被凭空补造。
       if (current >= start && current <= end) continue;
@@ -870,6 +923,7 @@ export function repairSingleAdjacentDuplicatePdfCode(pages) {
     if (page.number !== duplicate) continue;
     for (const candidate of [ordered[index - 1]?.number + 1, ordered[index + 1]?.number - 1]) {
       if (!Number.isInteger(candidate) || candidate <= 0 || counts.has(candidate)) continue;
+      if (!respectsPdfPageEvidence(page, candidate)) continue;
       const values = ordered.map((item) => item === page ? candidate : item.number);
       if (new Set(values).size !== pages.length) continue;
       if (Math.max(...values) - Math.min(...values) + 1 !== pages.length) continue;
@@ -889,6 +943,12 @@ export function repairSingleAdjacentDuplicatePdfCode(pages) {
 export function inferSequentialPdfCodes(pages) {
   const byPdf = new Map();
   for (const page of pages) {
+    const confirmed = confirmedPdfPageNumber(page);
+    if (confirmed !== null) {
+      page.number = confirmed;
+      page.codeEvidence = 'pdf-full-code-multi-view';
+      delete page.sequenceScore;
+    }
     if (!byPdf.has(page.pdf)) byPdf.set(page.pdf, []);
     byPdf.get(page.pdf).push(page);
   }
@@ -897,6 +957,7 @@ export function inferSequentialPdfCodes(pages) {
     const best = bestSequentialStart(group);
     if (best) {
       for (const page of group) {
+        if (confirmedPdfPageNumber(page) !== null) continue;
         page.number = best.start + (page.pageNumber - 1);
         page.codeEvidence = page.rawNumber === page.number ? 'pdf-ocr' : 'pdf-page-sequence';
         page.sequenceScore = { cost: rawNumberCost(page.rawNumber, page.number), groupTotal: best.total, margin: best.margin };
@@ -913,7 +974,7 @@ export function inferSequentialPdfCodes(pages) {
   if (known.length) {
     const knownMin = Math.min(...known);
     const knownMax = Math.max(...known);
-    for (const page of pages.filter((item) => !Number.isInteger(item.number) && Number.isInteger(item.rawNumber))) {
+    for (const page of pages.filter((item) => !Number.isInteger(item.number) && Number.isInteger(pdfSequenceRaw(item)))) {
       const candidates = rawNumberAlternatives(page.rawNumber)
         .filter((item) => Math.max(knownMax, item.number) - Math.min(knownMin, item.number) + 1 === pages.length)
         .sort((a, b) => a.penalty - b.penalty || a.number - b.number);
@@ -946,7 +1007,7 @@ export function inferSequentialPdfCodes(pages) {
           for (const start of [...available].sort((a, b) => a - b)) {
             const numbers = Array.from({ length: group.length }, (_, index) => start + index);
             if (!numbers.every((number) => available.has(number))) continue;
-            const costs = group.map((page, index) => rawNumberCost(page.rawNumber, numbers[index]));
+            const costs = group.map((page, index) => rawNumberCost(pdfSequenceRaw(page), numbers[index]));
             candidates.push({ numbers, total: costs.reduce((sum, value) => sum + value, 0), near: costs.filter((value) => value <= 1).length });
           }
           candidates.sort((a, b) => a.total - b.total || b.near - a.near || a.numbers[0] - b.numbers[0]);
@@ -969,7 +1030,12 @@ export function inferSequentialPdfCodes(pages) {
         const group = [...remaining.values()][0];
         const missing = [...available].sort((a, b) => a - b);
         const consecutive = missing.every((number, index) => index === 0 || number === missing[index - 1] + 1);
-        if (group.length === missing.length && consecutive) {
+        // A sole remaining gap is not evidence about an entirely unread PDF.
+        const observed = group.every((page, index) =>
+          respectsPdfPageEvidence(page, missing[index])
+          && (page.ocrObservations || []).some(item => item.number === missing[index]
+            && Number(item.prefixDistance ?? 99) <= 1 && supportedPdfObservation(item)));
+        if (group.length === missing.length && consecutive && observed) {
           for (let index = 0; index < group.length; index += 1) {
             group[index].number = missing[index];
             group[index].codeEvidence = 'unique-remaining-cross-pdf-gap';
@@ -981,36 +1047,10 @@ export function inferSequentialPdfCodes(pages) {
   return pages;
 }
 
-// 牌位批次的右上角除了业务编号还会出现 2026/2027 等起止年份。若一个新批次
-// 的所有页面都只读到了年份，旧逻辑会把整组排除，继而照片中清晰的后续编号
-// 也因“不在 PDF 集合内”全部丢弃。这里只在已识别编号本身无缺口、未识别页
-// 全部来自红纸/黄纸的后续批次，且原始 OCR 没有任何三位业务编号时，才把它们
-// 作为唯一连续尾段补齐。若普通批次中间真有漏页，已识别集合会出现缺口，本
-// 规则不会触发。
+// Compatibility entry point for diagnostics. An entirely unread later PDF
+// has no proven start/end anchors. Re-read its code instead of inventing it.
 export function inferTrailingUnreadPdfCodes(pages) {
-  const known = pages.filter((page) => Number.isInteger(page.number));
-  const unresolved = pages.filter((page) => !Number.isInteger(page.number));
-  if (known.length < 5 || !unresolved.length || unresolved.length > 50) return false;
-  const knownNumbers = known.map((page) => page.number).sort((a, b) => a - b);
-  if (new Set(knownNumbers).size !== knownNumbers.length) return false;
-  if (!knownNumbers.every((number, index) => index === 0 || number === knownNumbers[index - 1] + 1)) return false;
-  const laterPaperBatch = unresolved.every((page) => {
-    const match = /(?:红纸|黄纸)(\d+)/.exec(path.basename(page.pdf || ''));
-    const raw = page.rawNumber;
-    const rawIsOnlyDateNoise = !Number.isInteger(raw) || (raw >= 1900 && raw <= 2100);
-    return match && Number(match[1]) >= 2 && rawIsOnlyDateNoise;
-  });
-  if (!laterPaperBatch) return false;
-  const ordered = [...unresolved].sort((a, b) => photoPdfBusinessRank(a.pdf) - photoPdfBusinessRank(b.pdf)
-    || path.basename(a.pdf || '').localeCompare(path.basename(b.pdf || ''), 'zh-CN', { numeric: true })
-    || a.pageNumber - b.pageNumber);
-  const start = knownNumbers.at(-1) + 1;
-  for (let index = 0; index < ordered.length; index += 1) {
-    ordered[index].number = start + index;
-    ordered[index].codeEvidence = 'contiguous-known-range-and-unread-later-batch-tail';
-    ordered[index].sequenceScore = { inferredTailStart: start, knownCount: knownNumbers.length };
-  }
-  return true;
+  return false;
 }
 
 function cropFromRatios(metadata, layout) {
@@ -1853,7 +1893,7 @@ function verifiedBatchKnownNameSet(date, images, expectedNumbers) {
 function verifiedBatchMatchesKnownFiles(evidence, images, requiredNames) {
   const byName = new Map(images.map((file) => [path.basename(file), file]));
   if (!requiredNames.every((name) => byName.has(name))) return false;
-  if (!evidence.knownFilesHash) return true;
+  if (!evidence.knownFilesHash) return false;
   const hash = crypto.createHash('sha256');
   for (const name of [...requiredNames].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }))) {
     hash.update(name);
@@ -2247,10 +2287,10 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       && Number(item?.evidence?.prefixDistance ?? 99) <= 1;
     const forcePdfFingerprint = item?.evidence?.requiresPdfFingerprintRecheck === true;
     const visibleConsensus = !forcePdfFingerprint
-      && (/(?:ocr|photo-code|targeted-landscape-code|global-one-to-one-remaining-pdf-candidate)/.test(method)
+      && (hasIndependentFullCodeEvidence(item) || ((/(?:ocr|photo-code|targeted-landscape-code|global-one-to-one-remaining-pdf-candidate)/.test(method)
         || persistedDirectConsensus)
       && ((Number(item?.evidence?.votes || 0) >= 2
-        && Number(item?.evidence?.maxConfidence || 0) >= 20) || strictVisibleCode);
+        && Number(item?.evidence?.maxConfidence || 0) >= 20) || strictVisibleCode)));
     const verifiedCaptureSequence = !forcePdfFingerprint
       && /^capture-(?:ascending|descending)-sequence-(?:between-code-anchors|forward-edge)$/.test(method)
       && Number(item?.evidence?.votes || 0) >= 2;
@@ -2334,9 +2374,13 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
     }
     if (reason) {
       item.reliable = false;
-      item.pdfRecheck = {status:'rejected',reason,claimedNumber};
-      rejected += 1;
-      status = 'rejected';
+      // No usable fingerprint / no discriminating margin is missing evidence,
+      // not positive evidence of a wrong code. Keep this item unassigned, but
+      // do not turn it into a hard conflict that blocks unrelated good photos.
+      const insufficient=['paper-fingerprint-unavailable','pdf-fingerprint-score-too-low','pdf-fingerprint-margin-too-small'].includes(reason);
+      status = insufficient ? 'inconclusive' : 'rejected';
+      item.pdfRecheck = {status,reason,claimedNumber};
+      if(insufficient)inconclusive += 1;else rejected += 1;
     } else if (status === 'confirmed') {
       confirmed += 1;
     }
@@ -2462,14 +2506,37 @@ export function sortPdfDescriptorsByBusinessOrder(descriptors) {
       || path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }));
 }
 
+export async function normalizePdfCodeLine(source) {
+  // Whitespace around the printed code was shrinking the actual glyphs in
+  // the fixed-height recognizer. Tighten only an already-isolated code line;
+  // never apply this as a guessed crop of an entire customer page.
+  return sharp(source).flatten({background:'#fff'}).trim({threshold:15})
+    .extend({top:12,bottom:12,left:12,right:12,background:'#fff'}).png().toBuffer();
+}
+
+export function appendWindowsPdfCodeEvidence(page,observation,expectedPrefix,layout='windows-ocr-top-right',allowedNumbers=null) {
+  const candidates=parseLocalOcrCodeCandidates(observation?.text||'',expectedPrefix).filter(item=>item.prefixDistance===0);
+  const numbers=[...new Set(candidates.map(item=>item.number))];
+  if(numbers.length!==1||(allowedNumbers&&!allowedNumbers.has(numbers[0])))return false;
+  const number=numbers[0];
+  page.ocrObservations=[...(page.ocrObservations||[]),{number,prefixDistance:0,confidence:null,
+    engine:'windows-ocr',fullCodeValidated:true,layout,ocrText:normalizeOcr(observation.text)}];
+  page.rawNumber=number;page.ocrText=normalizeOcr(observation.text);page.ocrLayout=layout;
+  return true;
+}
+
 export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, appRoot = null) {
   const pdfjs = await import(pathToFileURL(require.resolve('pdfjs-dist/legacy/build/pdf.mjs')).href);
+  // pdf.js validates a literal trailing '/', even for a Windows filesystem
+  // path. Node's local file reader accepts these forward slashes.
+  const standardFontDataUrl=path.join(path.dirname(require.resolve('pdfjs-dist/package.json')),'standard_fonts').replaceAll('\\','/')+'/';
   const cropDir = path.join(workDir, 'pdf-code-crops');
   fs.mkdirSync(cropDir, { recursive: true });
   const pages = [];
   const descriptors = [];
   for (const file of pdfFiles) {
-    const document = await pdfjs.getDocument({ data: new Uint8Array(fs.readFileSync(file)), disableWorker: true }).promise;
+    const document = await pdfjs.getDocument({ data: new Uint8Array(fs.readFileSync(file)), disableWorker: true,
+      standardFontDataUrl,useSystemFonts:false }).promise;
     const firstPage = await document.getPage(1);
     const firstViewport = firstPage.getViewport({ scale: 1 });
     descriptors.push({ file, document, portrait: firstViewport.height > firstViewport.width });
@@ -2514,6 +2581,25 @@ export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, a
             ocrText: normalizeOcr(result.data.text),
           });
         }
+        // Printed PDF codes deserve the same independent local recognizer as
+        // photographs. Restrict it to code-line crops (not the wide title/date
+        // blocks), and retain its raw full-prefix observations before any
+        // sequence repair or expected-number filtering.
+        if (appRoot && !layout.sparse && verifyLocalOcrAssets(appRoot).available) {
+          try {
+            const lineInputs=[['original',diagnostic]];
+            try {lineInputs.push(['trimmed',await normalizePdfCodeLine(diagnostic)]);} catch { /* Keep the untrimmed path. */ }
+            for(const [variant,input] of lineInputs) {
+              const portable = await recognizeLocalTextLine(appRoot, input);
+              if (portable.confidence >= .65) {
+                for (const candidate of parseOcrCandidates(portable.text,expectedPrefix).filter(item=>item.prefixDistance<=.1)) {
+                  observations.push({...candidate,confidence:portable.confidence*100,
+                    layout:`paddle-${layout.name}-${variant}`,ocrText:normalizeOcr(portable.text)});
+                }
+              }
+            }
+          } catch { /* Retain other independent evidence; never invent a PDF tail. */ }
+        }
       }
       observations.sort((a, b) =>
         a.prefixDistance - b.prefixDistance
@@ -2550,12 +2636,7 @@ export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, a
       const observation = windowsOcr.get(path.resolve(page.windowsFallbackFile || ''));
       if (!observation) continue;
       const closeCandidates = [...new Set(page.ocrObservations.filter((item) => item.prefixDistance === 0).map((item) => item.number))];
-      const confirmed = closeCandidates.filter((number) => observation.numbers.includes(number));
-      if (confirmed.length !== 1) continue;
-      page.rawNumber = confirmed[0];
-      page.ocrText = observation.text;
-      page.ocrLayout = 'windows-ocr-ambiguous-code-confirmation';
-      page.ocrObservations.unshift({ number:confirmed[0],prefixDistance:0,confidence:100,layout:'windows-ocr-ambiguous-code-confirmation',ocrText:observation.text });
+      appendWindowsPdfCodeEvidence(page,observation,expectedPrefix,'windows-ocr-ambiguous-code-confirmation',new Set(closeCandidates));
     }
   }
   inferSequentialPdfCodes(pages);
@@ -2565,10 +2646,7 @@ export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, a
       for (const page of pages) {
         const observation = windowsOcr.get(path.resolve(page.windowsFallbackFile || ''));
         if (!observation) continue;
-        page.rawNumber = observation.number;
-        page.ocrText = observation.text;
-        page.ocrLayout = 'windows-ocr-top-right';
-        page.ocrObservations = [{ number: observation.number, prefixDistance: 0.25, confidence: 100, layout: 'windows-ocr-top-right', ocrText: observation.text }];
+        if(!appendWindowsPdfCodeEvidence(page,observation,expectedPrefix))continue;
         page.number = null;
         delete page.codeEvidence;
         delete page.sequenceScore;
@@ -2687,8 +2765,15 @@ async function imageVisualMetrics(file) {
   return { edgeDensity: edges / pixels, upperEdgeDensity: upperEdges / pixels, uniformity: uniformPairs / pixels };
 }
 
+function hasIndependentFullCodeEvidence(item) {
+  const engines=new Set(item?.evidence?.independentEngines||[]);
+  return item?.evidence?.method==='independent-ocr-engines-full-code-consensus'
+    && engines.has('paddle')&&engines.has('tesseract');
+}
+
 export function hasDirectVisibleCodeEvidence(item) {
   if (!item?.reliable || !Number.isInteger(item.number)) return false;
+  if(hasIndependentFullCodeEvidence(item))return true;
   const method = String(item?.evidence?.method || '');
   if (/^(?:paddleocr-onnx-adaptive-right-line-consensus|targeted-landscape-code-threshold-consensus|photo-code-multi-crop-consensus|windows-ocr-(?:strict-(?:lower-code-box|code-crop)|overlapping-right-code-bands))$/.test(method)) return true;
   // Existing numeric files are not trusted merely because of their filename;
@@ -3620,9 +3705,11 @@ export async function classifyScenes(files, occupiedNames) {
 
 export async function planPhotoPreparation({ appRoot, folder, photoDir, date, expectedPrefix, workDir, onProgress = null }) {
   const images = fs.readdirSync(photoDir).filter((name) => IMAGE_RE.test(name)).sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })).map((name) => path.join(photoDir, name));
+  const photoInputBinding = createPhotoInputBinding(photoDir,images);
   const pdfFiles = fs.readdirSync(folder).filter((name) => /\.pdf$/i.test(name)).map((name) => path.join(folder, name))
     .sort((a, b) => photoPdfBusinessRank(a) - photoPdfBusinessRank(b)
       || path.basename(a).localeCompare(path.basename(b), 'zh-CN', { numeric: true }));
+  const pdfIndexBinding = createPdfIndexBinding(date,pdfFiles,recognitionSourceFingerprint(appRoot));
   const cropDir = path.join(workDir, 'photo-code-crops');
   fs.mkdirSync(cropDir, { recursive: true });
   const worker = await createOcrWorker(appRoot);
@@ -3810,35 +3897,8 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   applyVerifiedFoldedPhotoEvidence(date,recognized,pdfPages);
   await applyExactRemainingPortraitOrderEvidence(recognized, pdfPages);
   const verifiedBatch = await applyVerifiedBatchEvidence({ date, images, recognized, expectedNumbers });
-  const manualEvidence = new Map([
-    ['新建文件夹.jpg', 253],
-    ['新建文件夹(2).jpg', 256],
-    ['新建文件夹(3).jpg', 255],
-    ['新建文件夹(4).jpg', 258],
-    ['新建文件夹(5).jpg', 259],
-    ['新建文件夹(6).jpg', 260],
-    ['新建文件夹(7).jpg', 262],
-    ['新建文件夹(8).jpg', 254],
-    ['新建文件夹(9).jpg', 251],
-    ['新建文件夹(10).jpg', 250],
-    ['新建文件夹(11).jpg', 252],
-    ['新建文件夹(12).jpg', 261],
-    ['新建文件夹(13).jpg', 257],
-  ]);
-  const sourceNames = new Set(recognized.map((item) => path.basename(item.file)));
-  const exactKnownBatch = date === '2026-08-11'
-    && manualEvidence.size === expectedNumbers.size
-    && [...manualEvidence.keys()].every((name) => sourceNames.has(name))
-    && [...manualEvidence.values()].every((number) => expectedNumbers.has(number));
-  if (exactKnownBatch) {
-    for (const item of recognized) {
-      const number = manualEvidence.get(path.basename(item.file));
-      if (!number) continue;
-      item.reliable = true;
-      item.number = number;
-      item.evidence = { method: 'manual-visual-review-2026-08-11', votes: 1, prefixDistance: 0, maxConfidence: 100, layouts: [] };
-    }
-  }
+  // No filename-only manual overrides. Historical confirmations must be bound
+  // to the exact photo bytes and business context before being reusable.
 
   // 全局唯一候选也是待复核的编号证据，必须在二次复核之前落号。旧版把
   // 这一步放在 assignments 阶段，导致 621 先以弱中间状态被 PDF 指纹
@@ -3861,7 +3921,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       const rejectedFiles = pdfClaimRecheck.diagnostics.filter((item)=>item.status==='rejected').map((item)=>item.file);
       issues.push(`编号二次复核未通过 ${pdfClaimRecheck.rejected} 张：${rejectedFiles.join('、')}。已停止改名和上传，请查看 PDF 指纹诊断。`);
     } else if (pdfClaimRecheck.attempted) {
-      onProgress?.(`编号二次复核完成：${pdfClaimRecheck.confirmed}/${pdfClaimRecheck.attempted} 张得到第二证据确认，${pdfClaimRecheck.inconclusive || 0} 张现有数字照片纸面暂不可读。`);
+      onProgress?.(`编号二次复核完成：${pdfClaimRecheck.confirmed}/${pdfClaimRecheck.attempted} 张得到第二证据确认，${pdfClaimRecheck.inconclusive || 0} 张暂缺足够复核证据，保留待确认；其他已确认照片可继续。`);
     }
   } catch {
     for (const item of [...recognized,...existingNumericAuditItems]) {
@@ -3955,6 +4015,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   const unresolved = recognized.filter((item) => !item.reliable && !duplicateSourceSet.has(item.file) && !verifiedSceneSourceSet.has(item.file)).map((item) => item.file);
   const sceneCandidates = recognized
     .filter((item) => item.reliable === false
+      && item.pdfRecheck?.status !== 'inconclusive'
       && (item.evidence?.method === 'scene-visual-fast-path' || isLikelyScene(item)))
     .map((item) => item.file);
   const ambiguousCodeCandidates = unresolved.filter((file) => !sceneCandidates.includes(file));
@@ -4035,6 +4096,10 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   }
 
   // 指纹仅用于本次匹配，不能进入计划 JSON 或任何可同步目录。
+  const finalPdfFiles = fs.readdirSync(folder).filter(name=>/\.pdf$/i.test(name)).map(name=>path.join(folder,name));
+  if (createPdfIndexBinding(date,finalPdfFiles,pdfIndexBinding.recognizerFingerprint).digest !== pdfIndexBinding.digest) {
+    issues.push('识别期间 PDF 内容发生变化，本轮编号计划已失效，请重新检测。');
+  }
   for (const page of pdfPages) delete page._localShapeFingerprint;
   return {
     schemaVersion: 1,
@@ -4043,6 +4108,8 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     folder,
     photoDir,
     expectedPrefix,
+    pdfIndexBinding,
+    photoInputBinding,
     pdfPages,
     expectedCodeCount: expectedNumbers.size,
     allowedBlessingNumbers: [...expectedNumbers].sort((a,b)=>a-b),
@@ -4087,6 +4154,12 @@ async function makeProcessedJpeg(source, destination) {
 
 export async function applyPhotoPreparation(plan, workDir) {
   if (!(plan?.ready || plan?.safeToApply) || plan.issues?.length) throw new Error('自动处理方案没有通过安全校验，未修改照片。');
+  assertPhotoInputBinding(plan);
+  if(plan.pdfIndexBinding) {
+    const pdfFiles=fs.readdirSync(plan.folder).filter(name=>/\.pdf$/i.test(name)).map(name=>path.join(plan.folder,name));
+    if(createPdfIndexBinding(plan.businessDate,pdfFiles,plan.pdfIndexBinding.recognizerFingerprint).digest!==plan.pdfIndexBinding.digest)throw Error('PDF 在识别后发生变化，请重新检测；未修改照片。');
+  }
+  const expectedPhotoHash=source=>plan.photoInputBinding.files.find(item=>item.name===path.basename(source))?.sha256;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backupDir = path.join(workDir, 'photo-backups', stamp);
   const stagingDir = path.join(workDir, 'photo-staging', stamp);
@@ -4102,39 +4175,47 @@ export async function applyPhotoPreparation(plan, workDir) {
   for (const assignment of plan.assignments) {
     const backup = path.join(backupDir, path.basename(assignment.source));
     fs.copyFileSync(assignment.source, backup, fs.constants.COPYFILE_EXCL);
+    if(sha256(backup)!==expectedPhotoHash(assignment.source))throw Error('备份时原图发生变化，请重新检测；业务照片未改名。');
     const staged = path.join(stagingDir, assignment.targetName);
-    const output = await makeProcessedJpeg(assignment.source, staged);
-    prepared.push({ ...assignment, backup, staged, beforeSha256: sha256(assignment.source), afterSha256: sha256(staged), ...output });
+    const output = await makeProcessedJpeg(backup, staged);
+    prepared.push({ ...assignment, backup, staged, beforeSha256: sha256(backup), afterSha256: sha256(staged), ...output });
   }
   const duplicateBackups = [];
   for (const duplicate of plan.duplicateSources || []) {
     const backup = path.join(backupDir, path.basename(duplicate.source));
     fs.copyFileSync(duplicate.source, backup, fs.constants.COPYFILE_EXCL);
+    if(sha256(backup)!==expectedPhotoHash(duplicate.source))throw Error('重复照片在备份时发生变化，请重新检测；未删除照片。');
     duplicateBackups.push({
       ...duplicate,
       backup,
-      beforeSha256: sha256(duplicate.source),
+      beforeSha256: sha256(backup),
     });
   }
 
   const quarantined = [];
   const createdTargets = [];
   try {
+    assertPhotoInputBinding(plan);
     for (const item of prepared) {
       const quarantine = path.join(quarantineDir, `${crypto.randomUUID()}-${path.basename(item.source)}`);
       const move = moveFileVerified(item.source, quarantine);
       quarantined.push({ source: item.source, quarantine, moveMethod: move.method });
+      if(sha256(quarantine)!==item.beforeSha256)throw Error('移动时原图内容发生变化，已停止并恢复照片。');
     }
     for (const item of duplicateBackups) {
       const quarantine = path.join(quarantineDir, `${crypto.randomUUID()}-${path.basename(item.source)}`);
       const move = moveFileVerified(item.source, quarantine);
       quarantined.push({ source: item.source, quarantine, moveMethod: move.method });
+      if(sha256(quarantine)!==item.beforeSha256)throw Error('移动时重复照片内容发生变化，已停止并恢复照片。');
     }
     for (const item of prepared) {
       const target = path.join(plan.photoDir, item.targetName);
       fs.copyFileSync(item.staged, target, fs.constants.COPYFILE_EXCL);
-      createdTargets.push(target);
+      createdTargets.push({target,sha256:item.afterSha256});
       item.target = target;
+    }
+    for(const item of createdTargets) {
+      if(sha256(item.target)!==item.sha256)throw Error('写入后目标照片内容发生变化，已停止并保留原图备份。');
     }
     // 目标文件全部落盘后清理内部隔离副本。若 NAS 暂时锁定，文件只会留在
     // 自动化工作区，绝不会污染每日照片目录；完整原图仍另有 backupDir 备份。
@@ -4149,14 +4230,21 @@ export async function applyPhotoPreparation(plan, workDir) {
     try { const parent=path.dirname(stagingDir); if (fs.existsSync(parent) && fs.readdirSync(parent).length === 0) fs.rmdirSync(parent); } catch {}
     try { const parent=path.dirname(quarantineDir); if (fs.existsSync(parent) && fs.readdirSync(parent).length === 0) fs.rmdirSync(parent); } catch {}
   } catch (error) {
-    for (const target of createdTargets) {
-      try { unlinkWithRetrySync(target); } catch {}
+    for (const item of createdTargets) {
+      try {
+        if(!fs.existsSync(item.target))continue;
+        if(sha256(item.target)===item.sha256)unlinkWithRetrySync(item.target);
+        else error.message+=' 目标文件已被外部修改，已保留，需人工核对。';
+      } catch {error.message+=' 目标文件无法安全核验，已保留，需人工核对。';}
     }
     for (const item of quarantined.reverse()) {
       if (fs.existsSync(item.quarantine) && !fs.existsSync(item.source)) moveFileVerified(item.quarantine, item.source);
     }
     try { fs.rmSync(stagingDir, { recursive:true, force:true }); } catch {}
-    try { fs.rmSync(quarantineDir, { recursive:true, force:true }); } catch {}
+    // A sync client may recreate a source name during rollback. Never remove
+    // the quarantined original when its destination is occupied.
+    try { if(fs.readdirSync(quarantineDir).length===0)fs.rmdirSync(quarantineDir); } catch {}
+    if(fs.existsSync(quarantineDir))error.message+=` 原图隔离副本已保留：${quarantineDir}`;
     throw error;
   }
 

@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$InputListPath
+    [string]$InputListPath,
+    [switch]$IncludeRegions
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,6 +34,8 @@ if (-not $engine) { throw 'Windows OCR engine is unavailable.' }
 foreach ($inputPath in $InputPaths) {
     $file = $null
     $stream = $null
+    $bitmap = $null
+    $fullPath = [string]$inputPath
     try {
         $fullPath = [IO.Path]::GetFullPath($inputPath)
         $file = Await-WinRt ($storageFileType::GetFileFromPathAsync($fullPath)) $storageFileType
@@ -40,8 +43,26 @@ foreach ($inputPath in $InputPaths) {
         $decoder = Await-WinRt ($decoderType::CreateAsync($stream)) $decoderType
         $bitmap = Await-WinRt ($decoder.GetSoftwareBitmapAsync()) $bitmapType
         $result = Await-WinRt ($engine.RecognizeAsync($bitmap)) $resultType
-        [PSCustomObject]@{ path = $fullPath; text = [string]$result.Text } | ConvertTo-Json -Compress
+        $record = [ordered]@{ path = $fullPath; text = [string]$result.Text; status = 'ok' }
+        if ($IncludeRegions) {
+            $record.width = $bitmap.PixelWidth
+            $record.height = $bitmap.PixelHeight
+            $record.lines = @($result.Lines | ForEach-Object {
+                [PSCustomObject]@{
+                    text = [string]$_.Text
+                    words = @($_.Words | ForEach-Object {
+                        [PSCustomObject]@{ text = [string]$_.Text; x = $_.BoundingRect.X; y = $_.BoundingRect.Y; width = $_.BoundingRect.Width; height = $_.BoundingRect.Height }
+                    })
+                }
+            })
+        }
+        [PSCustomObject]$record | ConvertTo-Json -Depth 6 -Compress
+    } catch {
+        # A corrupt/locked image must not erase successful OCR for other files.
+        # No exception text: it may contain user paths or recognized content.
+        [PSCustomObject]@{ path = $fullPath; text = ''; status = 'error'; reason = 'image-ocr-failed' } | ConvertTo-Json -Compress
     } finally {
+        if ($bitmap) { $bitmap.Dispose() }
         if ($stream) { $stream.Dispose() }
     }
 }

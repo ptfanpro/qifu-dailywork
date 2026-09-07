@@ -26,10 +26,18 @@ if (-not $script:singleInstance.OwnsLock) {
 $appRoot = Split-Path -Parent $PSScriptRoot
 $dataDir = Join-Path $appRoot 'data'
 # 祈福运行数据只保存在本机；不自动导入其他电脑同步来的断点/凭据。
-$script:localStateRoot = Get-PrayerLocalStateRoot
+$script:isUiSmokeTest = $env:PRAYER_UI_SMOKE_TEST -eq 'yes'
+if ($script:isUiSmokeTest) {
+    if ([string]::IsNullOrWhiteSpace($env:PRAYER_UI_SMOKE_ROOT)) { throw 'UI test requires an isolated temporary state directory.' }
+    $script:localStateRoot = [IO.Path]::GetFullPath($env:PRAYER_UI_SMOKE_ROOT)
+    $smokeTempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    if (-not $script:localStateRoot.StartsWith($smokeTempPrefix,[StringComparison]::OrdinalIgnoreCase)) { throw 'UI test state must be under the temporary directory.' }
+} else {
+    $script:localStateRoot = Get-PrayerLocalStateRoot
+}
 $settingsPath = Join-Path $script:localStateRoot 'settings.json'
 $script:credentialPath = Join-Path $script:localStateRoot 'secure-login.dat'
-$legacySettingsPath = Join-Path $dataDir 'settings.json'
+$legacySettingsPath = if ($script:isUiSmokeTest) { Join-Path $script:localStateRoot 'legacy-settings.json' } else { Join-Path $dataDir 'settings.json' }
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 New-Item -ItemType Directory -Force -Path $script:localStateRoot | Out-Null
 
@@ -39,7 +47,7 @@ if (Test-Path -LiteralPath $settingsPath) {
 } elseif (Test-Path -LiteralPath $legacySettingsPath) {
     try { $settings = Get-Content -Raw -Encoding UTF8 -LiteralPath $legacySettingsPath | ConvertFrom-Json } catch { $settings = @{} }
 }
-$businessRoot = Find-PrayerBusinessRoot -SavedRoot $settings.businessRoot
+$businessRoot = if ($script:isUiSmokeTest) { '' } else { Find-PrayerBusinessRoot -SavedRoot $settings.businessRoot }
 $beijingTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
 $today = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$beijingTimeZone).Date
 
@@ -1037,7 +1045,9 @@ $form.Add_Shown({
     else { Start-Initialization 'all' }
 })
 try {
-    [void]$form.ShowDialog()
+    # State tests exercise the constructed controls without a desktop message
+    # loop, credential dialogs, real initialization or writes to user settings.
+    if (-not $script:isUiSmokeTest) { [void]$form.ShowDialog() }
 } finally {
     Exit-PrayerSingleInstance $script:singleInstance
 }

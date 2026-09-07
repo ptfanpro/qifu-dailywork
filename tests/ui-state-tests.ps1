@@ -1,6 +1,10 @@
 ﻿$ErrorActionPreference = 'Stop'
 $env:PRAYER_UI_SMOKE_TEST = 'yes'
+$uiSmokeRoot = Join-Path ([IO.Path]::GetTempPath()) ('prayer-ui-smoke-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $uiSmokeRoot -Force | Out-Null
+$env:PRAYER_UI_SMOKE_ROOT = $uiSmokeRoot
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'ui\PrayerAssistant.ps1')
+if (-not $settingsPath.StartsWith($uiSmokeRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'UI test loaded real settings.' }
 
 function Assert-Equal($actual, $expected, [string]$message) {
     if ($actual -ne $expected) { throw "$message；预期=$expected，实际=$actual" }
@@ -163,4 +167,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($originalRoot) -and (Test-Path -LiteralPath $originalRoot)) { Save-Settings }
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item Env:PRAYER_UI_SMOKE_TEST -ErrorAction SilentlyContinue
+    Remove-Item Env:PRAYER_UI_SMOKE_ROOT -ErrorAction SilentlyContinue
+    $form.Dispose()
+    Remove-Item -LiteralPath $uiSmokeRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

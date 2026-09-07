@@ -8,6 +8,7 @@ import { Timing } from './timing.mjs';
 import { calculateQuantities, normalizeText, venueMessage } from './quantity.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolder as photoDayFolder, scanPhotoWorkday, splitUploadBatches } from './photos.mjs';
 import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs';
+import {createPdfIndexBinding,recognitionSourceFingerprint,canReusePdfIndex} from './recognition-provenance.mjs';
 import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
@@ -466,7 +467,13 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
     log(`照片目录快速清点：发现 ${quickImageCount} 张图片。初始化预检不读取未编号原图做 OCR；正式识别和编号由照片处理阶段完成。`);
     const cachedPlanFile = path.join(photoRunDir,'photo-prepare-plan.json');
     let cachedPhotoPlan = readJson(cachedPlanFile,null);
-    let allowedBlessingNumbers = cachedPhotoPlan?.businessDate === photoDate
+    const bindingFolder = photoDayFolder(root,photoDate);
+    const currentPdfFiles = fs.existsSync(bindingFolder) ? fs.readdirSync(bindingFolder)
+      .filter(name=>/\.pdf$/i.test(name)).map(name=>path.join(bindingFolder,name)) : [];
+    const currentPdfBinding = createPdfIndexBinding(photoDate,currentPdfFiles,recognitionSourceFingerprint(appRoot));
+    const indexReusable = canReusePdfIndex(cachedPhotoPlan,currentPdfBinding);
+    if(cachedPhotoPlan&&!indexReusable) log('本地编号索引缺少有效凭据，或 PDF 文件/识别规则已变化，不能复用旧编号；已保留上传回执。');
+    let allowedBlessingNumbers = indexReusable
       && Array.isArray(cachedPhotoPlan.allowedBlessingNumbers)
       ? new Set(cachedPhotoPlan.allowedBlessingNumbers.map(Number).filter(Number.isInteger))
       : null;

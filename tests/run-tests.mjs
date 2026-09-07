@@ -14,10 +14,18 @@ import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, choo
 import { cleanupLocalState } from '../src/cleanup.mjs';
 import { AutomationApiClient, canonicalTokenRequest, createTokenRequest, normalizeAutomationBaseUrl } from '../src/automation-auth.mjs';
 import { decodePaddleCtc, recognizeLocalTextLine, verifyLocalOcrAssets } from '../src/local-ocr.mjs';
+import {createPhotoInputBinding} from '../src/recognition-provenance.mjs';
 import './weekend-regression.mjs';
 import './photo-online-regression.mjs';
 import './ocr-crop-regression.mjs';
 import './code-coverage-regression.mjs';
+import './annual-contract-regression.mjs';
+import './recognition-provenance-regression.mjs';
+import './photo-input-binding-regression.mjs';
+import './experiments/text-regions-regression.mjs';
+import './audit-paths-regression.mjs';
+import './pdf-line-normalization-regression.mjs';
+import './pdf-index-integration.mjs';
 
 const require = createRequire(import.meta.url);
 const { PDFDocument } = require('pdf-lib');
@@ -364,6 +372,16 @@ const unreadableExistingResult=await recheckReliablePhotoClaimsWithPdf(unreadabl
 assert.equal(unreadableExistingResult.inconclusive,1);
 assert.equal(unreadableExistingResult.rejected,0);
 assert.equal(unreadableExistingFilename[0].reliable,true);
+const unreadableNewProposal=[{
+  file:shapePhoto,reliable:true,number:401,candidates:[],visualMetrics:{},paperGeometry:{},
+  evidence:{method:'capture-gap-after-existing-number-exclusion',votes:3},
+}];
+const unreadableNewResult=await recheckReliablePhotoClaimsWithPdf(unreadableNewProposal,shapePages);
+assert.equal(unreadableNewResult.inconclusive,1,'missing fingerprint is not a proven wrong number');
+assert.equal(unreadableNewResult.rejected,0,'must not block unrelated confirmed photographs');
+assert.equal(unreadableNewResult.confirmed,0,'must not accept the unsupported proposal either');
+assert.equal(unreadableNewProposal[0].reliable,false,'unproven new photo stays unassigned');
+assert.equal(unreadableNewProposal[0].pdfRecheck.reason,'paper-fingerprint-unavailable');
 const standardTopEdgeLayouts=targetedCurrentCodeLayouts([
   {name:'paper-relative-landscape-code-upper-right'},
   {name:'paper-relative-landscape-code-lower-right'},
@@ -692,7 +710,7 @@ const prepareWorkDir=path.join(dir,'prepare-work');
 fs.mkdirSync(preparePhotoDir,{recursive:true});
 const prepareSource=path.join(preparePhotoDir,'微信原图.jpg');
 await sharp({create:{width:2400,height:1800,channels:3,background:'#b93344'}}).jpeg({quality:96}).toFile(prepareSource);
-const prepareReceipt=await applyPhotoPreparation({ready:true,issues:[],businessDate:'2026-08-09',photoDir:preparePhotoDir,assignments:[{source:prepareSource,targetName:'224.jpg',kind:'blessing',evidence:{method:'test'}}]},prepareWorkDir);
+const prepareReceipt=await applyPhotoPreparation({ready:true,issues:[],businessDate:'2026-08-09',photoDir:preparePhotoDir,photoInputBinding:createPhotoInputBinding(preparePhotoDir,[prepareSource]),assignments:[{source:prepareSource,targetName:'224.jpg',kind:'blessing',evidence:{method:'test'}}]},prepareWorkDir);
 assert.equal(prepareReceipt.processedCount,1);
 assert.equal(fs.existsSync(prepareSource),false);
 assert.equal(fs.existsSync(path.join(preparePhotoDir,'224.jpg')),true);
@@ -708,7 +726,7 @@ const namedWorkDir=path.join(dir,'already-numbered-work');
 fs.mkdirSync(namedPhotoDir,{recursive:true});
 const namedSource=path.join(namedPhotoDir,'451.jpg');
 await sharp({create:{width:4000,height:3000,channels:3,background:'#b93344'}}).jpeg({quality:98}).toFile(namedSource);
-const namedReceipt=await applyPhotoPreparation({ready:true,issues:[],businessDate:'2026-08-22',photoDir:namedPhotoDir,assignments:[{source:namedSource,targetName:'451.jpg',kind:'blessing',evidence:{method:'already-numbered-spec-normalization'}}]},namedWorkDir);
+const namedReceipt=await applyPhotoPreparation({ready:true,issues:[],businessDate:'2026-08-22',photoDir:namedPhotoDir,photoInputBinding:createPhotoInputBinding(namedPhotoDir,[namedSource]),assignments:[{source:namedSource,targetName:'451.jpg',kind:'blessing',evidence:{method:'already-numbered-spec-normalization'}}]},namedWorkDir);
 const namedMetadata=await sharp(namedSource).metadata();
 assert.equal(namedReceipt.processedCount,1);
 assert.deepEqual([namedMetadata.width,namedMetadata.height],[1800,1350]);
@@ -721,7 +739,7 @@ const occupied491=path.join(collisionPhotoDir,'491.jpg');
 const actual491=path.join(collisionPhotoDir,'微信补入491.jpg');
 await sharp({create:{width:1800,height:1350,channels:3,background:'#d5c66a'}}).jpeg().toFile(occupied491);
 await sharp({create:{width:1800,height:1350,channels:3,background:'#c51f4c'}}).jpeg().toFile(actual491);
-const collisionReceipt=await applyPhotoPreparation({ready:true,issues:[],businessDate:'2026-08-24',photoDir:collisionPhotoDir,assignments:[
+const collisionReceipt=await applyPhotoPreparation({ready:true,issues:[],businessDate:'2026-08-24',photoDir:collisionPhotoDir,photoInputBinding:createPhotoInputBinding(collisionPhotoDir,[occupied491,actual491]),assignments:[
   {source:occupied491,targetName:'495.jpg',kind:'blessing',evidence:{method:'existing-numeric-file-paper-code-repair'}},
   {source:actual491,targetName:'491.jpg',kind:'blessing',evidence:{method:'pdf-range-and-photo-code'}},
 ]},collisionWorkDir);
@@ -736,7 +754,7 @@ const incrementalWorkDir=path.join(dir,'incremental-work');
 fs.mkdirSync(incrementalPhotoDir,{recursive:true});
 const incrementalSource=path.join(incrementalPhotoDir,'补入原图.jpg');
 await sharp({create:{width:2400,height:1800,channels:3,background:'#b93344'}}).jpeg({quality:96}).toFile(incrementalSource);
-const incrementalReceipt=await applyPhotoPreparation({ready:false,safeToApply:true,issues:[],pendingIssues:['仍缺少照片'],businessDate:'2026-08-10',photoDir:incrementalPhotoDir,assignments:[{source:incrementalSource,targetName:'225.jpg',kind:'blessing',evidence:{method:'test'}}]},incrementalWorkDir);
+const incrementalReceipt=await applyPhotoPreparation({ready:false,safeToApply:true,issues:[],pendingIssues:['仍缺少照片'],businessDate:'2026-08-10',photoDir:incrementalPhotoDir,photoInputBinding:createPhotoInputBinding(incrementalPhotoDir,[incrementalSource]),assignments:[{source:incrementalSource,targetName:'225.jpg',kind:'blessing',evidence:{method:'test'}}]},incrementalWorkDir);
 assert.equal(incrementalReceipt.processedCount,1);
 assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
@@ -1037,16 +1055,15 @@ const adjacentDuplicatePages=[
 assert.equal(repairSingleAdjacentDuplicatePdfCode(adjacentDuplicatePages),true);
 assert.equal(adjacentDuplicatePages.at(-1).number,495);
 assert.equal(adjacentDuplicatePages.at(-1).codeEvidence,'pdf-adjacent-page-duplicate-repair');
-// 2026-08-27：红纸2/黄纸2整批右上角只读到牌位年份。只在前序编号
-// 完整连续、未识别页全部属于后续纸张批次时，按业务顺序补成唯一尾段。
+// This fixture previously endorsed guessed tails. A year is NOT a business
+// code observation; the unread later export may start at any number.
 const unreadTailPages=[
   ...Array.from({length:5},(_,index)=>({pdf:'827红纸1.pdf',pageNumber:index+1,rawNumber:543+index,number:543+index})),
   ...Array.from({length:3},(_,index)=>({pdf:'827红纸2.pdf',pageNumber:index+1,rawNumber:2027,number:null})),
   ...Array.from({length:2},(_,index)=>({pdf:'827黄纸2.pdf',pageNumber:index+1,rawNumber:2027,number:null})),
 ];
-assert.equal(inferTrailingUnreadPdfCodes(unreadTailPages),true);
-assert.deepEqual(unreadTailPages.slice(5).map((page)=>page.number),[548,549,550,551,552]);
-assert.ok(unreadTailPages.slice(5).every((page)=>page.codeEvidence==='contiguous-known-range-and-unread-later-batch-tail'));
+assert.equal(inferTrailingUnreadPdfCodes(unreadTailPages),false);
+assert.deepEqual(unreadTailPages.slice(5).map((page)=>page.number),[null,null,null,null,null]);
 const unsafeMiddleGapPages=unreadTailPages.map((page)=>({...page}));
 unsafeMiddleGapPages[2].number=550;
 unsafeMiddleGapPages.slice(5).forEach((page)=>{page.number=null;});
