@@ -54,6 +54,10 @@ export function summarizeBodyProbeReports(reports) {
     if (!Array.isArray(layouts) || !layouts.length || new Set(layouts).size !== layouts.length
       || layouts.some(layout => !Object.hasOwn(layoutViews, layout))) throw Error('Invalid expected layout set');
     const evidence = layouts.map(layout => ({layout, ...inspectLayout(report, layout)}));
+    const expectedViews = layouts.flatMap(layout => layoutViews[layout]);
+    const pageSets = (report.results || []).filter(r => expectedViews.includes(r.view) && Array.isArray(r.ranked))
+      .map(r => r.ranked.map(p => `${p.pdfSha256}:${p.pageNumber}`).sort().join('\n'));
+    if (pageSets.length === expectedViews.length && new Set(pageSets).size !== 1) throw Error('Inconsistent ranked page set');
     const candidates = evidence.filter(e => e.candidate);
     let state = ['incomplete-reader-evidence', 'incomplete-pdf-text', 'multi-page-body-evidence',
       'ambiguous-or-disagreeing-views'].find(value => evidence.some(e => e.state === value));

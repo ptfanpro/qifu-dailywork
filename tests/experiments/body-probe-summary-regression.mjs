@@ -55,6 +55,8 @@ const absentRank = report(); absentRank.results[0].ranked.pop();
 assert.throws(() => outcome(absentRank), /ranked page/);
 const duplicateRank = report(); duplicateRank.results[0].ranked[1].pageNumber = 1;
 assert.throws(() => outcome(duplicateRank), /ranked page/);
+const inconsistentPageSet = report(); inconsistentPageSet.results[1].ranked[1].pdfSha256 = 'e'.repeat(64);
+assert.throws(() => outcome(inconsistentPageSet), /page set/, 'Same page count is not the same candidate universe');
 const unknownLayout = report(); unknownLayout.expectedLayouts = ['unknown'];
 assert.throws(() => outcome(unknownLayout), /layout/);
 console.log('body probe summary regression passed (availability is not binding)');
