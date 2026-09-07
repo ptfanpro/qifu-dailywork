@@ -62,7 +62,7 @@ try {
         const image = canvas.toBuffer('image/png');
         fs.writeFileSync(path.join(output, `${pdf.sha256}-${pageNumber}.png`), image);
         const fieldTexts = (await page.getTextContent()).items.map(item => item.str || '');
-        const text = fieldTexts.join(' ');
+        const text = fieldTexts.join('。');
         const views = await reader.read(image, {includeVertical: true});
         pages.push({pdfSha256: pdf.sha256, pageNumber, text, fieldTexts});
         readings.push({pdfSha256: pdf.sha256, pageNumber, views});

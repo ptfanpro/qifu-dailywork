@@ -9,8 +9,9 @@ export function bodyTextGrams(text, size = 4) {
   const result = new Set();
   // Ignore digits/Latin codes; whitespace within Chinese OCR lines is harmless.
   // Keep punctuation/digit boundaries so unrelated text is not glued together.
-  const normalized = String(text || '').normalize('NFKC').replace(/\s+/gu, '');
-  for (const segment of normalized.match(/\p{Script=Han}+/gu) || []) {
+  const segments = String(text || '').split(/[\r\n\u2028\u2029]+/u)
+    .flatMap(line => line.normalize('NFKC').replace(/\s+/gu, '').match(/\p{Script=Han}+/gu) || []);
+  for (const segment of segments) {
     const chars = [...segment];
     for (let i = 0; i + size <= chars.length; i++) result.add(sha(chars.slice(i, i + size).join('')));
   }
@@ -28,9 +29,14 @@ export function rankBodyTextEvidence(photoText, pages) {
     ids.add(id);
     if (page.supplementalText !== undefined && (!Array.isArray(page.supplementalText)
       || page.supplementalText.some(text => typeof text !== 'string'))) throw Error('Invalid supplemental body text');
+    if (page.fieldTexts !== undefined && (!Array.isArray(page.fieldTexts)
+      || page.fieldTexts.some(text => typeof text !== 'string'))) throw Error('Invalid extracted body fields');
     // Union sources rather than concatenating them. A phrase split between a
     // text layer and an OCR view is not an observed phrase on the actual page.
-    const grams = new Set([page.text || '', ...(page.supplementalText || [])].flatMap(text => [...bodyTextGrams(text)]));
+    // Extraction order is not spatial adjacency. When item boundaries exist,
+    // keep them even if a legacy display string concatenates the whole page.
+    const extracted = page.fieldTexts ?? [page.text || ''];
+    const grams = new Set([...extracted, ...(page.supplementalText || [])].flatMap(text => [...bodyTextGrams(text)]));
     return {id, pdfSha256: page.pdfSha256, pageNumber: page.pageNumber, grams};
   });
   const frequency = new Map();

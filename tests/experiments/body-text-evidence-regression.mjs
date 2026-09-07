@@ -27,6 +27,14 @@ assert.equal(rankBodyTextEvidence('春山测试', [{pdfSha256, pageNumber: 1, te
 assert.throws(() => rankBodyTextEvidence('', [{...pages[0], supplementalText: 'invalid'}]), /supplemental/i);
 assert.equal(bodyTextGrams('春山123测试').size, 0, 'Do not create matches across numeric boundaries');
 assert.deepEqual(bodyTextGrams('春 山 测 试'), bodyTextGrams('春山测试'));
+assert.equal(bodyTextGrams('春山\n测试').size, 0, 'Separate OCR lines are not a four-character phrase');
+const fragmentedPage = {pdfSha256, pageNumber: 1, text: '春山 测试', fieldTexts: ['春山', '测试']};
+assert.equal(rankBodyTextEvidence('春山测试', [fragmentedPage]).observedGrams, 1);
+assert.equal(rankBodyTextEvidence('春山测试', [fragmentedPage]).ranked[0].matchedGrams, 0,
+  'PDF extraction order is not evidence that separate items are one phrase');
+assert.equal(rankBodyTextEvidence('春山测试', [{...fragmentedPage, supplementalText: ['春山测试']}]).ranked[0].matchedGrams, 1,
+  'A real visible line may restore a phrase, independently of glyph extraction');
+assert.throws(() => rankBodyTextEvidence('', [{...fragmentedPage, fieldTexts: [null]}]), /field/i);
 assert.throws(() => rankBodyTextEvidence('', [pages[0], pages[0]]), /Duplicate/);
 assert.throws(() => rankBodyTextEvidence('', [{...pages[0], pdfSha256: ''}]), /identity/);
 assert.throws(() => bodyTextGrams('春山', 2), /three/);

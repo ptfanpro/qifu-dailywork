@@ -54,7 +54,8 @@ for (const selector of [...new Set(selectors)]) {
         for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber++) {
           const page = await document.getPage(pageNumber);
           const content = await page.getTextContent();
-          pages.push({pdfSha256: pdf.sha256, pageNumber, text: content.items.map(item => item.str || '').join(' ')});
+          const fieldTexts = content.items.map(item => item.str || '');
+          pages.push({pdfSha256: pdf.sha256, pageNumber, fieldTexts, text: fieldTexts.join('。')});
         }
       } finally { await document.destroy(); }
     }

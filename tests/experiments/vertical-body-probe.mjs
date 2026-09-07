@@ -47,7 +47,8 @@ try {
         try {
           for (let i = 1; i <= document.numPages; i++) {
             const content = await (await document.getPage(i)).getTextContent();
-            pages.push({pdfSha256: pdf.sha256, pageNumber: i, text: content.items.map(item => item.str || '').join(' ')});
+            const fieldTexts = content.items.map(item => item.str || '');
+            pages.push({pdfSha256: pdf.sha256, pageNumber: i, fieldTexts, text: fieldTexts.join('。')});
           }
         } finally { await document.destroy(); }
       }
