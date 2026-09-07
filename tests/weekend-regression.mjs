@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { isLikelyScene } from '../src/photo-prepare.mjs';
+import { isLikelyScene, classifySceneVisualScore } from '../src/photo-prepare.mjs';
 import { measureFlameStructure } from '../src/scene-structure.mjs';
 
 const pixels = new Uint8Array(320*240*3).fill(20);
@@ -31,3 +31,44 @@ for (const [boxArea, edgeDensity, upperEdgeDensity, uniformity, luminance, warmB
   assert.equal(isLikelyScene({...sample,paperGeometry:{...sample.paperGeometry,usablePaper:true,rectangularPaper:true}}),false);
 }
 console.log('Weekend role regression PASS');
+
+// Anonymous measurements: a brighter lamp array rejected by the old dark-only
+// entry gate, despite the downstream classifier already identifying lamps.
+const brighterLamp = {
+  reliable:false, number:null,
+  paperGeometry:{left:0,top:.2833333333,width:1,height:.7166666667,
+    score:.3098697917,fill:.4323764535,boxArea:.7166666667,
+    usablePaper:false,rectangularPaper:false},
+  visualMetrics:{edgeDensity:.1099739583,upperEdgeDensity:.0482942708,uniformity:.5548828125},
+  sceneMetrics:{luminance:89.0851869583,warmBrightRatio:.1374479167,darkRatio:.4051041667,
+    flameStructure:{count:130,columns:5,rows:6,spanX:.9940625,spanY:.5929924242,distributed:true}},
+};
+assert.equal(classifySceneVisualScore(brighterLamp.sceneMetrics),'scene-lamp');
+assert.equal(isLikelyScene(brighterLamp),true,'a no-paper distributed lamp classification must reach scene assignment');
+for(const [darkRatio,luminance,warmBrightRatio] of [[.33,105,.11],[.41,89,.137],[.58,78,.06],[.75,50,.032]]) {
+  const sample={...brighterLamp,sceneMetrics:{...brighterLamp.sceneMetrics,darkRatio,luminance,warmBrightRatio}};
+  assert.equal(classifySceneVisualScore(sample.sceneMetrics),'scene-lamp');
+  assert.equal(isLikelyScene(sample),true,'entry and category must agree across lamp exposures');
+}
+for(const geometry of [{usablePaper:true,rectangularPaper:true},{usablePaper:true,rectangularPaper:false},{usablePaper:false,rectangularPaper:true}]) {
+  assert.equal(isLikelyScene({...brighterLamp,paperGeometry:{...brighterLamp.paperGeometry,...geometry}}),false,'flames cannot overrule paper evidence');
+}
+assert.equal(isLikelyScene({...brighterLamp,sceneMetrics:{...brighterLamp.sceneMetrics,flameStructure:{distributed:false}}}),false);
+assert.equal(isLikelyScene({...brighterLamp,sceneMetrics:{...brighterLamp.sceneMetrics,flameStructure:undefined}}),false);
+assert.equal(isLikelyScene({...brighterLamp,reliable:true,number:123,evidence:{method:'photo-code-multi-crop-consensus'}}),false);
+console.log('Brighter lamp role/category consistency PASS');
+
+// Real anonymous counterexamples: paper-box detection failed on two sheets
+// photographed among candles. Flame count alone must never decide their role.
+for(const [width,top,height,fill,score,edgeDensity,upperEdgeDensity,uniformity,luminance,warmBrightRatio,darkRatio,count] of [
+  [.9375,.2416666667,.5166666667,.3002956989,.1454557292,.1556380208,.1218098958,.4272916667,94.6204391667,.0974479167,.3652604167,22],
+  [1,.5583333333,.4416666667,.5235259434,.2312239583,.245859375,.1831510417,.3915885417,93.7057331563,.1955208333,.3745833333,97],
+]) {
+  assert.equal(isLikelyScene({reliable:false,number:null,
+    paperGeometry:{usablePaper:false,rectangularPaper:false,width,top,height,bottom:top+height,fill,score,boxArea:width*height},
+    visualMetrics:{edgeDensity,upperEdgeDensity,uniformity},
+    sceneMetrics:{luminance,warmBrightRatio,darkRatio,flameStructure:{count,distributed:true}},
+  }),false,'candle-lit detailed sheets stay eligible for numbering even when paper detection fails');
+}
+assert.equal(isLikelyScene({...brighterLamp,visualMetrics:{...brighterLamp.visualMetrics,edgeDensity:undefined}}),false,'missing text evidence must not open the new route');
+console.log('Candle-lit paper counterexamples PASS');

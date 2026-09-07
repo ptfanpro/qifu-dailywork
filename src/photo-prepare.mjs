@@ -2709,12 +2709,16 @@ export function isLikelyScene(item) {
   const metrics = item.visualMetrics || {};
   const geometry = item.paperGeometry || {};
   const scene = item.sceneMetrics || {};
-  // Spatial flame population tolerates camera angle/exposure changes without
-  // relaxing the old global edge thresholds. A foreground sheet or direct
-  // visible code always vetoes this additional route.
+  // Use the SAME lamp-category decision as classifyScenes, with independent
+  // no-paper and distributed-flame evidence. A second dark-only threshold here
+  // rejected brighter lamp arrays before their correct category could be used.
+  // Colour alone is insufficient; foreground paper/direct codes still veto.
+  // A failed paper box is not proof of no sheet: retain the existing low-text
+  // edge-density bound, since candles behind a detailed sheet also form arrays.
   if (geometry.usablePaper === false && geometry.rectangularPaper === false
-    && scene.darkRatio >= .55 && scene.luminance <= 85
-    && scene.flameStructure?.distributed === true) return true;
+    && scene.flameStructure?.distributed === true
+    && Number.isFinite(metrics.edgeDensity) && metrics.edgeDensity <= .13
+    && classifySceneVisualScore(scene) === 'scene-lamp') return true;
   const darkSceneOrLowText = Number(scene.darkRatio ?? 1) <= 0.25
     || Number(metrics.edgeDensity || 0) <= 0.13;
   const sprawlingLights = !geometry.usablePaper

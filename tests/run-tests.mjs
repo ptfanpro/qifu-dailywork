@@ -742,7 +742,7 @@ assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
 assert.ok(uiSource.includes(`V${JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version}`));
-assert.match(uiSource,/周末故障综合修复/);
+assert.match(uiSource,/场景分类一致性修复/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
