@@ -16,5 +16,8 @@ try {
   const image = await sharp({text: {text: sample, font: 'Microsoft YaHei 48', rgba: true}})
     .flatten({background: 'white'}).extend({top: 12, bottom: 12, left: 12, right: 12, background: 'white'}).png().toBuffer();
   assert.equal((await reader.readLine(image)).text, sample);
+  const vertical = await sharp({text: {text: [...sample].join('\n'), font: 'Microsoft YaHei 48', rgba: true}})
+    .flatten({background: 'white'}).extend({top: 12, bottom: 12, left: 12, right: 12, background: 'white'}).png().toBuffer();
+  assert.equal((await reader.readLine(await sharp(vertical).rotate(270).png().toBuffer())).text, sample);
   console.log('Chinese actual-model synthetic smoke passed; not photo binding acceptance');
 } finally { await reader.release(); }

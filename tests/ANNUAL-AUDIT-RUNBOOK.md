@@ -32,3 +32,9 @@ UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读
 中文试验模型仅位于 `PRIVATE_OUTPUT/models/`：检测模型仍为上文固定版本；识别模型 `ch_PP-OCRv4_rec_mobile.onnx` 使用 RapidAI v3.9.2 清单中的 SHA-256 `48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b`。脚本不下载模型，拒绝哈希不一致；使用模型内嵌 6,623 项字典，不能用现用英文 436 项字典。`node tests/experiments/chinese-reader-smoke.mjs PRIVATE_OUTPUT/models` 是实际模型合成中文烟雾测试，缺模型时失败，不伪装跳过为成功。
 
 `audit-status` 的 `bodyProbeRounds` 另列中文正文试验的证据可用性，不混入产品识别确认数。汇总只接受完成报告、相同源码/模型指纹及未变原件；缺少视图、读取异常、截断和 PDF 文字层不全分别标记。`stable-diagnostic-candidate` 只是同引擎两个边距视图的首选一致；即使只有一个特有片段也可能出现这一状态，所以绝不能当自动绑定或发布门槛。正文重复、旧页拆成多页以及背景文字仍需独立反例验证。
+
+`body-text-probe.mjs PRIVATE_OUTPUT --chinese --vertical PHOTO_SHA256 [...]` 额外读取文字检测器提出的竖排块。先以原图像素比例判断方向，按短边设置边距、旋转 270 度后送同一个中文模型；不按 PDF 答案选方向/裁框。横排路径保持原状，竖排仍是试验开关，不进入产品。报告显式记录 `expectedLayouts`；四个视图仍只有一个中文引擎。
+
+正文汇总 schema 2 要求完整的逐页排名，拒绝漏页/重复页。即使两个视图第一名相同，只要同一视图还读到另一个页面的特有正文，标为 `multi-page-body-evidence`；横竖路径指向不同页面则为 `conflicting-layout-evidence`。这可能来自旧页拆分、背景文字或噪声，不凭排名武断判断原因。
+
+`vertical-body-probe.mjs PRIVATE_OUTPUT PHOTO_SHA256 [...]` 保留 90/270 度方向的对照诊断，不赋号。合成中文烟雾测试仅证明固定模型能读横排及已旋转的竖排文字，不代表检测器一定会把竖排整列聚合成一个框；逐字分开的竖排仍是待验证限制。

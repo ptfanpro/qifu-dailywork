@@ -15,7 +15,9 @@ const require = createRequire(import.meta.url);
 const sharp = require('sharp');
 const [root, ...argumentsAfterRoot] = process.argv.slice(2);
 const useChinese = argumentsAfterRoot.includes('--chinese');
-const selectors = argumentsAfterRoot.filter(value => value !== '--chinese');
+const includeVertical = argumentsAfterRoot.includes('--vertical');
+if (includeVertical && !useChinese) throw Error('--vertical requires --chinese');
+const selectors = argumentsAfterRoot.filter(value => value !== '--chinese' && value !== '--vertical');
 requirePrivateAuditRoot(root);
 if (!selectors.length || selectors.some(value => !/^[a-f0-9]{64}$/.test(value))) throw Error('PRIVATE_ROOT PHOTO_SHA256 [...]');
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -28,7 +30,7 @@ const checked = source => {
 const inventory = JSON.parse(fs.readFileSync(path.join(root, 'inventory.json')));
 const output = fs.mkdtempSync(path.join(root, 'body-text-probe-'));
 const sourceFingerprint = sha(JSON.stringify(['tests/experiments/body-text-probe.mjs',
-  'tests/experiments/body-text-evidence.mjs', 'tests/experiments/chinese-text-reader.mjs',
+  'tests/experiments/body-text-evidence.mjs', 'tests/experiments/chinese-text-reader.mjs', 'tests/experiments/vertical-body-regions.mjs',
   'tests/experiments/text-regions.mjs', 'src/local-ocr.mjs', 'src/photo-prepare.mjs', 'src/ocr-image.mjs',
   'ui/Read-WindowsOcr.ps1'].map(name => [name, sha(fs.readFileSync(path.join(appRoot, name)))])));
 const pdfjs = await import(pathToFileURL(require.resolve('pdfjs-dist/legacy/build/pdf.mjs')).href);
@@ -83,7 +85,7 @@ for (const selector of [...new Set(selectors)]) {
       batchErrorCount: readings.ocrDiagnostics.errorCount, textReturned: Boolean(reading?.text),
       ...rankBodyTextEvidence(reading?.text || '', pageCache.get(day.date))};
   });
-  if (chinese) for (const view of await chinese.read(bytes)) {
+  if (chinese) for (const view of await chinese.read(bytes, {includeVertical})) {
     results.push({view: view.view, readerAvailable: view.errors === 0, batchErrorCount: view.errors,
       textReturned: Boolean(view.text), lineCount: view.lineCount, regions: view.regions, truncated: view.truncated,
       ...rankBodyTextEvidence(view.text, pageCache.get(day.date))});
@@ -91,6 +93,7 @@ for (const selector of [...new Set(selectors)]) {
   checked(photo);
   for (const pdf of day.pdfs) checked(pdf);
   const report = {schemaVersion: 1, sourceFingerprint, date: day.date, photoSha256: selector,
+    expectedLayouts: includeVertical ? ['horizontal', 'vertical'] : ['horizontal'],
     modelSha256: chinese?.modelSha256 || null, dictionaryLength: chinese?.dictionaryLength || null,
     status: 'diagnostic-only-not-binding', sourceUnchanged: true, seconds: (Date.now() - started) / 1000, results};
   fs.writeFileSync(path.join(imageDir, 'report.json'), JSON.stringify(report, null, 2));
