@@ -2122,6 +2122,54 @@ export function independentCodeConsensus(observations) {
   return confirmed.length === 1 ? confirmed[0][0] : null;
 }
 
+// Keep audit results outside the mutable proposal/evidence fields. An empty,
+// unavailable or contradictory independent reading is NOT permission to run
+// a missing-slot repair. Re-evaluate recorded observations, not a method label.
+export function photoCodeAuditBlockReason(item) {
+  const history=item?.codeAuditHistory;
+  if(!history)return null;
+  if(!Array.isArray(history)||!history.length)return 'independent-code-audit-incomplete';
+  for(const audit of history) {
+    if(audit.status!=='confirmed')return audit.reason || 'independent-code-audit-incomplete';
+    if(independentCodeConsensus(audit.observations)!==audit.number)return 'independent-code-audit-incomplete';
+    if(item.number!==audit.number)return 'independent-code-audit-number-changed';
+  }
+  return null;
+}
+
+export function recordIndependentCodeAudit(item,audit,expectedNumbers) {
+  const observations=(audit?.observations || []).map(value=>({
+    number:value.number,engine:value.engine,crop:value.crop,
+    prefixDistance:value.prefixDistance,fullCodeValidated:value.fullCodeValidated,
+  }));
+  const observedNumber=independentCodeConsensus(observations);
+  const validNumbers=new Set(observations.filter(value=>Number.isInteger(value.number)
+    && value.number>0 && value.prefixDistance===0 && value.fullCodeValidated===true
+    && ['windows','tesseract','paddle'].includes(value.engine) && value.crop).map(value=>value.number));
+  const reason=audit?.errorCode ? 'independent-code-audit-unavailable'
+    : validNumbers.size>1 ? 'independent-code-audit-conflicting'
+      : !Number.isInteger(observedNumber) ? 'independent-code-audit-incomplete'
+        : !expectedNumbers.has(observedNumber) ? 'independent-code-audit-outside-pdf'
+          : audit.number!==observedNumber ? 'independent-code-audit-number-mismatch' : null;
+  const previousNumber=item.number;
+  const entry={status:reason?'unresolved':'confirmed',reason,previousNumber,number:reason?null:observedNumber,observations};
+  item.codeAuditHistory=[...(item.codeAuditHistory || []),entry];
+  item.number=entry.number;
+  if(!reason) {
+    item.evidence={...item.evidence,method:'independent-ocr-engines-full-code-consensus',previousNumber,
+      observations:observations.map(value=>({...value})),votes:new Set(observations.map(x=>x.crop)).size,
+      maxConfidence:null,prefixDistance:0,fullCodeValidated:true,
+      independentEngines:[...new Set(observations.map(x=>x.engine))]};
+  }
+  const block=photoCodeAuditBlockReason(item);
+  item.reliable=!block;
+  if(block) {
+    item.number=null;
+    item.pdfRecheck={status:'inconclusive',reason:block,claimedNumber:previousNumber};
+  }
+  return entry;
+}
+
 export async function auditConflictingPhotoCode({worker,appRoot,item,expectedPrefix,expectedNumbers,cropDir}) {
   const decoded=await decodeOcrSource(fs.readFileSync(item.file));
   const metadata=autoOrientedMetadata(await sharpFile(item.file).metadata());
@@ -2141,22 +2189,33 @@ export async function auditConflictingPhotoCode({worker,appRoot,item,expectedPre
   }
   try {
     const windows=readWindowsOcrTails(appRoot,files,cropDir);
-    for(const file of files) {
-      const readings=[['windows',windows.get(path.resolve(file))?.text || '']];
-      const tess=await worker.recognize(file);
-      readings.push(['tesseract',tess.data.text]);
-      try {
-        const portable=await recognizeLocalTextLine(appRoot,fs.readFileSync(file));
-        if(portable.confidence>=.65) readings.push(['paddle',portable.text]);
-      } catch { /* Windows + bundled Tesseract still provide independent readings. */ }
-      for(const [engine,text] of readings) for(const number of parseCompletePrintedCodes(text,expectedPrefix).numbers) {
+    const appendReading=(engine,text,file)=>{
+      for(const number of parseCompletePrintedCodes(text,expectedPrefix).numbers) {
         observations.push({number,prefixDistance:0,fullCodeValidated:true,engine,crop:path.basename(file)});
       }
+    };
+    // Save each engine's results immediately. If the next engine throws on
+    // the first crop, the already-returned Windows batch is still evidence.
+    for(const file of files)appendReading('windows',windows.get(path.resolve(file))?.text || '',file);
+    for(const file of files) {
+      const tess=await worker.recognize(file);
+      appendReading('tesseract',tess.data.text,file);
+      try {
+        const portable=await recognizeLocalTextLine(appRoot,fs.readFileSync(file));
+        if(portable.confidence>=.65) appendReading('paddle',portable.text,file);
+      } catch { /* Windows + bundled Tesseract still provide independent readings. */ }
     }
     const observedNumber=independentCodeConsensus(observations);
     return {number:expectedNumbers.has(observedNumber)?observedNumber:null,observedNumber,observations};
+  } catch {
+    // Retain any observations collected before a later reader failed; callers
+    // must not turn the exception into the original, apparently reliable claim.
+    return {number:null,observedNumber:null,observations,errorCode:'independent-reader-unavailable'};
   } finally {
-    for(const file of files) fs.rmSync(file,{force:true});
+    // A locked temporary crop must not replace the audit return value with an
+    // exception and erase all collected observations. Outer task cleanup also
+    // retries only this task's crop directory; original photos are untouched.
+    for(const file of files) { try { fs.rmSync(file,{force:true}); } catch {} }
   }
 }
 
@@ -2167,6 +2226,7 @@ export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = nu
   // against PDF pages, but keep tiny true-scene colour islands out of the much
   // more expensive matcher.
   const eligible = recognized.filter((item) => {
+    if(photoCodeAuditBlockReason(item))return false;
     if (item.reliable) return false;
     const geometry = item.paperGeometry || {};
     return Boolean(geometry.usablePaper || geometry.rectangularPaper
@@ -2312,7 +2372,11 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       && claimedPages[0].portrait === item.evidence.photoPortrait
       && item.evidence.claimedPdfPortrait !== item.evidence.repairedPdfPortrait
       && pdfPaperColor(claimedPages[0]) === item.evidence.paperColor;
-    if (method === 'independent-ocr-engines-full-code-consensus' && !hasIndependentFullCodeEvidence(item)) {
+    if (photoCodeAuditBlockReason(item)) {
+      reason = photoCodeAuditBlockReason(item);
+    } else if (visibleConsensus && !trustedManual(item) && hasStrongOcrConflict(item,claimedNumber)) {
+      reason = 'strong-code-candidates-conflict';
+    } else if (method === 'independent-ocr-engines-full-code-consensus' && !hasIndependentFullCodeEvidence(item)) {
       reason = 'independent-code-evidence-incomplete-or-conflicting';
     } else if (method === 'existing-numeric-filename-claim' && strongObservedConflict) {
       reason = 'visible-code-disagrees-with-filename';
@@ -2379,7 +2443,7 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       // No usable fingerprint / no discriminating margin is missing evidence,
       // not positive evidence of a wrong code. Keep this item unassigned, but
       // do not turn it into a hard conflict that blocks unrelated good photos.
-      const insufficient=['paper-fingerprint-unavailable','pdf-fingerprint-score-too-low','pdf-fingerprint-margin-too-small'].includes(reason);
+      const insufficient=reason.startsWith('independent-code-audit-') || ['strong-code-candidates-conflict','paper-fingerprint-unavailable','pdf-fingerprint-score-too-low','pdf-fingerprint-margin-too-small'].includes(reason);
       status = insufficient ? 'inconclusive' : 'rejected';
       item.pdfRecheck = {status,reason,claimedNumber};
       if(insufficient)inconclusive += 1;else rejected += 1;
@@ -2804,6 +2868,7 @@ function hasIndependentFullCodeEvidence(item) {
 }
 
 export function hasDirectVisibleCodeEvidence(item) {
+  if(photoCodeAuditBlockReason(item))return false;
   if (!item?.reliable || !Number.isInteger(item.number)) return false;
   if(hasIndependentFullCodeEvidence(item))return true;
   if(hasWindowsFullCodeEvidence(item))return true;
@@ -2820,6 +2885,9 @@ export function hasDirectVisibleCodeEvidence(item) {
 }
 
 export function isLikelyScene(item) {
+  // Failure to disambiguate a previously proposed printed code does not turn
+  // the photographed paper into a scene, even if candles fill its background.
+  if(item?.codeAuditHistory?.length)return false;
   // Role evidence is ordered, not blended: a full visible business code that
   // was independently read in adjacent/strict code crops is conclusive paper
   // evidence.  Global colour and brightness heuristics may never overrule it.
@@ -2993,6 +3061,7 @@ export async function diagnosePhotoStructure(file) {
 }
 
 export function hasStrongOcrConflict(item, expectedNumber, assignedNumbers = new Set()) {
+  if(photoCodeAuditBlockReason(item))return true;
   return (item?.candidates || []).some((candidate) => candidate.number !== expectedNumber
     && candidate.prefixDistance <= 1
     && (candidate.votes >= 2
@@ -3033,7 +3102,7 @@ export function isContinuousPhotoCapture(left, right, maximumGapMilliseconds = 1
 export function inferPhotoSequences(recognized, expectedNumbers) {
   const assigned = new Map();
   for (let index = 0; index < recognized.length; index += 1) {
-    if (recognized[index].reliable) assigned.set(index, recognized[index].number);
+    if (recognized[index].reliable && !photoCodeAuditBlockReason(recognized[index])) assigned.set(index, recognized[index].number);
   }
   const paperLike = (item) => Boolean(item.paperGeometry?.rectangularPaper
     || (item.paperGeometry?.score >= 0.09
@@ -3067,7 +3136,7 @@ export function inferPhotoSequences(recognized, expectedNumbers) {
     const method = String(item?.evidence?.method || '');
     const strictWindows = /^windows-ocr-strict-(?:lower-code-box|code-crop)$/.test(method)
       && Number(item?.evidence?.maxConfidence || 0) >= 80;
-    return item?.reliable && Number.isInteger(item.number)
+    return !photoCodeAuditBlockReason(item) && item?.reliable && Number.isInteger(item.number)
       && /(?:ocr|photo-code|targeted-landscape-code)/.test(method)
       && (strictWindows || (Number(item?.evidence?.votes || 0) >= 2
         && Number(item?.evidence?.maxConfidence || 0) >= 20));
@@ -3166,7 +3235,7 @@ export function inferPhotoSequences(recognized, expectedNumbers) {
     const b = right.paperGeometry || {};
     const av = left.visualMetrics || {};
     const bv = right.visualMetrics || {};
-    return !isLikelyScene(right)
+    return !photoCodeAuditBlockReason(left) && !photoCodeAuditBlockReason(right) && !isLikelyScene(right)
       && Number(a.boxArea || 0) >= 0.18
       && Number(b.boxArea || 0) >= 0.18
       && Math.abs(Number(a.top || 0) - Number(b.top || 0)) <= 0.08
@@ -3186,7 +3255,8 @@ export function inferPhotoSequences(recognized, expectedNumbers) {
     const anchorNumber = assigned.get(anchorIndex);
     const directions = [1, -1].filter((direction) => run.every((index, offset) => {
       const number = anchorNumber + direction * (offset + 1);
-      return expectedNumbers.has(number) && !usedNumbers.has(number);
+      return expectedNumbers.has(number) && !usedNumbers.has(number)
+        && !hasStrongOcrConflict(recognized[index],number,usedNumbers);
     }));
     if (directions.length !== 1) continue;
     const direction = directions[0];
@@ -3220,12 +3290,12 @@ export function inferPhotoGapsAroundExistingNumbers(recognized, expectedNumbers,
   const used = new Set(occupiedNumbers);
   for (let index = 0; index < recognized.length; index += 1) {
     const item = recognized[index];
-    if (item?.reliable && Number.isInteger(item.number)) {
+    if (item?.reliable && Number.isInteger(item.number) && !photoCodeAuditBlockReason(item)) {
       assignedByIndex.set(index, item.number);
       used.add(item.number);
     }
   }
-  const paperLike = (item) => Boolean(!isLikelyScene(item)
+  const paperLike = (item) => Boolean(!photoCodeAuditBlockReason(item) && !isLikelyScene(item)
     && (item.paperGeometry?.usablePaper || item.paperGeometry?.rectangularPaper
       || (Number(item.paperGeometry?.score || 0) >= 0.075 && Number(item.paperGeometry?.boxArea || 0) >= 0.10)));
   const compatible = (item, anchor) => {
@@ -3320,7 +3390,7 @@ function captureSequenceProposal(recognized, sourceIndex, direction) {
     const chronologicalRight = direction === 1 ? recognized[index] : recognized[previousIndex];
     if (!isContinuousPhotoCapture(chronologicalLeft, chronologicalRight)) return null;
     const item = recognized[index];
-    if (!item?.reliable || !Number.isInteger(item.number) || isLikelyScene(item)) return null;
+    if (!item?.reliable || !Number.isInteger(item.number) || photoCodeAuditBlockReason(item) || isLikelyScene(item)) return null;
     anchors.push({ index, number: item.number });
   }
   if (anchors.length < 3) return null;
@@ -3339,7 +3409,7 @@ export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, occu
   const numberGroups = new Map();
   for (let index = 0; index < recognized.length; index += 1) {
     const item = recognized[index];
-    if (!item?.reliable || !Number.isInteger(item.number)) continue;
+    if (!item?.reliable || !Number.isInteger(item.number) || photoCodeAuditBlockReason(item)) continue;
     if (!numberGroups.has(item.number)) numberGroups.set(item.number, []);
     numberGroups.get(item.number).push(index);
   }
@@ -3452,7 +3522,7 @@ export function resolveAmbiguousPhotosByGlobalSet(recognized, expectedNumbers, o
     const optionFrequency = new Map();
     for (let index = 0; index < recognized.length; index += 1) {
       const item = recognized[index];
-      if (item?.reliable || !item?.paperGeometry?.usablePaper || isLikelyScene(item)) continue;
+      if (item?.reliable || photoCodeAuditBlockReason(item) || !item?.paperGeometry?.usablePaper || isLikelyScene(item)) continue;
       const options = [...new Set((item.candidates || [])
         .filter((candidate) => (Number(candidate.votes || 0) >= 2 && Number(candidate.prefixDistance ?? 99) <= 3.3)
           // 精确平台前缀的单票结果可以作为全局候选，但仍必须通过下方
@@ -3536,7 +3606,7 @@ export async function reconcileDuplicatePhotoNumbersByPdfStructure(
   const groups = new Map();
   for (let index = 0; index < recognized.length; index += 1) {
     const item = recognized[index];
-    if (!item?.reliable || !Number.isInteger(item.number) || isLikelyScene(item)) continue;
+    if (!item?.reliable || !Number.isInteger(item.number) || photoCodeAuditBlockReason(item) || isLikelyScene(item)) continue;
     if (!groups.has(item.number)) groups.set(item.number, []);
     groups.get(item.number).push({ index, item });
   }
@@ -3628,6 +3698,7 @@ function applyVerifiedFoldedPhotoEvidence(date, recognized, pdfPages) {
 }
 
 async function applyExactRemainingPortraitOrderEvidence(recognized, pdfPages) {
+  if(recognized.some(item=>photoCodeAuditBlockReason(item)))return;
   const assigned = new Set(recognized.filter((item) => item.reliable).map((item) => item.number));
   const remainingPages = pdfPages.filter((page) => Number.isInteger(page.number) && !assigned.has(page.number));
   const remainingPhotos = recognized.filter((item) => !item.reliable && !isLikelyScene(item));
@@ -3810,14 +3881,9 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       for(const item of conflicting) {
         let audit;
         try { audit=await auditConflictingPhotoCode({worker,appRoot,item,expectedPrefix,expectedNumbers,cropDir}); }
-        catch { onProgress?.('编号冲突独立复核不可用，保留原冲突，不能据此放行。'); continue; }
-        if(Number.isInteger(audit.number)) {
-          const previousNumber=item.number;
-          item.number=audit.number;
-          item.evidence={...item.evidence,method:'independent-ocr-engines-full-code-consensus',previousNumber,observations:audit.observations,
-            votes:new Set(audit.observations.map(x=>x.crop)).size,maxConfidence:null,prefixDistance:0,fullCodeValidated:true,
-            independentEngines:[...new Set(audit.observations.filter(x=>x.number===audit.number).map(x=>x.engine))]};
-        }
+        catch { audit={number:null,observations:[],errorCode:'independent-reader-unavailable'}; }
+        recordIndependentCodeAudit(item,audit,expectedNumbers);
+        if(!item.reliable)onProgress?.('编号冲突独立复核未通过，已保存原始观察；该照片保持未决，不按缺号或场景名额补齐。');
       }
       // “重新核对编号”不能把已经改成纯数字文件名的照片当成天然正确。
       // 先独立读取纸面可见编号，再在后面的 PDF 正文指纹阶段复核文件名声称。
@@ -4026,7 +4092,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     pendingIssues.push(`有 ${foreignNumericFiles.length} 张纯数字照片不属于本日唯一 PDF 编号，已从本日上传和计数中排除：${foreignNumericFiles.map((file)=>path.basename(file)).join('、')}。请将其移入原业务日期后补跑。`);
   }
   const reliableGroups = new Map();
-  for (const item of recognized.filter((value) => value.reliable)) {
+  for (const item of recognized.filter((value) => value.reliable && !photoCodeAuditBlockReason(value))) {
     if (!reliableGroups.has(item.number)) reliableGroups.set(item.number, []);
     reliableGroups.get(item.number).push(item);
   }
@@ -4053,16 +4119,20 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   const unresolved = recognized.filter((item) => !item.reliable && !duplicateSourceSet.has(item.file) && !verifiedSceneSourceSet.has(item.file)).map((item) => item.file);
   const sceneCandidates = recognized
     .filter((item) => item.reliable === false
+      && !photoCodeAuditBlockReason(item)
       && item.pdfRecheck?.status !== 'inconclusive'
       && (item.evidence?.method === 'scene-visual-fast-path' || isLikelyScene(item)))
     .map((item) => item.file);
   const ambiguousCodeCandidates = unresolved.filter((file) => !sceneCandidates.includes(file));
   const recognizedByFile = new Map(recognized.map((item) => [item.file, item]));
   const conflictingCodeCandidates = ambiguousCodeCandidates.filter((file) => {
+    if(photoCodeAuditBlockReason(recognizedByFile.get(file))==='independent-code-audit-conflicting')return true;
     const strong = (recognizedByFile.get(file)?.candidates || []).filter((candidate) => candidate.prefixDistance <= 2);
     return new Set(strong.map((candidate) => candidate.number)).size > 1;
   });
   const unreadableCodeCandidates = ambiguousCodeCandidates.filter((file) => !conflictingCodeCandidates.includes(file));
+  const unavailableAuditCount=recognized.filter(item=>photoCodeAuditBlockReason(item)==='independent-code-audit-unavailable').length;
+  if(unavailableAuditCount)pendingIssues.push(`有 ${unavailableAuditCount} 张照片的独立编号复核不可用；失败前观察已保留，未按剩余编号继续赋号。`);
   if (conflictingCodeCandidates.length) pendingIssues.push(`有 ${conflictingCodeCandidates.length} 张福单照片存在多个强编号候选，已保留原图等待人工确认。`);
   if (unreadableCodeCandidates.length) pendingIssues.push(`有 ${unreadableCodeCandidates.length} 张福单照片尚未可靠读出编号，已保留原图等待人工补录。`);
 
