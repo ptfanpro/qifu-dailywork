@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PrayerSite, resolveBlessingOrderSetUploadState } from './site.mjs';
+import {finishScenePasses,waitForUploadOrderOutcome} from './photo-online.mjs';
+import {getMachineLocalStateRoot} from './runtime-paths.mjs';
 import { Timing } from './timing.mjs';
 import { calculateQuantities, normalizeText, venueMessage } from './quantity.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolder as photoDayFolder, scanPhotoWorkday, splitUploadBatches } from './photos.mjs';
@@ -207,8 +209,8 @@ const root = path.resolve(args.root || '');
 if (!args.action || !root) { fail('缺少运行参数。'); process.exit(2); }
 const appRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // 运行断点、校验凭据、日志和原图备份必须与 NAS 业务目录隔离。
-// 以执行器父目录作为跨版本共享位置，升级到新版本后仍可安全续跑。
-const localStateRoot = path.join(path.dirname(appRoot), '祈福运行数据');
+// 祈福运行数据必须跨版本共享、跨电脑隔离；程序父目录可能是同步盘。
+const localStateRoot = getMachineLocalStateRoot();
 const credentialPath = path.join(localStateRoot, 'secure-login.dat');
 const credentialHelperPath = path.join(appRoot, 'ui', 'Read-SecureCredential.ps1');
 const automationCredentialPath = path.join(localStateRoot, 'secure-automation.dat');
@@ -581,6 +583,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
         uploadedCount:Object.keys(uploadedFiles).length,
         uploadedFiles,
         batches:Array.isArray(previous?.batches) ? previous.batches : [],
+        uncertainSubmission:previous?.uncertainSubmission === true,
         stage:'not-started'
       };
       if (!pendingFiles.length) {
@@ -665,6 +668,11 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
             atomic(receiptFile,receipt);
             throw new Error('本地已有成功上传回执，但与当前 PDF 绑定的线上订单全部显示未上传；证据冲突，已停止。');
           }
+          if (receipt.uncertainSubmission) {
+            receipt.stage='upload-outcome-unconfirmed-no-resubmit';
+            atomic(receiptFile,receipt);
+            throw new Error('上次提交结果仍未确认；即使重新启动也不会重传。请先核实平台上传结果。');
+          }
           receipt.stage = 'online-order-set-confirmed-none-uploaded';
           atomic(receiptFile,receipt);
           log(`线上订单集合复核通过：与当前 PDF 哈希绑定的 ${latestOrderState.expectedCount} 条订单全部仍为“福单未上传”，确认上次提交未生效；允许安全重试当前照片集合。`);
@@ -733,6 +741,10 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
         }
       }
       let allFilesReconciled = false;
+      if (receipt.uncertainSubmission) {
+        atomic(receiptFile,receipt);
+        throw new Error('存在未确认的上传提交，当前证据不足以安全重传；请先复核线上状态。');
+      }
       for (let index=0; index<batches.length; index++) {
         log(`正在上传第 ${index+1}/${batches.length} 批，共 ${batches[index].length} 张。`);
         receipt.currentBatch = index + 1;
@@ -765,16 +777,23 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
           try {
             result = await photoSite.uploadBlessingBatch(batches[index],photoDate,(stage) => {
               receipt.stage = stage;
+              // Persist before a potentially asynchronous write, not just in
+              // the catch block: a crash/restart must not erase uncertainty.
+              if (['submitting','month-submitted','upload-confirmed'].includes(stage)) receipt.uncertainSubmission=true;
               atomic(receiptFile,receipt);
             });
           } catch (uploadError) {
             if (uploadError?.code !== 'BLESSING_UPLOAD_OUTCOME_UNCONFIRMED') throw uploadError;
+            receipt.uncertainSubmission=true;
+            atomic(receiptFile,receipt);
             if (!uploadOrderScope.proven || !beforeOrderState) {
               throw new Error(`${uploadError.message} 当前 PDF 没有可验证的“PDF文件哈希＋订单ID集合”绑定凭据，禁止自动重试。`);
             }
             let afterOrderState;
             try {
-              afterOrderState = await queryPdfBoundPhotoUploadState(photoSite,photoDate,uploadOrderScope);
+              afterOrderState = await waitForUploadOrderOutcome(()=>queryPdfBoundPhotoUploadState(photoSite,photoDate,uploadOrderScope),{
+                onSnapshot(snapshot) { receipt.lastOnlineOrderState=orderStateEvidence(snapshot); atomic(receiptFile,receipt); },
+              });
             } catch {
               throw uploadError;
             }
@@ -802,53 +821,15 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
               atomic(receiptFile,receipt);
               throw new Error(`上传回执缺失后线上订单集合发生部分变化：${afterOrderState.uploadedCount} 条已上传、${afterOrderState.pendingCount} 条未上传。订单与纸张照片不是一对一关系，无法判断具体哪张成功；已停止且不会重传。`);
             } else {
-              receipt.stage = 'first-submit-no-online-change';
+              receipt.stage = 'upload-outcome-unconfirmed-no-resubmit';
               atomic(receiptFile,receipt);
-              log(`上传数字回执缺失，且线上精确订单集合没有发生变化；确认第一次提交未生效，仅安全重试同一批 ${batches[index].length} 张一次。`);
-              photoTiming.count('retry_count');
-              try {
-                result = await photoSite.uploadBlessingBatch(batches[index],photoDate,(stage) => {
-                  receipt.stage = `retry-${stage}`;
-                  atomic(receiptFile,receipt);
-                });
-                result = {...result,evidence:'single-safe-retry-with-unchanged-order-set'};
-              } catch (retryError) {
-                if (retryError?.code !== 'BLESSING_UPLOAD_OUTCOME_UNCONFIRMED') throw retryError;
-                let afterRetryState;
-                try {
-                  afterRetryState = await queryPdfBoundPhotoUploadState(photoSite,photoDate,uploadOrderScope);
-                } catch {
-                  throw retryError;
-                }
-                receipt.lastOnlineOrderState = orderStateEvidence(afterRetryState);
-                receipt.reconciledAt = new Date().toISOString();
-                if (afterRetryState.state === 'all-uploaded') {
-                  markAllAvailableFilesUploaded('post-retry-pdf-bound-order-set-all-uploaded',receipt.reconciledAt);
-                  receipt.onlineClosureCheckReady = true;
-                  receipt.stage = 'post-retry-order-set-reconciled';
-                  allFilesReconciled = true;
-                  result = {
-                    uploadedCount:batches[index].length,
-                    month:photoDate.slice(0,7).replace('-',''),
-                    files:batches[index].map((file)=>path.basename(file)),
-                    evidence:'post-retry-pdf-bound-order-set-all-uploaded',
-                  };
-                  log(`第二次数字回执仍缺失，但线上 ${afterRetryState.expectedCount} 条 PDF 订单已全部上传；已确认成功，绝不进行第三次提交。`);
-                } else {
-                  receipt.stage = samePhotoOrderUploadSnapshot(afterOrderState,afterRetryState)
-                    ? 'retry-no-online-change-stop'
-                    : 'retry-partial-online-change-stop';
-                  atomic(receiptFile,receipt);
-                  throw new Error(samePhotoOrderUploadSnapshot(afterOrderState,afterRetryState)
-                    ? '安全重试后线上精确订单集合仍无变化，确认上传未生效；已停止，绝不进行第三次提交。'
-                    : `安全重试后线上只发生部分变化：${afterRetryState.uploadedCount} 条已上传、${afterRetryState.pendingCount} 条未上传；已停止，绝不进行第三次提交。`);
-                }
-              }
+              throw new Error('上传回执缺失，有限次线上复查仍未确认结果。没有变化不代表提交失败：已保留待核对状态，不会自动再次上传。请先复核线上状态。');
             }
           }
         }
         receipt.batches.push(result);
         if (Number(result.uploadedCount) !== batches[index].length) throw new Error(`本批上传回执 ${result.uploadedCount} 与提交文件 ${batches[index].length} 不一致。`);
+        receipt.uncertainSubmission=false;
         for (const file of batches[index]) {
           const name = path.basename(file);
           if (receipt.uploadedFiles[name]?.sha256 !== manifest.fileHashes[name]) {
@@ -979,10 +960,14 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
         atomic(uploadReceiptFile,uploadReceipt);
       }
       if (!regularAlreadyComplete) {
-        for (const [mode, files] of [['water',manifest.files.waterScenes],['lamp',manifest.files.lampScenes]]) {
+        await finishScenePasses(photoSite,photoDate,[['water',manifest.files.waterScenes],['lamp',manifest.files.lampScenes]],{
+          expectedPhotoDir:sceneSourceEvidence.photoDir,
+          onStage(mode) {
           sceneReceipt.stage = `scene-${mode}`;
           atomic(sceneReceiptFile,sceneReceipt);
-          const current = await photoSite.uploadSceneMode(photoDate,mode,files,{expectedPhotoDir:sceneSourceEvidence.photoDir});
+          },
+          onResult(current) {
+          const mode=current.mode;
           const priorIndex = sceneReceipt.results.findIndex((item) => item?.mode === mode);
           // 若上次已上传成功，本次线上查询会得到“没有未上传订单”。保留原成功数量，
           // 只增加复核时间，避免把完成证据覆盖成 selectedCount=0。
@@ -991,9 +976,9 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
           } else if (priorIndex >= 0) sceneReceipt.results[priorIndex] = current;
           else sceneReceipt.results.push(current);
           atomic(sceneReceiptFile,sceneReceipt);
-        }
-        const sceneMissing = await photoSite.countUploadedWithoutScene(photoDate);
-        if (sceneMissing !== 0) throw new Error(`对应日期仍有 ${sceneMissing} 条“场景图未上传”，不会执行批量完成。`);
+          },
+          onRetry(remaining) { photoTiming.count('retry_count'); log(`复核仍有 ${remaining} 条场景图未上传，按当前缺失集合安全续跑，不重复处理已成功订单。`); },
+        });
       }
       const completableRows = regularAlreadyComplete ? [] : await photoSite.queryUploadedOrders(photoDate,{productMode:'all',sceneStatus:'已上传'});
       const completableManifest = completableRows.length ? PrayerSite.manifest(completableRows,photoDate) : null;

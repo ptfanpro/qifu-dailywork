@@ -5,6 +5,9 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { recognizeLocalTextLine, verifyLocalOcrAssets } from './local-ocr.mjs';
+import { measureFlameStructure } from './scene-structure.mjs';
+import { getMachineLocalStateRoot } from './runtime-paths.mjs';
+import {decodeOcrSource,extractOcrCrop} from './ocr-image.mjs';
 
 const require = createRequire(import.meta.url);
 const sharp = require('sharp');
@@ -139,15 +142,30 @@ const localOcrCenterCodeSweep = makeLocalOcrVerticalSweep(
 export const LOCAL_OCR_CENTER_CODE_SWEEP = localOcrLeftCodeSweep
   .flatMap((layout, index) => [layout, localOcrCenterCodeSweep[index]]);
 
-export function localOcrCodeLayoutsForPhoto(paperGeometry) {
+export function localOcrCodeLayoutsForPhoto(paperGeometry, preferredNames = []) {
   // 纸面明显落在画面下半部且连到右边界时，是 8 月 30 日供灯构图，编号
   // 位于画面中右侧；普通横版供水构图的编号则在最右侧。只用几何证据调整
   // 两组窄行的先后，不把坐标本身当作编号证据。
   const innerFirst = Number(paperGeometry?.top || 0) >= 0.45
     && Number(paperGeometry?.right || 0) >= 0.97;
-  return innerFirst
+  const legacy = innerFirst
     ? [...LOCAL_OCR_CENTER_CODE_SWEEP, ...LOCAL_OCR_INNER_CODE_SWEEP, ...LOCAL_OCR_RIGHT_CODE_SWEEP]
     : [...LOCAL_OCR_CENTER_CODE_SWEEP, ...LOCAL_OCR_RIGHT_CODE_SWEEP, ...LOCAL_OCR_INNER_CODE_SWEEP];
+  // Cover the entire right-hand code region with overlapping narrow windows.
+  // Previously x=.66..72 was split between centre (.57..69) and right
+  // (.69..90); widening either window also brought in the printed ornament.
+  // Geometry changes priority only, never which code positions are searched.
+  const grid=[];
+  const preferredTop=Math.max(.15,Math.min(.68,Number(paperGeometry?.top || .43)+.025));
+  const rowIndexes=Array.from({length:57},(_,i)=>i).sort((a,b)=>Math.abs(.145+a*.01-preferredTop)-Math.abs(.145+b*.01-preferredTop));
+  for(const row of rowIndexes) for(let lane=0;lane<10;lane++) {
+    grid.push({name:`local-ocr-grid${lane}-line-${String(row+1).padStart(2,'0')}`,left:.48+lane*.04,top:.145+row*.01,width:.12,height:.025});
+  }
+  const all=[...grid,...legacy];
+  const byName=new Map(all.map(layout=>[layout.name,layout]));
+  const preferred=[...new Set(preferredNames)].map(name=>byName.get(name)).filter(Boolean).slice(0,8);
+  const preferredSet=new Set(preferred.map(layout=>layout.name));
+  return [...preferred,...all.filter(layout=>!preferredSet.has(layout.name))];
 }
 
 export function prioritizedPhotoLayouts(geometry, dynamicLayouts) {
@@ -704,7 +722,7 @@ export function hasAdjacentLocalOcrConsensus(observations, number) {
   const indexesBySweep = new Map();
   const variantsByCrop = new Map();
   for (const item of observations.filter((value) => value.number === number)) {
-    const match = /^(local-ocr-(?:left|center|right|inner)-line)-(\d{2,3})(?::(color|normalized))?$/.exec(item.variant || '');
+    const match = /^(local-ocr-(?:left|center|right|inner|grid\d+)-line)-(\d{2,3})(?::(color|normalized))?$/.exec(item.variant || '');
     if (!match) continue;
     if (!indexesBySweep.has(match[1])) indexesBySweep.set(match[1], new Set());
     indexesBySweep.get(match[1]).add(Number(match[2]));
@@ -1012,9 +1030,12 @@ function isUsableOcrExtract(extract) {
   return Number(extract?.width || 0) >= 12 && Number(extract?.height || 0) >= 8;
 }
 
-async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeometry, expectedPrefix, expectedNumbers, cropDir }) {
+async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeometry, expectedPrefix, expectedNumbers, cropDir, preferredNames = [] }) {
   const assets = verifyLocalOcrAssets(appRoot);
   if (!assets.available) return null;
+  // One immutable read/decode per image, not one NAS read + JPEG decode +
+  // temporary PNG file for each of up to 304 overlapping code crops.
+  const decoded=await decodeOcrSource(fs.readFileSync(file));
   const observations = [];
   const appendObservations = (parsedItems, result, layout, variant) => {
     for (const item of parsedItems) observations.push({
@@ -1038,15 +1059,15 @@ async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeo
         maxConfidence: best.maxConfidence,
         layouts: best.layouts,
         modelSha256: assets.modelSha256,
+        successfulCropNames:[...new Set(observations.filter(item=>item.number===best.number && item.prefixDistance<=.1).map(item=>item.variant.split(':')[0]))].slice(0,8),
       },
       candidates: groups.slice(0, 5),
     };
   };
-  for (const layout of localOcrCodeLayoutsForPhoto(paperGeometry)) {
+  for (const layout of localOcrCodeLayoutsForPhoto(paperGeometry,preferredNames)) {
     const extract = cropFromRatios(metadata, layout);
     if (!isUsableOcrExtract(extract)) continue;
-    const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-paddle-color.png`);
-    await sharpFile(file).rotate().extract(extract).png().toFile(diagnostic);
+    const diagnostic = await extractOcrCrop(decoded,extract);
     try {
       const result = await recognizeLocalTextLine(appRoot, diagnostic);
       if (Number(result.confidence || 0) < 0.55) continue;
@@ -1065,9 +1086,7 @@ async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeo
       // OCR.  We do not spend this extra inference on blank or tail-only crops.
       if (parsedItems.some((item) => Number(item.prefixDistance ?? 99) <= 0.1)
         && Number(result.confidence || 0) >= 0.65) {
-        const normalizedDiagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-paddle-normalized.png`);
-        await sharpFile(file).rotate().extract(extract)
-          .greyscale().normalize().sharpen({ sigma: 1 }).png().toFile(normalizedDiagnostic);
+        const normalizedDiagnostic = await extractOcrCrop(decoded,extract,{normalized:true});
         const normalizedResult = await recognizeLocalTextLine(appRoot, normalizedDiagnostic);
         const normalizedItems = Number(normalizedResult.confidence || 0) >= 0.55
           ? parseLocalOcrCodeCandidates(normalizedResult.text, expectedPrefix, expectedNumbers) : [];
@@ -1099,7 +1118,7 @@ export function isReliableOcrConsensus(best, second = null, minimumConfidence = 
 export async function createOcrWorker(appRoot) {
   const langPath = path.join(appRoot, 'ocr-data');
   if (!fs.existsSync(path.join(langPath, 'eng.traineddata.gz'))) throw new Error('缺少本地 OCR 模型 eng.traineddata.gz。');
-  const cachePath = path.join(path.dirname(appRoot), '祈福运行数据', 'cache', 'ocr');
+  const cachePath = path.join(getMachineLocalStateRoot(), 'cache', 'ocr');
   fs.mkdirSync(cachePath, { recursive: true });
   const worker = await createWorker('eng', 1, { langPath, cachePath, gzip: true });
   await worker.setParameters({
@@ -1109,7 +1128,7 @@ export async function createOcrWorker(appRoot) {
   return worker;
 }
 
-export async function recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot = null) {
+export async function recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot = null, {preferredNames=[]} = {}) {
   // sharp().rotate().metadata() 仍返回原始像素宽高，不会把 EXIF 方向 6/8 的宽高
   // 自动互换；直接使用会把横向微信照片的比例框裁到完全错误的位置。
   const metadata = autoOrientedMetadata(await sharpFile(file).metadata());
@@ -1136,6 +1155,7 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     const local = await recognizeWithPortableLocalOcr({
       appRoot, file, metadata, paperGeometry: paperEvidence.geometry,
       expectedPrefix, expectedNumbers, cropDir,
+      preferredNames,
     });
     if (local) return {
       file,
@@ -2047,6 +2067,60 @@ export async function auditExistingNumericPhotoCode({ appRoot, file, expectedPre
   };
 }
 
+// Preprocessing twice is not an independent OCR engine. Duplicate full-code
+// claims need an independent reading, not a guess based on the missing tail.
+export function independentCodeConsensus(observations) {
+  const support = new Map();
+  for (const item of observations) {
+    if (!Number.isInteger(item.number) || !(Number(item.prefixDistance) <= 0.1)
+      || !['windows','tesseract','paddle'].includes(item.engine) || !item.crop) continue;
+    if (!support.has(item.number)) support.set(item.number, new Map());
+    const engines = support.get(item.number);
+    if (!engines.has(item.engine)) engines.set(item.engine, new Set());
+    engines.get(item.engine).add(item.crop);
+  }
+  const confirmed = [...support].filter(([, engines]) =>
+    [...engines.values()].filter(crops => crops.size >= 2).length >= 2);
+  return confirmed.length === 1 ? confirmed[0][0] : null;
+}
+
+export async function auditConflictingPhotoCode({worker,appRoot,item,expectedPrefix,expectedNumbers,cropDir}) {
+  const decoded=await decodeOcrSource(fs.readFileSync(item.file));
+  const metadata=autoOrientedMetadata(await sharpFile(item.file).metadata());
+  const layouts=localOcrCodeLayoutsForPhoto(item.paperGeometry);
+  const seeds=layouts.filter(layout=>(item.evidence?.successfulCropNames || []).includes(layout.name));
+  if(!seeds.length) return {number:null,observations:[]};
+  const files=[], seen=new Set(), observations=[];
+  for(const seed of seeds.slice(0,2)) for(const offset of [-.005,0,.005]) for(const shift of [0,.02,.04]) {
+    const layout={...seed,left:seed.left+shift,top:Math.max(0,seed.top+offset),width:.08,height:.025};
+    const extract=cropFromRatios(metadata,layout), key=JSON.stringify(extract);
+    if(seen.has(key)) continue;
+    seen.add(key);
+    const buffer=await extractOcrCrop(decoded,extract);
+    const file=path.join(cropDir,`${crypto.randomUUID()}-independent-code.png`);
+    await sharp(buffer).resize({height:120}).withMetadata({density:300}).png().toFile(file);
+    files.push(file);
+  }
+  try {
+    const windows=readWindowsOcrTails(appRoot,files,cropDir);
+    for(const file of files) {
+      const readings=[['windows',windows.get(path.resolve(file))?.text || '']];
+      const tess=await worker.recognize(file);
+      readings.push(['tesseract',tess.data.text]);
+      try {
+        const portable=await recognizeLocalTextLine(appRoot,fs.readFileSync(file));
+        if(portable.confidence>=.65) readings.push(['paddle',portable.text]);
+      } catch { /* Windows + bundled Tesseract still provide independent readings. */ }
+      for(const [engine,text] of readings) for(const code of parseOcrCandidates(text,expectedPrefix,expectedNumbers)) {
+        if(code.prefixDistance<=.1) observations.push({...code,engine,crop:path.basename(file)});
+      }
+    }
+    return {number:independentCodeConsensus(observations),observations};
+  } finally {
+    for(const file of files) fs.rmSync(file,{force:true});
+  }
+}
+
 export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = null, claimedNumbers = new Set()) {
   // Scene colour/brightness is not allowed to veto independent paper evidence.
   // A sheet behind candle flames can trip the scene heuristic even when it has
@@ -2519,7 +2593,9 @@ async function sceneVisualScore(file) {
     if (value <= 65) dark += 1;
   }
   const pixels = info.width * info.height;
-  return { luminance: luminance / pixels, warmBrightRatio: warmBright / pixels, darkRatio: dark / pixels };
+  const flameImage = await sharpFile(file).rotate().resize(320, 240, {fit:'fill'}).removeAlpha().toColourspace('srgb').raw().toBuffer({resolveWithObject:true});
+  const flameStructure = measureFlameStructure(flameImage.data,flameImage.info.width,flameImage.info.height,flameImage.info.channels);
+  return { luminance: luminance / pixels, warmBrightRatio: warmBright / pixels, darkRatio: dark / pixels, flameStructure };
 }
 
 // 场景补图可能一次只回传一张，不能依赖同批图片之间的相对明暗。这里保留
@@ -2633,6 +2709,12 @@ export function isLikelyScene(item) {
   const metrics = item.visualMetrics || {};
   const geometry = item.paperGeometry || {};
   const scene = item.sceneMetrics || {};
+  // Spatial flame population tolerates camera angle/exposure changes without
+  // relaxing the old global edge thresholds. A foreground sheet or direct
+  // visible code always vetoes this additional route.
+  if (geometry.usablePaper === false && geometry.rectangularPaper === false
+    && scene.darkRatio >= .55 && scene.luminance <= 85
+    && scene.flameStructure?.distributed === true) return true;
   const darkSceneOrLowText = Number(scene.darkRatio ?? 1) <= 0.25
     || Number(metrics.edgeDensity || 0) <= 0.13;
   const sprawlingLights = !geometry.usablePaper
@@ -3573,16 +3655,39 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
             ? `已复用 ${verifiedKnownNames.size} 张哈希一致的人工复核证据；另有 ${alreadyNamedExtraCount} 张已是规范命名，全部跳过重复 OCR。`
             : `已命中人工复核批次：PDF ${pdfPages.length} 页和 ${images.length} 张原图文件集一致，跳过重复 OCR，继续验证重复照片指纹。`);
       }
+      let preferredNames=[];
       for (const file of pendingImages) {
         if (verifiedKnownNames?.has(path.basename(file))) {
           recognized.push({ file, reliable: false, number: null, evidence: null, candidates: [], paperScore: 0, visualMetrics: {} });
         } else {
           current += 1;
           onProgress?.(`正在读取并识别新增原图 ${current}/${ocrImageCount}：${path.basename(file)}`);
-          const result = await recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot);
+          const result = await recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot,{preferredNames});
+          // Reuse only where to look first, never a previous image's number.
+          // Every new image still needs its own two-view code consensus.
+          if(result.evidence?.successfulCropNames?.length) preferredNames=result.evidence.successfulCropNames;
           result.paperScore = result.paperGeometry?.score ?? await largePaperScore(file);
           result.visualMetrics ||= await imageVisualMetrics(file);
           recognized.push(result);
+        }
+      }
+      const initialCounts=new Map();
+      for(const item of recognized) if(item.reliable && Number.isInteger(item.number)) initialCounts.set(item.number,(initialCounts.get(item.number)||0)+1);
+      for(const file of images) if(/^\d+$/.test(path.parse(file).name)) {
+        const number=Number(path.parse(file).name);
+        initialCounts.set(number,(initialCounts.get(number)||0)+1);
+      }
+      const conflicting=recognized.filter(item=>item.reliable && initialCounts.get(item.number)>1);
+      if(conflicting.length) onProgress?.(`编号冲突独立复核：${conflicting.length} 张照片将交叉核对不同 OCR 引擎，不按缺号猜测。`);
+      for(const item of conflicting) {
+        let audit;
+        try { audit=await auditConflictingPhotoCode({worker,appRoot,item,expectedPrefix,expectedNumbers,cropDir}); }
+        catch { onProgress?.('编号冲突独立复核不可用，保留原冲突，不能据此放行。'); continue; }
+        if(Number.isInteger(audit.number)) {
+          const previousNumber=item.number;
+          item.number=audit.number;
+          item.evidence={...item.evidence,method:'independent-ocr-engines-full-code-consensus',previousNumber,
+            independentEngines:[...new Set(audit.observations.filter(x=>x.number===audit.number).map(x=>x.engine))]};
         }
       }
       // “重新核对编号”不能把已经改成纯数字文件名的照片当成天然正确。

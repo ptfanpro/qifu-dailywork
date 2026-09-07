@@ -18,7 +18,10 @@ if ($missingDrive) {
 $runtime = Find-PrayerNodeRuntime
 if ($runtime.NodePath) { $env:NODE_PATH = $runtime.NodePath }
 $root = Split-Path -Parent $PSScriptRoot
+& (Join-Path $root 'tests\runtime-location-tests.ps1')
 & (Join-Path $root 'tests\process-safety-tests.ps1')
 & (Join-Path $root 'tests\ui-state-tests.ps1')
 & $runtime.Node (Join-Path $root 'tests\run-tests.mjs')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $runtime.Node (Join-Path $root 'tests\list-query-browser.mjs')
 exit $LASTEXITCODE

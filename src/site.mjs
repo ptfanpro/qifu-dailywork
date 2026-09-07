@@ -563,11 +563,36 @@ export class PrayerSite {
   }
   async submitListSearch(search = this.page.locator('input[value="检索"], button:has-text("检索")').first()) {
     await search.waitFor({ state:'visible', timeout:10000 });
-    const navigation = this.page.waitForNavigation({ waitUntil:'domcontentloaded', timeout:20000 }).catch(() => null);
-    try { await search.click(); }
-    catch (error) { if (!isNavigationRaceError(error) && !isClosedBrowserError(error)) throw error; }
-    await navigation;
-    await sleep(700);
+    const expected = await search.evaluate((element) => {
+      const form = element.closest('form');
+      if (!form) throw new Error('检索按钮没有归属表单');
+      const fields = {};
+      for (const name of ['startTime','endTime','state','upload','upload1','bType','supportName','bCode','orderCode','userId','receiveBlessing','aTd','handelType','type','typeCode','renewHandelState']) {
+        const control = form.elements.namedItem(name);
+        if (control) fields[name] = String(control.value ?? '');
+      }
+      return { action:form.action, method:form.method.toUpperCase(), fields };
+    });
+    // The old code swallowed navigation timeouts and read the previous table.
+    // A successful click is not evidence that the server applied our query.
+    const [response] = await Promise.all([
+      this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:this.listSearchTimeoutMs || 20000}),
+      search.click().catch(error=>{ if (!isNavigationRaceError(error)) throw error; }),
+    ]);
+    const expectedUrl = new URL(expected.action);
+    if (!response || !response.ok()) throw new Error('检索响应未成功，禁止把旧表格当作当前订单。');
+    const actualUrl = new URL(response.url());
+    if (actualUrl.origin !== expectedUrl.origin || actualUrl.pathname !== expectedUrl.pathname) throw new Error('检索被重定向，未取得目标业务列表；请检查登录。');
+    const request = response.request();
+    const submitted = new URLSearchParams(expected.method === 'POST' ? request.postData() || '' : actualUrl.search);
+    if (request.method() !== expected.method || Object.entries(expected.fields).some(([key,value])=>submitted.get(key) !== value)) {
+      throw new Error('检索请求的日期或筛选范围与计划不一致，已停止。');
+    }
+    const landed = await this.page.locator('form').evaluateAll((forms, names) => {
+      const form = forms.find(form=>names.every(name=>form.elements.namedItem(name)));
+      return form ? Object.fromEntries(names.map(name=>[name,String(form.elements.namedItem(name).value ?? '')])) : null;
+    },Object.keys(expected.fields));
+    if (!landed || Object.entries(expected.fields).some(([key,value])=>landed[key] !== value)) throw new Error('检索落地后的日期或筛选条件发生变化，禁止继续上传或批量完成。');
     this.timing.count('browser_action_count');
   }
   async readListPageTotal() {
@@ -1158,6 +1183,7 @@ export class PrayerSite {
       // and be accepted within the first 150 ms.
       const dialogStart = this.dialogs.length;
       onStage('month-submit-started');
+      onStage('submitting');
       await scheduleSiteClick(chooseButton, { markConsumed:true });
       onStage('month-submitted');
       this.timing.count('browser_action_count');
@@ -1248,7 +1274,7 @@ export class PrayerSite {
     await this.submitListSearch();
     const rows = await this.readRows();
     const total = await this.readListPageTotal();
-    if (total !== null && total > rows.length) throw new Error(`照片订单共 ${total} 条，超过当前页 ${rows.length} 条；为避免漏单已停止。`);
+    if (total === null || total !== rows.length) throw new Error(`照片订单分页数量与读取行数不一致，不能把异常列表当作零待办；已停止。`);
     return rows;
   }
   async queryUploadedOrders(date, options = {}) {

@@ -3,6 +3,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'SingleInstance.ps1')
 . (Join-Path $PSScriptRoot 'SettingsStore.ps1')
+. (Join-Path $PSScriptRoot 'RuntimePaths.ps1')
 . (Join-Path $PSScriptRoot 'Find-Runtime.ps1')
 . (Join-Path $PSScriptRoot 'SecureCredentialStore.ps1')
 
@@ -14,7 +15,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.6.7',
+        '祈福本地执行器 V9.6.8-rc.1',
         'OK',
         'Information'
     ) | Out-Null
@@ -24,7 +25,8 @@ if (-not $script:singleInstance.OwnsLock) {
 
 $appRoot = Split-Path -Parent $PSScriptRoot
 $dataDir = Join-Path $appRoot 'data'
-$script:localStateRoot = Join-Path (Split-Path -Parent $appRoot) '祈福运行数据'
+# 祈福运行数据只保存在本机；不自动导入其他电脑同步来的断点/凭据。
+$script:localStateRoot = Get-PrayerLocalStateRoot
 $settingsPath = Join-Path $script:localStateRoot 'settings.json'
 $script:credentialPath = Join-Path $script:localStateRoot 'secure-login.dat'
 $legacySettingsPath = Join-Path $dataDir 'settings.json'
@@ -47,7 +49,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.7（PDF订单集合对账修正版）'
+$form.Text = '祈福本地执行器 V9.6.8-rc.1（周末故障综合修复·验收候选）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -209,7 +211,8 @@ $script:backlogBusinessDate = $null
 $script:pdfWorkflowComplete = $false
 $script:pdfNextAction = 'export'
 $script:lastSummary = $null
-$script:uiLogPath = Join-Path $script:localStateRoot 'ui-run.log'
+New-Item -ItemType Directory -Force -Path (Join-Path $script:localStateRoot 'logs') | Out-Null
+$script:uiLogPath = Join-Path $script:localStateRoot ('logs\ui-{0}-{1}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'),$PID)
 $script:uiLogLength = 0
 $script:processTimer = New-Object System.Windows.Forms.Timer
 $script:processTimer.Interval = 250
@@ -218,6 +221,14 @@ function Save-Settings {
     Write-PrayerAtomicJson -Path $settingsPath -Value @{
         businessRoot = $rootBox.Text.Trim()
     }
+}
+function Clear-PrayerUiLog {
+    # Keep the previous failure evidence before clearing the visible log.
+    if ((Test-Path -LiteralPath $script:uiLogPath) -and (Get-Item -LiteralPath $script:uiLogPath).Length -gt 0) {
+        $archive = Join-Path (Split-Path -Parent $script:uiLogPath) ('history-{0}-{1}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'),[Guid]::NewGuid().ToString('N'))
+        Copy-Item -LiteralPath $script:uiLogPath -Destination $archive -ErrorAction Stop
+    }
+    [System.IO.File]::WriteAllText($script:uiLogPath,'',(New-Object System.Text.UTF8Encoding -ArgumentList $false))
 }
 function Update-CredentialButtons {
     $credentialFileExists = Test-Path -LiteralPath $script:credentialPath -PathType Leaf
@@ -685,7 +696,7 @@ function Start-Runner([string]$action, [bool]$authorized, [string]$flow, [bool]$
     $processInfo.CreateNoWindow = $true
     $processInfo.EnvironmentVariables['NODE_PATH'] = $env:NODE_PATH
     if ($clearLog) {
-        [System.IO.File]::WriteAllText($script:uiLogPath,'',(New-Object System.Text.UTF8Encoding -ArgumentList $false))
+        Clear-PrayerUiLog
         $script:uiLogLength = 0
         $logBox.Clear()
     } elseif (Test-Path -LiteralPath $script:uiLogPath) {
@@ -736,7 +747,7 @@ function Start-Initialization([string]$scope = 'all') {
         # 没有本地 PDF 的新业务日不应为了 PDF 登录检查锁住照片按钮。
         $script:initQueue.Enqueue('inspect')
     }
-    [System.IO.File]::WriteAllText($script:uiLogPath,'',(New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    Clear-PrayerUiLog
     $script:uiLogLength = 0
     $logBox.Clear()
     $globalStatus.Text = '正在初始化：先按保留期清理本机缓存，再读取本地与线上状态；不触碰 NAS 业务文件。'
@@ -920,7 +931,7 @@ $script:processTimer.Add_Tick({
 
 $photoMainButton.Add_Click({
     if (-not $script:running) {
-        [System.IO.File]::WriteAllText($script:uiLogPath,'',(New-Object System.Text.UTF8Encoding -ArgumentList $false))
+        Clear-PrayerUiLog
         $script:uiLogLength = 0; $logBox.Clear()
         Continue-PhotoFlow $false
     }

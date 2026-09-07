@@ -14,6 +14,10 @@ import { CAPTCHA_INPUT_SELECTOR, SCENE_UPLOAD_FRAME_TIMEOUT_MS, PrayerSite, choo
 import { cleanupLocalState } from '../src/cleanup.mjs';
 import { AutomationApiClient, canonicalTokenRequest, createTokenRequest, normalizeAutomationBaseUrl } from '../src/automation-auth.mjs';
 import { decodePaddleCtc, recognizeLocalTextLine, verifyLocalOcrAssets } from '../src/local-ocr.mjs';
+import './weekend-regression.mjs';
+import './photo-online-regression.mjs';
+import './ocr-crop-regression.mjs';
+import './code-coverage-regression.mjs';
 
 const require = createRequire(import.meta.url);
 const { PDFDocument } = require('pdf-lib');
@@ -983,8 +987,10 @@ assert.match(siteSource,/BLESSING_UPLOAD_OUTCOME_UNCONFIRMED/);
 assert.match(runnerSource,/resolveBlessingOrderSetUploadState/);
 assert.match(runnerSource,/resolvePdfBoundPhotoOrderScope/);
 assert.match(runnerSource,/PDF文件哈希＋订单ID集合/);
-assert.match(runnerSource,/精确订单集合没有发生变化/);
-assert.match(runnerSource,/绝不进行第三次提交/);
+assert.match(runnerSource,/upload-outcome-unconfirmed-no-resubmit/);
+assert.match(runnerSource,/uncertainSubmission:previous\?\.uncertainSubmission === true/);
+assert.equal((runnerSource.match(/await photoSite\.uploadBlessingBatch\(/g)||[]).length,1,'unknown upload outcome must never trigger a second write');
+assert.doesNotMatch(runnerSource,/single-safe-retry-with-unchanged-order-set/);
 assert.doesNotMatch(siteSource,/normalizedBlessingTail|resolveBlessingFileUploadStates/);
 assert.match(siteSource,/allInnerTexts/);
 assert.doesNotMatch(siteSource,/layui-layer-msg:visible[^\n]*\.allTextContents/);
@@ -1526,10 +1532,10 @@ const localExpectedNumbers=new Set(Array.from({length:15},(_,index)=>630+index))
 assert.deepEqual(parseLocalOcrCodeCandidates('631','268',localExpectedNumbers).map((item)=>item.number),[631]);
 assert.deepEqual(new Set(parseLocalOcrCodeCandidates('268-1-6317','268',localExpectedNumbers).map((item)=>item.number)),new Set([631,637]));
 assert.deepEqual(parseLocalOcrCodeCandidates('20260830','268',localExpectedNumbers),[]);
-assert.match(localOcrCodeLayoutsForPhoto({top:0.54,right:1})[0].name,/local-ocr-left-line/);
-assert.match(localOcrCodeLayoutsForPhoto({top:0.54,right:1})[1].name,/local-ocr-center-line/);
-assert.match(localOcrCodeLayoutsForPhoto({top:0.20,right:0.91})[0].name,/local-ocr-left-line/);
-assert.equal(localOcrCodeLayoutsForPhoto({top:0.20,right:0.91}).length,304);
+assert.match(localOcrCodeLayoutsForPhoto({top:0.54,right:1})[0].name,/local-ocr-grid0-line/);
+assert.match(localOcrCodeLayoutsForPhoto({top:0.54,right:1})[1].name,/local-ocr-grid1-line/);
+assert.match(localOcrCodeLayoutsForPhoto({top:0.20,right:0.91})[0].name,/local-ocr-grid0-line/);
+assert.equal(localOcrCodeLayoutsForPhoto({top:0.20,right:0.91}).length,874);
 assert.equal(hasAdjacentLocalOcrConsensus([
   {number:35,variant:'local-ocr-center-line-52:color',prefixDistance:0,confidence:94},
   {number:35,variant:'local-ocr-center-line-52:normalized',prefixDistance:0,confidence:88},
