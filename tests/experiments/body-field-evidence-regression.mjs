@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {compareBodyFieldEvidence} from './body-field-evidence.mjs';
 import {bodyTextGrams} from './body-text-evidence.mjs';
 import {visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
+import {buildVisualBodyPages} from './pdf-visual-body-evidence.mjs';
 const page = (pageNumber, fieldTexts, supplementalText = []) => ({pdfSha256: 'a'.repeat(64), pageNumber, fieldTexts, supplementalText});
 const views = (text, second = text, vertical = '') => visualBodyViewNames.map((view, i) => ({view,
   text: i === 0 ? text : i === 1 ? second : vertical, errors: 0, truncated: false}));
@@ -50,4 +51,34 @@ assert.throws(() => compareBodyFieldEvidence(views(''), [page(1, null)]), /corpu
 assert.throws(() => compareBodyFieldEvidence(views(''), [page(1, ['测试'], null)]), /corpus/);
 assert.ok(!JSON.stringify(result).includes('王小宁') && !JSON.stringify(result).includes('阖家'));
 assert.deepEqual(pages, [page(1, ['王小宁', '阖家平安']), page(2, ['陈小安', '阖家平安'])]);
+// A rotated PDF can expose each Chinese glyph as a separate text item. Do not
+// glue those glyphs in stream order: recover whole lines only from paired
+// visible-PDF observations, keeping their source distinct from extracted text.
+const glyphPages = [page(1, ['王', '小', '宁']), page(2, ['陈', '小', '安'])];
+const pdfViews = (text, second = text) => views('', '', text).map((v, i) => i === 3 ? {...v, text: second} : v);
+const visibleReadings = glyphPages.map((p, i) => ({...p, views: pdfViews(i ? '陈小安。阖家平安' : '王小宁。阖家平安')}));
+const recovered = compareBodyFieldEvidence(views('', '', '王小宁。阖家平安'), buildVisualBodyPages(glyphPages, visibleReadings));
+assert.equal(recovered.state, 'single-page-field-candidate', 'Visible whole-field observations must survive per-glyph PDF extraction');
+const recoveredPage = recovered.readings[2].ranked[0];
+assert.equal(recoveredPage.extractedFields, 0);
+assert.equal(recoveredPage.visibleConsensusFields, 2);
+assert.equal(recoveredPage.specificExactFields, 1);
+assert.equal(recoveredPage.observedAllExtractedDistinctFields, false, 'No extracted fields does not mean complete coverage');
+assert.equal(recoveredPage.visibleSpecificExactFields, 1);
+const onePdfView = structuredClone(visibleReadings);
+onePdfView[0].views[3].text = '阖家平安';
+assert.equal(compareBodyFieldEvidence(views('', '', '王小宁'), buildVisualBodyPages(glyphPages, onePdfView)).state,
+  'no-specific-field-evidence', 'One PDF OCR view cannot invent a complete field');
+const crossLinePdf = structuredClone(visibleReadings);
+crossLinePdf[0].views = pdfViews('王小\n宁');
+assert.equal(compareBodyFieldEvidence(views('', '', '王小宁'), buildVisualBodyPages(glyphPages, crossLinePdf)).state,
+  'no-specific-field-evidence', 'Never join separate visible lines');
+const duplicateVisible = structuredClone(visibleReadings);
+duplicateVisible[1].views = pdfViews('王小宁合家');
+assert.equal(compareBodyFieldEvidence(views('', '', '王小宁'), buildVisualBodyPages(glyphPages, duplicateVisible)).state,
+  'no-specific-field-evidence', 'Visible field as substring on another page is not unique');
+const sourceMismatch = buildVisualBodyPages(glyphPages, visibleReadings);
+sourceMismatch[0].visibleFieldViews[2].text = '未经核验';
+assert.throws(() => compareBodyFieldEvidence(views(''), sourceMismatch), /visible field/i);
+assert.ok(!JSON.stringify(recovered).includes('王小宁'));
 console.log('body field evidence regression passed (diagnostic only)');

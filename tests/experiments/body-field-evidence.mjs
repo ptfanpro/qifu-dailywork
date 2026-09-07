@@ -9,6 +9,29 @@ const normalize = text => text.normalize('NFKC').replace(/\s+/gu, '');
 // observation boundary. Never join neighboring OCR lines into a short name.
 const runs = text => text.split(/[\r\n\u2028\u2029]+/u)
   .flatMap(line => normalize(line).match(/\p{Script=Han}+/gu) || []);
+const fieldTerms = text => runs(text).filter(t => [...t].length >= 2 && [...t].length <= 40);
+
+function pairedVisibleFields(page) {
+  if (page.visibleFieldViews === undefined) return [];
+  const views = page.visibleFieldViews;
+  if (!Array.isArray(views) || views.length !== visualBodyViewNames.length
+    || page.supplementalText.length !== visualBodyViewNames.length) throw Error('Incomplete visible field sources');
+  const ordered = visualBodyViewNames.map(name => views.filter(v => v.view === name));
+  if (ordered.some(matches => matches.length !== 1)) throw Error('Incomplete visible field views');
+  const readings = ordered.flat();
+  if (readings.some((v, i) => typeof v.text !== 'string' || v.errors !== 0 || v.truncated !== false
+    || v.text !== page.supplementalText[i])) throw Error('Invalid visible field source identity');
+  // These are two views of ONE model, not two engines or verified semantic
+  // fields. Require the complete normalized run in both views of a layout;
+  // never assemble a run from adjacent PDF glyphs, lines or different views.
+  const paired = [];
+  for (const offset of [0, 2]) {
+    const first = new Set(fieldTerms(readings[offset].text));
+    const second = new Set(fieldTerms(readings[offset + 1].text));
+    paired.push(...[...first].filter(term => second.has(term)));
+  }
+  return [...new Set(paired)];
+}
 
 export function compareBodyFieldEvidence(views, pages) {
   if (!Array.isArray(pages) || !pages.length || pages.some(p => !/^[a-f0-9]{64}$/.test(p.pdfSha256 || '')
@@ -24,9 +47,11 @@ export function compareBodyFieldEvidence(views, pages) {
   const corpus = pages.map(page => {
     // One PDF text item is one extraction boundary. Do not form a name by
     // joining adjacent fields, page fragments, or text/visual sources.
-    const fields = page.fieldTexts.flatMap(runs).filter(t => [...t].length >= 2 && [...t].length <= 40);
+    const fields = page.fieldTexts.flatMap(fieldTerms);
+    const extractedTerms = [...new Set(fields)], visibleTerms = pairedVisibleFields(page);
     const allVisibleRuns = [...page.fieldTexts, ...page.supplementalText].flatMap(runs);
-    return {...page, fields, terms: [...new Set(fields)], allVisibleRuns};
+    return {...page, fields, extractedTerms, visibleTerms,
+      terms: [...new Set([...extractedTerms, ...visibleTerms])], allVisibleRuns};
   });
   const frequency = new Map();
   for (const term of new Set(corpus.flatMap(p => p.terms))) {
@@ -39,11 +64,17 @@ export function compareBodyFieldEvidence(views, pages) {
     const ranked = corpus.map(page => {
       const exact = page.terms.filter(term => observed.has(term));
       const specific = exact.filter(term => frequency.get(term) === 1);
+      const extractedExact = page.extractedTerms.filter(term => observed.has(term));
       return {pdfSha256: page.pdfSha256, pageNumber: page.pageNumber,
-        extractedFields: page.fields.length, distinctExtractedFields: page.terms.length,
-        exactFields: exact.length, missingExtractedFields: page.terms.length - exact.length,
+        extractedFields: page.fields.length, distinctExtractedFields: page.extractedTerms.length,
+        visibleConsensusFields: page.visibleTerms.length, distinctCandidateFields: page.terms.length,
+        exactFields: exact.length, extractedExactFields: extractedExact.length,
+        missingExtractedFields: page.extractedTerms.length - extractedExact.length,
+        missingCandidateFields: page.terms.length - exact.length,
         specificExactFields: specific.length, shortSpecificFields: specific.filter(t => [...t].length <= 3).length,
-        observedAllExtractedDistinctFields: page.terms.length > 0 && exact.length === page.terms.length,
+        extractedSpecificExactFields: specific.filter(t => page.extractedTerms.includes(t)).length,
+        visibleSpecificExactFields: specific.filter(t => page.visibleTerms.includes(t)).length,
+        observedAllExtractedDistinctFields: page.extractedTerms.length > 0 && extractedExact.length === page.extractedTerms.length,
         evidenceSha256: sha(specific.sort().join('\n'))};
     }).sort((a, b) => b.specificExactFields - a.specificExactFields || b.exactFields - a.exactFields
       || a.pdfSha256.localeCompare(b.pdfSha256) || a.pageNumber - b.pageNumber);

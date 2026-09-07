@@ -28,7 +28,10 @@ export function buildVisualBodyPages(pages, readings) {
     if (views.flat().some(view => view.errors !== 0 || view.truncated !== false || typeof view.text !== 'string')) {
       throw Error('Failed or truncated visual PDF read');
     }
-    byId.set(id, views.flat().map(view => view.text));
+    byId.set(id, views.flat().map(({view, text, errors, truncated}) => ({view, text, errors, truncated})));
   }
-  return pages.map((page, index) => ({...page, supplementalText: byId.get(identities[index])}));
+  return pages.map((page, index) => {
+    const visibleFieldViews = byId.get(identities[index]);
+    return {...page, supplementalText: visibleFieldViews.map(view => view.text), visibleFieldViews};
+  });
 }
