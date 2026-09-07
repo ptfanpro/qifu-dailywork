@@ -2017,30 +2017,37 @@ async function photoShapeFingerprints(item) {
 // Source observations deliberately have no PDF expected-set parameter. In
 // particular, 32 and 33 from different crops must stay contradictory even if
 // the current PDF contains only 32. WinRT does not return confidence values.
+export function parseCompletePrintedCodes(rawText,expectedPrefix) {
+  const prefix=String(expectedPrefix||'');
+  if(!/^\d{3,4}$/.test(prefix))return {numbers:[],incompleteTailObserved:false};
+  const text=normalizeOcr(rawText||'').replace(/[·•﹣－−]/g,'-').replace(/\s*-\s*/g,'-');
+  const matches=[...text.matchAll(new RegExp(`(?<![\\d-])${prefix}-1-(\\d{1,4})(?![\\d-])`,'g'))];
+  const numbers=[];
+  let incompleteTailObserved=false;
+  for(const match of matches) {
+    const after=text.slice(match.index+match[0].length);
+    if(/^\s+\d/.test(after)&&!new RegExp(`^\\s+${prefix}-1-\\d`).test(after)) {
+      incompleteTailObserved=true;
+      continue;
+    }
+    if(Number(match[1])>0)numbers.push(Number(match[1]));
+  }
+  return {numbers:[...new Set(numbers)],incompleteTailObserved};
+}
+
 export function summarizeWindowsCodeObservations(readings,expectedPrefix) {
   const observations=[],groups=new Map();
-  const prefix=String(expectedPrefix||'');
-  if(!/^\d{3,4}$/.test(prefix))return {reliable:false,number:null,observations,candidates:[],evidence:null};
   let incompleteTailObserved=false;
   for (const reading of readings) {
     if (!reading?.crop) continue;
     const crop=String(reading.crop);
     // WinRT may transcribe the two printed hyphens as middle dots. Normalize
     // separators only; do not join separated tail digits or complete a prefix.
-    const text=normalizeOcr(reading.text||'').replace(/[·•﹣－−]/g,'-').replace(/\s*-\s*/g,'-');
     // This high-trust path requires both separators. Optional-separator OCR
     // repair would turn "269-123" into the invented full code "269-1-23".
-    const matches=[...text.matchAll(new RegExp(`(?<![\\d-])${prefix}-1-(\\d{1,4})(?![\\d-])`,'g'))];
-    const numbers=[];
-    for(const match of matches) {
-      const after=text.slice(match.index+match[0].length);
-      if(/^\s+\d/.test(after)&&!new RegExp(`^\\s+${prefix}-1-\\d`).test(after)) {
-        incompleteTailObserved=true;
-        continue;
-      }
-      if(Number(match[1])>0)numbers.push(Number(match[1]));
-    }
-    for (const number of new Set(numbers)) {
+    const parsed=parseCompletePrintedCodes(reading.text,expectedPrefix);
+    incompleteTailObserved ||= parsed.incompleteTailObserved;
+    for (const number of parsed.numbers) {
       if (!groups.has(number)) groups.set(number,new Set());
       groups.get(number).add(crop);
       observations.push({number,crop,engine:'windows-ocr',confidence:null,prefixDistance:0,fullCodeValidated:true});
@@ -2098,14 +2105,18 @@ export async function auditExistingNumericPhotoCode({ appRoot, file, expectedPre
 // claims need an independent reading, not a guess based on the missing tail.
 export function independentCodeConsensus(observations) {
   const support = new Map();
-  for (const item of observations) {
-    if (!Number.isInteger(item.number) || !(Number(item.prefixDistance) <= 0.1)
+  for (const item of observations || []) {
+    if (!Number.isInteger(item.number) || item.number<=0 || item.prefixDistance!==0
+      || item.fullCodeValidated!==true
       || !['windows','tesseract','paddle'].includes(item.engine) || !item.crop) continue;
     if (!support.has(item.number)) support.set(item.number, new Map());
     const engines = support.get(item.number);
     if (!engines.has(item.engine)) engines.set(item.engine, new Set());
     engines.get(item.engine).add(item.crop);
   }
+  // Agreement does not cancel a contrary full-code observation, including
+  // one outside today's PDF set. Retain it for content-based disambiguation.
+  if(support.size!==1)return null;
   const confirmed = [...support].filter(([, engines]) =>
     [...engines.values()].filter(crops => crops.size >= 2).length >= 2);
   return confirmed.length === 1 ? confirmed[0][0] : null;
@@ -2138,11 +2149,12 @@ export async function auditConflictingPhotoCode({worker,appRoot,item,expectedPre
         const portable=await recognizeLocalTextLine(appRoot,fs.readFileSync(file));
         if(portable.confidence>=.65) readings.push(['paddle',portable.text]);
       } catch { /* Windows + bundled Tesseract still provide independent readings. */ }
-      for(const [engine,text] of readings) for(const code of parseOcrCandidates(text,expectedPrefix,expectedNumbers)) {
-        if(code.prefixDistance<=.1) observations.push({...code,engine,crop:path.basename(file)});
+      for(const [engine,text] of readings) for(const number of parseCompletePrintedCodes(text,expectedPrefix).numbers) {
+        observations.push({number,prefixDistance:0,fullCodeValidated:true,engine,crop:path.basename(file)});
       }
     }
-    return {number:independentCodeConsensus(observations),observations};
+    const observedNumber=independentCodeConsensus(observations);
+    return {number:expectedNumbers.has(observedNumber)?observedNumber:null,observedNumber,observations};
   } finally {
     for(const file of files) fs.rmSync(file,{force:true});
   }
@@ -2300,7 +2312,9 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       && claimedPages[0].portrait === item.evidence.photoPortrait
       && item.evidence.claimedPdfPortrait !== item.evidence.repairedPdfPortrait
       && pdfPaperColor(claimedPages[0]) === item.evidence.paperColor;
-    if (method === 'existing-numeric-filename-claim' && strongObservedConflict) {
+    if (method === 'independent-ocr-engines-full-code-consensus' && !hasIndependentFullCodeEvidence(item)) {
+      reason = 'independent-code-evidence-incomplete-or-conflicting';
+    } else if (method === 'existing-numeric-filename-claim' && strongObservedConflict) {
       reason = 'visible-code-disagrees-with-filename';
     } else if (claimedPages.length !== 1) {
       reason = 'claimed-pdf-page-not-unique';
@@ -2784,9 +2798,9 @@ async function imageVisualMetrics(file) {
 }
 
 function hasIndependentFullCodeEvidence(item) {
-  const engines=new Set(item?.evidence?.independentEngines||[]);
   return item?.evidence?.method==='independent-ocr-engines-full-code-consensus'
-    && engines.has('paddle')&&engines.has('tesseract');
+    && Number.isInteger(item.number)
+    && independentCodeConsensus(item.evidence.observations)===item.number;
 }
 
 export function hasDirectVisibleCodeEvidence(item) {
@@ -3336,7 +3350,7 @@ export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, occu
     let repaired = false;
     for (const index of indices) {
       const item = recognized[index];
-      if (hasWindowsFullCodeEvidence(item)) continue;
+      if (hasWindowsFullCodeEvidence(item) || hasIndependentFullCodeEvidence(item)) continue;
       if (!item.paperGeometry?.usablePaper || isLikelyScene(item)) continue;
       const proposals = [captureSequenceProposal(recognized, index, 1), captureSequenceProposal(recognized, index, -1)]
         .filter(Number.isInteger);
@@ -3385,7 +3399,7 @@ export function reconcileDuplicatePhotoNumbers(recognized, expectedNumbers, occu
     if (!strong || !weak || strong.strength - weak.strength < 8) continue;
     // Unknown confidence is not low confidence. A recorded full-code reading
     // cannot be moved to the remaining tail merely to make the set complete.
-    if (hasWindowsFullCodeEvidence(weak.item)) continue;
+    if (hasWindowsFullCodeEvidence(weak.item) || hasIndependentFullCodeEvidence(weak.item)) continue;
     const alternatives = [...expectedNumbers]
       .filter((number) => !usedNumbers.has(number))
       .filter((number) => {
@@ -3800,7 +3814,8 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
         if(Number.isInteger(audit.number)) {
           const previousNumber=item.number;
           item.number=audit.number;
-          item.evidence={...item.evidence,method:'independent-ocr-engines-full-code-consensus',previousNumber,
+          item.evidence={...item.evidence,method:'independent-ocr-engines-full-code-consensus',previousNumber,observations:audit.observations,
+            votes:new Set(audit.observations.map(x=>x.crop)).size,maxConfidence:null,prefixDistance:0,fullCodeValidated:true,
             independentEngines:[...new Set(audit.observations.filter(x=>x.number===audit.number).map(x=>x.engine))]};
         }
       }

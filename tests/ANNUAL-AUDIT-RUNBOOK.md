@@ -24,3 +24,5 @@ node tests/audit-status.mjs PRIVATE_OUTPUT
 UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读取超过 300 字符路径的合成图，并验证中间文件缺失不影响其他文件。只创建、清理本次测试自己的 TEMP 子目录。
 
 `node tests/windows-code-real-replay.mjs PRIVATE_OUTPUT PHOTO_SHA256 [...]` 只对指定库存照片探测严格 WinRT 窄框。SHA 只选择输入，不提供目标答案；报告另存为唯一轮次，不覆盖失败结果。`0` 个完整码与引擎异常分别统计，此专项不能代替整个产品流程或跨修订归属验收。
+
+`node tests/experiments/inspect-detected-code.mjs PRIVATE_OUTPUT DETECTION_ROUND PHOTO_SHA256 [...]` 只按已保存的检测框生成私有查看副本，并核验源哈希未变化。它不重新 OCR、不改名、不向引擎提供参考编号。几十像素的小编号即使放大也不能当作恢复了原始笔画；应同时核对完整 PDF 正文，保留无法确认的类别。某些直接 JPEG 预览异常可用同一解码器输出的缩放 PNG 交叉检查，不能仅凭预览异常认定原文件损坏。
