@@ -29,6 +29,10 @@ assert.equal(compareBodyFieldEvidence(views('王123小宁'), pages).state, 'no-s
 assert.equal(compareBodyFieldEvidence(views('王小宁合家'), pages).state, 'no-specific-field-evidence',
   'Observed longer line is not exact short field evidence');
 assert.equal(compareBodyFieldEvidence(views('王 小 宁'), pages).state, 'single-page-field-candidate');
+assert.equal(compareBodyFieldEvidence(views('王小\n宁'), pages).state, 'no-specific-field-evidence',
+  'Separate OCR lines must not manufacture an exact name');
+assert.equal(compareBodyFieldEvidence(views('王小\r\n宁'), pages).state, 'no-specific-field-evidence');
+assert.equal(compareBodyFieldEvidence(views('王小\u2028宁'), pages).state, 'no-specific-field-evidence');
 assert.equal(compareBodyFieldEvidence(views('王小宁。陈小安'), pages).state, 'multiple-page-field-evidence',
   'Old page split across current pages must retain both candidates');
 assert.equal(compareBodyFieldEvidence(views('王小宁', '陈小安'), pages).state, 'inconsistent-field-views');

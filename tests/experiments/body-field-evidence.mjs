@@ -5,7 +5,10 @@ import {visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
 const sha = text => crypto.createHash('sha256').update(text).digest('hex');
 const id = page => `${page.pdfSha256}:${page.pageNumber}`;
 const normalize = text => text.normalize('NFKC').replace(/\s+/gu, '');
-const runs = text => normalize(text).match(/\p{Script=Han}+/gu) || [];
+// Horizontal whitespace may occur inside one field, but a line break is an
+// observation boundary. Never join neighboring OCR lines into a short name.
+const runs = text => text.split(/[\r\n\u2028\u2029]+/u)
+  .flatMap(line => normalize(line).match(/\p{Script=Han}+/gu) || []);
 
 export function compareBodyFieldEvidence(views, pages) {
   if (!Array.isArray(pages) || !pages.length || pages.some(p => !/^[a-f0-9]{64}$/.test(p.pdfSha256 || '')
