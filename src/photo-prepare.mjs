@@ -4262,10 +4262,12 @@ async function makeProcessedJpeg(source, destination) {
 export async function applyPhotoPreparation(plan, workDir) {
   if (!(plan?.ready || plan?.safeToApply) || plan.issues?.length) throw new Error('自动处理方案没有通过安全校验，未修改照片。');
   assertPhotoInputBinding(plan);
-  if(plan.pdfIndexBinding) {
+  const assertPdfInputsUnchanged = () => {
+    if (!plan.pdfIndexBinding) return;
     const pdfFiles=fs.readdirSync(plan.folder).filter(name=>/\.pdf$/i.test(name)).map(name=>path.join(plan.folder,name));
-    if(createPdfIndexBinding(plan.businessDate,pdfFiles,plan.pdfIndexBinding.recognizerFingerprint).digest!==plan.pdfIndexBinding.digest)throw Error('PDF 在识别后发生变化，请重新检测；未修改照片。');
-  }
+    if(createPdfIndexBinding(plan.businessDate,pdfFiles,plan.pdfIndexBinding.recognizerFingerprint).digest!==plan.pdfIndexBinding.digest)throw Error('PDF 文件集合或内容在照片处理期间发生变化，请重新检测；停止提交并保留原图备份。');
+  };
+  assertPdfInputsUnchanged();
   const expectedPhotoHash=source=>plan.photoInputBinding.files.find(item=>item.name===path.basename(source))?.sha256;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backupDir = path.join(workDir, 'photo-backups', stamp);
@@ -4303,6 +4305,9 @@ export async function applyPhotoPreparation(plan, workDir) {
   const createdTargets = [];
   try {
     assertPhotoInputBinding(plan);
+    // JPEG staging can take long enough for a sync client to replace a PDF.
+    // Revalidate the complete revision before moving any original photo.
+    assertPdfInputsUnchanged();
     for (const item of prepared) {
       const quarantine = path.join(quarantineDir, `${crypto.randomUUID()}-${path.basename(item.source)}`);
       const move = moveFileVerified(item.source, quarantine);
@@ -4324,6 +4329,9 @@ export async function applyPhotoPreparation(plan, workDir) {
     for(const item of createdTargets) {
       if(sha256(item.target)!==item.sha256)throw Error('写入后目标照片内容发生变化，已停止并保留原图备份。');
     }
+    // Keep rollback originals until the target writes and PDF revision both
+    // verify. A change during commit must not leave a successful stale receipt.
+    assertPdfInputsUnchanged();
     // 目标文件全部落盘后清理内部隔离副本。若 NAS 暂时锁定，文件只会留在
     // 自动化工作区，绝不会污染每日照片目录；完整原图仍另有 backupDir 备份。
     for (const item of quarantined) {

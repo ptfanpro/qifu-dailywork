@@ -15,6 +15,7 @@ import { cleanupLocalState } from '../src/cleanup.mjs';
 import { AutomationApiClient, canonicalTokenRequest, createTokenRequest, normalizeAutomationBaseUrl } from '../src/automation-auth.mjs';
 import { decodePaddleCtc, recognizeLocalTextLine, verifyLocalOcrAssets } from '../src/local-ocr.mjs';
 import {createPhotoInputBinding} from '../src/recognition-provenance.mjs';
+import {runPhotoPdfCommitRegression} from './photo-pdf-commit-regression.mjs';
 import './weekend-regression.mjs';
 import './photo-online-regression.mjs';
 import './ocr-crop-regression.mjs';
@@ -41,6 +42,8 @@ import './pdf-index-integration.mjs';
 const require = createRequire(import.meta.url);
 const { PDFDocument } = require('pdf-lib');
 const sharp = require('sharp');
+
+await runPhotoPdfCommitRegression();
 
 // 2026-08-30 平台在 119 条供灯订单下超过旧版 10 秒才挂载场景上传 iframe。
 // 等待预算必须覆盖迟到窗口，并且只接管明确的场景上传页面。
