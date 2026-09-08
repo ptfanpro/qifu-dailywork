@@ -2955,9 +2955,13 @@ export function isLikelyScene(item) {
     && Number(geometry.top || 0) >= 0.32
     && Number(scene.darkRatio ?? 1) <= 0.18
     && Number(scene.luminance || 0) >= 110;
-  // 暗场灯阵的金色台阶可能被纸色检测标成“可用纸张”。真实福单虽然也会
-  // 较暗，但不会同时满足窄于 78% 画幅、低上半部边缘和 5.5% 以上暖色灯焰。
+  // Candle-lit blessing sheets can satisfy every dark/warm bound below, even
+  // when their colour component is not rectangular. Do not use those global
+  // metrics to override a usable paper region or skip its code fallback. Some
+  // altars also have usable colour components; they require other evidence,
+  // not a darker exposure or the absence of a portable-reader result.
   const dimLampSceneStructure = geometry.rectangularPaper === false
+    && geometry.usablePaper === false
     && geometry.width <= 0.78
     && Number(scene.darkRatio || 0) >= 0.35
     && Number(scene.luminance || 255) <= 95

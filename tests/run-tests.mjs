@@ -27,6 +27,7 @@ import './recognition-provenance-regression.mjs';
 import './windows-code-evidence-regression.mjs';
 import './independent-code-provenance-regression.mjs';
 import './photo-code-audit-retention-regression.mjs';
+import './foreground-paper-scene-regression.mjs';
 import './body-content-guard-regression.mjs';
 import './body-short-field-guard-regression.mjs';
 import './photo-upload-body-gate-regression.mjs';
@@ -1296,7 +1297,11 @@ const august28Scenes=[
   {paperGeometry:{left:0,top:.491667,width:.7125,height:.508333,right:.7125,bottom:1,score:.240521,fill:.664078,boxArea:.362188,rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.150417,upperEdgeDensity:.078281,uniformity:.475247},sceneMetrics:{luminance:85.5666,warmBrightRatio:.066823,darkRatio:.375833}},
   {paperGeometry:{left:0,top:.3,width:1,height:.7,right:1,bottom:1,score:.419453,fill:.599219,boxArea:.7,rectangularPaper:false,usablePaper:false},visualMetrics:{edgeDensity:.227747,upperEdgeDensity:.201641,uniformity:.333802},sceneMetrics:{luminance:126.7958,warmBrightRatio:.113958,darkRatio:.098125}},
 ];
-assert.ok(august28Scenes.every((item)=>isLikelyScene(item)));
+// The first altar's colour component is also compatible with a candle-lit
+// sheet. Dark/warm metrics alone cannot authorize skipping its code readers.
+// Keep the known scene label as a reference, not proof of the heuristic.
+assert.equal(isLikelyScene(august28Scenes[0]),false);
+assert.equal(isLikelyScene(august28Scenes[1]),true);
 const august27Papers=[
   {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.227461,width:.834375,top:.504167,height:.495833,fill:.549806,boxArea:.413711,bottom:1},visualMetrics:{edgeDensity:.202188,upperEdgeDensity:.137773,uniformity:.424102},sceneMetrics:{darkRatio:.411875}},
   {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.223685,width:.89375,top:.5125,height:.4875,fill:.513388,boxArea:.435703,bottom:1},visualMetrics:{edgeDensity:.201172,upperEdgeDensity:.14069,uniformity:.408021},sceneMetrics:{darkRatio:.411406}},
