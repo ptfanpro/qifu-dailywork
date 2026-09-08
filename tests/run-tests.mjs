@@ -36,6 +36,7 @@ import './photo-upload-receipt-integration.mjs';
 import './ocr-long-path-regression.mjs';
 import './photo-input-binding-regression.mjs';
 import './experiments/text-regions-regression.mjs';
+import './experiments/tiled-text-regions-regression.mjs';
 import './experiments/body-text-evidence-regression.mjs';
 import './experiments/chinese-reader-regression.mjs';
 import './experiments/body-probe-summary-regression.mjs';
