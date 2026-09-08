@@ -66,3 +66,9 @@ UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读
 `portable-code-retention-regression.mjs` 已加入普通入口。先在旧版复现“单次完整码被场景覆盖”，再验证实际异步便携收集器保留全前缀、低分完整观察、范围外四位尾号和失败前结果；生成图实际跑 `recognizePreparedImage` 分派，避免只验证手造历史。合成 OCR 结果只验证流程，不是模型准确率。私有产品回放需同时检查 `recognized[].portableCodeRead`、未决历史、最终分配、正文证据和实际提示分类，扫描没有完整码、扫描未完成、码不在当前 PDF 中必须区分。保留原三个场景失败门槛及正常灯阵退化，不得因为新流程测试通过就宣布这些实图已修复。
 
 便携来源回归另核对旋正图像尺寸、实际裁框坐标及 `physicalCodeExtent=unverified`；不能从旧 `fullCodeValidated` 名称推断物理字段已完整读取。`tests/experiments/code-window-context-regression.mjs` 已纳入普通入口，测试局部上下文扩展、检测框回投、预算/异常、边界关系不得解除冲突。该助手仅为诊断，不由产品赋号路径调用。实际对照需保留所有检测/预处理视图及不同引擎读数，零完整码与引擎错误分开；不得只统计某个成功视图，更不能将候选检测框当完整字符范围证明。
+
+`tests/experiments/db-map-reader.mjs` 仅提取与产品相同预处理/固定模型的 DB 概率图。`node tests/experiments/db-map-reader-smoke.mjs [APP_ROOT]` 显式加载真实模型，比较四种合成输入与产品连通域结果，缺模型/依赖或错误哈希必须失败。它不是照片验收，不进入产品赋号路径。
+
+`tests/experiments/db-reference-geometry.py` 是 Apache-2.0 的 PaddleOCR 2.7 参考几何适配：轮廓、最小旋转矩形、fast score、unclip、透视裁图；不自动旋转竖行，超过候选预算直接拒绝，返回 `physicalCodeExtentVerified=false` 和 `mayClearCodeConflict=false`。显式测试命令为 `python -B tests/experiments/db-reference-geometry-tests.py`。运行前将经过验证的隔离依赖目录放入本进程 `PYTHONPATH`；本轮使用 opencv-python-headless 4.13.0.92 和 pyclipper 1.3.0.post6，没有安装到全局或产品运行时，缺依赖不得跳过伪装通过。
+
+真实几何 A/B 必须使用相同输入像素与同一次概率图，保留旧/新路径所有视图、相反读数、无读数和异常；原件前后哈希核验，地图、裁图、OCR 编号与试验输出仅放本机私有目录，不进 Git 或网络。无既有自动窗口的照片单列未测试。旋转框、严格完整码语法、两个引擎同号，都不证明物理字段完整、编号正确或订单归属；本轮实图已观察到双引擎同号但前缀错误。不能将该候选接入赋号，或据它删除先前冲突。
