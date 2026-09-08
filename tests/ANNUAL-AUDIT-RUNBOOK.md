@@ -46,3 +46,7 @@ UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读
 `audit-status` 在 `visualBodyProbeRounds` 单列这类 A/B 结果，从逐照片报告重新计算，不信任完成文件自报计数。必须核对同一照片、日期、源码/模型、完整 PDF 页身份集合；相同页数但不同集合也不接受。未完成、失败和无效轮次分别显示，不混入生产确认数。
 
 `pdf-visual-body-probe.mjs PRIVATE_OUTPUT YYYY-MM-DD --fields [PHOTO_SHA256 ...]` 在同一批 OCR 观察上追加独立字段诊断，不替换四字片段基线。字段来自逐个 PDF 文字项，不跨项、来源或数字拼接；两至三字完整汉字字段可以形成诊断候选，但须排除在其他页面更长文字或可见模板中的子串。重复姓名、旧页拆分、两个边距/横竖视图不一致分别保留。输出 `fieldDiagnostic` 只含身份、计数和哈希，没有原文、赋号或可上传标记；即使全部提取字段都读到，也不能证明纸面完整、卡片数量、空间位置或订单集合相同。现有 `audit-status` 校验同轮原四字片段 A/B 报告，不把追加字段候选算作产品确认数。
+
+逐字提取的竖排 PDF 可另使用 `visibleFieldViews` 中同布局两视图一致的完整汉字行作为诊断字段；不可把 PDF 文字流中的邻接汉字直接拼成姓名。报告分开记录 `distinctExtractedFields`、`visibleConsensusFields` 与两种来源的特有字段命中。零个提取字段绝不算完整覆盖。可见来源必须与同页补充语料精确一致，不能缺视图或混入别页。不同 PDF 文字项、不同 OCR 行和来源之间也不能拼接四字片段；因而新旧源码的文字层可用性计数可能不同，不能混合计算通过率。
+
+`node tests/scene-category-replay.mjs PRIVATE_OUTPUT BASELINE_SOURCE [YYYY-MM-DD ...]` 仅对库存中已有场景参考标签的照片做类别/容量 A/B，文件名以哈希匿名化，分别测试整批空位、单张空位、供灯位置已满和供水位置已满。旧/新源码必须冻结并记录指纹，输入前后核验哈希；照片、报告留在本机专用临时目录。旧标签仅选取语料，不是真值；该专项不测试福单/场景入口、不执行 OCR 或订单绑定、改名、上传。不可将其计数当作全年自动识别验收。`scene-category-capacity-regression.mjs` 的生成图反例已纳入普通 Node 全套回归。
