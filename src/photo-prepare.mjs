@@ -1072,13 +1072,101 @@ function isUsableOcrExtract(extract) {
   return Number(extract?.width || 0) >= 12 && Number(extract?.height || 0) >= 8;
 }
 
-async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeometry, expectedPrefix, expectedNumbers, cropDir, preferredNames = [] }) {
-  const assets = verifyLocalOcrAssets(appRoot);
-  if (!assets.available) return null;
+export function canUseSceneAfterPortableRead(read) {
+  return Boolean(read && read.status==='no-complete-code' && !read.errorCode
+    && !read.incompleteTailObserved && read.coverage?.completed===true
+    && Array.isArray(read.observations) && read.observations.length===0);
+}
+
+function portableCodeReadBlockReason(item) {
+  const read=item?.portableCodeRead;
+  if(!read)return null;
+  if(read.blockReason)return read.blockReason;
+  if(!Array.isArray(read.observations))return 'portable-code-observations-incomplete';
+  if(read.incompleteTailObserved)return 'portable-code-incomplete-tail';
+  const codes=read.observations;
+  if(codes.some(code=>code.engine!=='paddle' || !code.crop || code.fullCodeValidated!==true
+    || code.expectedPrefix!==read.expectedPrefix || !/^\d{3,4}-1-\d{1,4}$/.test(code.fullCode || '')))
+    return 'portable-code-observations-incomplete';
+  if(hasCompleteCodePrefixConflict(codes))return 'portable-code-prefix-conflict';
+  if(new Set(codes.map(code=>code.number)).size>1)return 'portable-code-number-conflict';
+  if(codes.length && read.errorCode)return 'portable-reader-unavailable';
+  if(codes.length && (!item.reliable || !Number.isInteger(item.number)))return 'portable-complete-code-unconfirmed';
+  if(codes.some(code=>code.number!==item.number))return 'portable-code-proposal-conflict';
+  return null;
+}
+
+export function retainPortableCodeRead(item,read) {
+  if(!read)return item;
+  item.portableCodeRead=structuredClone(read);
+  const reason=portableCodeReadBlockReason(item);
+  if(reason) {
+    const previousNumber=item.number;
+    item.codeAuditHistory=[...(item.codeAuditHistory || []),{status:'unresolved',reason,
+      previousNumber,number:null,observations:structuredClone(read.observations)}];
+    item.reliable=false;
+    item.number=null;
+  }
+  return item;
+}
+
+export function portableCodeIssueCategory(item) {
+  if(item?.reliable && !photoCodeAuditBlockReason(item))return null;
+  const read=item?.portableCodeRead;
+  if(!read)return null;
+  const reason=portableCodeReadBlockReason(item);
+  if(/(?:prefix|number|proposal)-conflict$/.test(reason || ''))return 'conflicting';
+  if(reason==='portable-code-outside-pdf')return 'outside-pdf';
+  if(read.errorCode)return 'unavailable';
+  if(read.incompleteTailObserved)return 'incomplete';
+  if(read.observations?.length)return 'unconfirmed';
+  return null;
+}
+
+export async function recognizeWithPortableLocalOcr(
+  {appRoot,file,metadata,paperGeometry,expectedPrefix,expectedNumbers,cropDir,preferredNames=[]},
+  {verifyAssets=verifyLocalOcrAssets,recognizeLine=recognizeLocalTextLine,extractCrop=extractOcrCrop}={},
+) {
+  const layouts=localOcrCodeLayoutsForPhoto(paperGeometry,preferredNames);
+  const read={schemaVersion:1,status:'unresolved',expectedPrefix:String(expectedPrefix),modelSha256:null,
+    observations:[],readCount:0,emptyReadCount:0,incompleteTailObserved:false,errorCode:null,blockReason:null,
+    coverage:{kind:'fixed-narrow-grid',plannedLayouts:layouts.length,completedLayouts:0,skippedLayouts:0,completed:false}};
+  const observations=[];
+  const outcome=(proposal=null)=>({number:proposal?.number ?? null,evidence:proposal?.evidence ?? null,
+    candidates:proposal?.candidates ?? groupObservations(observations).slice(0,5),
+    blocked:Boolean(read.blockReason),portableCodeRead:structuredClone(read)});
+  let assets,decoded;
+  try { assets=verifyAssets(appRoot); }
+  catch { assets={available:false}; }
+  if(!assets.available) {
+    read.status='unavailable';read.errorCode='portable-model-unavailable';
+    return outcome();
+  }
+  read.modelSha256=assets.modelSha256 ?? null;
   // One immutable read/decode per image, not one NAS read + JPEG decode +
-  // temporary PNG file for each of up to 304 overlapping code crops.
-  const decoded=await decodeOcrSource(fs.readFileSync(file));
-  const observations = [];
+  // temporary PNG file for each of up to 874 overlapping code crops.
+  try { decoded=await decodeOcrSource(fs.readFileSync(file)); }
+  catch {
+    read.status='unavailable';read.errorCode='portable-source-unavailable';
+    return outcome();
+  }
+  const recordReading=(result,layout,variant)=>{
+    read.readCount++;
+    const parsed=parseCompletePrintedCodes(result.text,expectedPrefix);
+    if(!parsed.codes.length)read.emptyReadCount++;
+    read.incompleteTailObserved ||= parsed.incompleteTailObserved;
+    for(const code of parsed.codes)read.observations.push({...code,expectedPrefix:String(expectedPrefix),
+      engine:'paddle',crop:`${layout.name}:${variant}`,fullCodeValidated:true,
+      prefixDistance:code.prefix===String(expectedPrefix)?0:null,
+      confidence:Number.isFinite(result.confidence)?result.confidence*100:null,
+      modelSha256:read.modelSha256});
+    // Collect complete observations BEFORE model-score / expected-set filters.
+    // A low-scored foreign code is still a contrary observation, not a blank.
+    read.blockReason=hasCompleteCodePrefixConflict(read.observations)?'portable-code-prefix-conflict'
+      : new Set(read.observations.map(code=>code.number)).size>1?'portable-code-number-conflict'
+        : read.observations.some(code=>!expectedNumbers.has(code.number))?'portable-code-outside-pdf'
+          : read.incompleteTailObserved?'portable-code-incomplete-tail':null;
+  };
   const appendObservations = (parsedItems, result, layout, variant) => {
     for (const item of parsedItems) observations.push({
       ...item,
@@ -1106,20 +1194,22 @@ async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeo
       candidates: groups.slice(0, 5),
     };
   };
-  for (const layout of localOcrCodeLayoutsForPhoto(paperGeometry,preferredNames)) {
+  for (const layout of layouts) {
     const extract = cropFromRatios(metadata, layout);
-    if (!isUsableOcrExtract(extract)) continue;
-    const diagnostic = await extractOcrCrop(decoded,extract);
+    if (!isUsableOcrExtract(extract)) { read.coverage.skippedLayouts++; continue; }
     try {
-      const result = await recognizeLocalTextLine(appRoot, diagnostic);
-      if (Number(result.confidence || 0) < 0.55) continue;
+      const diagnostic = await extractCrop(decoded,extract);
+      const result = await recognizeLine(appRoot, diagnostic);
+      recordReading(result,layout,'color');
+      if(read.blockReason)return outcome();
+      if (Number(result.confidence || 0) < 0.55) { read.coverage.completedLayouts++; continue; }
       const parsedItems = parseLocalOcrCodeCandidates(result.text, expectedPrefix, expectedNumbers);
       if (process.env.PRAYER_LOCAL_OCR_TRACE === 'yes' && parsedItems.length) {
         console.error(`[local-ocr] ${layout.name}: ${parsedItems.map((item) => item.number).join(',')} @ ${Math.round(result.confidence * 100)}`);
       }
       appendObservations(parsedItems, result, layout, 'color');
       const colorConsensus = resolvedConsensus();
-      if (colorConsensus) return colorConsensus;
+      if (colorConsensus) { read.status='consensus'; return outcome(colorConsensus); }
 
       // When one colour crop contains a high-confidence full code, verify that
       // exact physical strip through a second local preprocessing path.  This
@@ -1128,8 +1218,10 @@ async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeo
       // OCR.  We do not spend this extra inference on blank or tail-only crops.
       if (parsedItems.some((item) => Number(item.prefixDistance ?? 99) <= 0.1)
         && Number(result.confidence || 0) >= 0.65) {
-        const normalizedDiagnostic = await extractOcrCrop(decoded,extract,{normalized:true});
-        const normalizedResult = await recognizeLocalTextLine(appRoot, normalizedDiagnostic);
+        const normalizedDiagnostic = await extractCrop(decoded,extract,{normalized:true});
+        const normalizedResult = await recognizeLine(appRoot, normalizedDiagnostic);
+        recordReading(normalizedResult,layout,'normalized');
+        if(read.blockReason)return outcome();
         const normalizedItems = Number(normalizedResult.confidence || 0) >= 0.55
           ? parseLocalOcrCodeCandidates(normalizedResult.text, expectedPrefix, expectedNumbers) : [];
         if (process.env.PRAYER_LOCAL_OCR_TRACE === 'yes' && normalizedItems.length) {
@@ -1137,14 +1229,20 @@ async function recognizeWithPortableLocalOcr({ appRoot, file, metadata, paperGeo
         }
         appendObservations(normalizedItems, normalizedResult, layout, 'normalized');
         const normalizedConsensus = resolvedConsensus();
-        if (normalizedConsensus) return normalizedConsensus;
+        if (normalizedConsensus) { read.status='consensus'; return outcome(normalizedConsensus); }
       }
+      read.coverage.completedLayouts++;
     } catch {
-      // 运行库级错误只触发旧引擎降级；不写入图片、OCR 全文或账号信息。
-      return null;
+      // Do not erase earlier complete observations or call an incomplete scan
+      // a code exclusion. Preserve only a fixed reason, never exception text.
+      read.status='unavailable';read.errorCode='portable-reader-unavailable';
+      if(read.observations.length)read.blockReason=read.errorCode;
+      return outcome();
     }
   }
-  return null;
+  read.coverage.completed=read.coverage.skippedLayouts===0;
+  read.status=read.observations.length?'unresolved':'no-complete-code';
+  return outcome();
 }
 
 export function isReliableOcrConsensus(best, second = null, minimumConfidence = 20) {
@@ -1170,7 +1268,10 @@ export async function createOcrWorker(appRoot) {
   return worker;
 }
 
-export async function recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot = null, {preferredNames=[]} = {}) {
+export async function recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot = null,
+  {preferredNames=[],portableOcrServices} = {}) {
+  let portableCodeRead=null;
+  const recognize=async()=>{
   // sharp().rotate().metadata() 仍返回原始像素宽高，不会把 EXIF 方向 6/8 的宽高
   // 自动互换；直接使用会把横向微信照片的比例框裁到完全错误的位置。
   const metadata = autoOrientedMetadata(await sharpFile(file).metadata());
@@ -1199,10 +1300,11 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
       appRoot, file, metadata, paperGeometry: paperEvidence.geometry,
       expectedPrefix, expectedNumbers, cropDir,
       preferredNames,
-    });
-    if (local) return {
+    },portableOcrServices);
+    portableCodeRead=local.portableCodeRead;
+    if (Number.isInteger(local.number) || local.blocked) return {
       file,
-      reliable: true,
+      reliable: Number.isInteger(local.number) && !local.blocked,
       number: local.number,
       paperGeometry: paperEvidence.geometry,
       visualMetrics,
@@ -1212,18 +1314,17 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     };
   }
 
-  // A scene decision is committed only after the portable reader has searched
-  // the full narrow-code grid and found no two-crop consensus.  This preserves
-  // the direct-code override for candle-lit blessing sheets while preventing a
-  // genuine altar scene from entering the much slower, noisier legacy OCR chain.
-  if (preliminaryScene) return {
+  // No consensus is not absence of printed codes. A partial/failed search or
+  // even one complete observation must reach the fallback, not this shortcut.
+  // A completed fixed grid still does NOT prove whole-image code exclusion.
+  if (preliminaryScene && canUseSceneAfterPortableRead(portableCodeRead)) return {
     file,
     reliable: false,
     number: null,
     paperGeometry: paperEvidence.geometry,
     visualMetrics,
     sceneMetrics,
-    evidence: { method: 'scene-visual-after-full-local-code-exclusion' },
+    evidence: { method: 'scene-visual-after-fixed-grid-no-complete-code' },
     candidates: [],
   };
 
@@ -1591,6 +1692,8 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     } : (preliminaryScene ? { method: 'scene-visual-after-code-exclusion' } : null),
     candidates: grouped.slice(0, 5),
   };
+  };
+  return retainPortableCodeRead(await recognize(),portableCodeRead);
 }
 
 export async function diagnosePhotoCode({ appRoot, file, expectedPrefix, expectedNumbers, cropDir }) {
@@ -2170,6 +2273,8 @@ export function independentCodeConsensus(observations) {
 export function photoCodeAuditBlockReason(item) {
   const bodyReason=bodyReviewBlockReason(item);
   if(bodyReason)return bodyReason;
+  const portableReason=portableCodeReadBlockReason(item);
+  if(portableReason)return portableReason;
   const history=item?.codeAuditHistory;
   if(!history)return null;
   if(!Array.isArray(history)||!history.length)return 'independent-code-audit-incomplete';
@@ -2936,6 +3041,7 @@ export function isLikelyScene(item) {
   // Failure to disambiguate a previously proposed printed code does not turn
   // the photographed paper into a scene, even if candles fill its background.
   if(item?.codeAuditHistory?.length || item?.bodyReviewHistory?.length)return false;
+  if(item?.portableCodeRead && !canUseSceneAfterPortableRead(item.portableCodeRead))return false;
   // Role evidence is ordered, not blended: a full visible business code that
   // was independently read in adjacent/strict code crops is conclusive paper
   // evidence.  Global colour and brightness heuristics may never overrule it.
@@ -4138,8 +4244,25 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       && item.pdfRecheck?.status !== 'inconclusive'
       && (item.evidence?.method === 'scene-visual-fast-path' || isLikelyScene(item)))
     .map((item) => item.file);
-  const ambiguousCodeCandidates = unresolved.filter((file) => !sceneCandidates.includes(file));
   const recognizedByFile = new Map(recognized.map((item) => [item.file, item]));
+  const portableIssueCounts=new Map();
+  const portableIssueFiles=new Set();
+  for(const file of unresolved) {
+    const category=portableCodeIssueCategory(recognizedByFile.get(file));
+    if(!category)continue;
+    portableIssueFiles.add(file);
+    portableIssueCounts.set(category,(portableIssueCounts.get(category)||0)+1);
+  }
+  const portableIssueMessages={
+    conflicting:'读到相互冲突的完整编号（含年月前缀）；原始观察已保留，未按多数票或剩余编号赋号。',
+    'outside-pdf':'读到完整编号，但不在本日唯一 PDF 编号集合；请核对业务日期或打印修订，不能当作未识别或缺图。',
+    unavailable:'便携编号读取未完整执行；已保留失败分类，未把异常当成场景证据。',
+    incomplete:'编号末段仍有断开的数字；未拼接或按缺号补齐，也未当成场景图。',
+    unconfirmed:'已读到完整编号，但后续证据仍不足；已保留观察，未当成场景图。',
+  };
+  for(const [category,count] of portableIssueCounts)
+    pendingIssues.push(`有 ${count} 张照片${portableIssueMessages[category]}`);
+  const ambiguousCodeCandidates = unresolved.filter((file) => !sceneCandidates.includes(file) && !portableIssueFiles.has(file));
   const conflictingCodeCandidates = ambiguousCodeCandidates.filter((file) => {
     if(photoCodeAuditBlockReason(recognizedByFile.get(file))==='independent-code-audit-conflicting')return true;
     const strong = (recognizedByFile.get(file)?.candidates || []).filter((candidate) => candidate.prefixDistance <= 2);
