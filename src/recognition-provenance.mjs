@@ -5,7 +5,7 @@ const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
 export function recognitionSourceFingerprint(appRoot) {
   const files=['src/photo-prepare.mjs','src/local-ocr.mjs','src/ocr-image.mjs','src/scene-structure.mjs','src/recognition-provenance.mjs','ui/Read-WindowsOcr.ps1',
     'src/body-content-review.mjs','src/chinese-body-reader.mjs','src/body-text-detector.mjs',
-    'src/vertical-body-regions.mjs','src/body-text-evidence.mjs','src/pdf-visual-body-evidence.mjs'];
+    'src/vertical-body-regions.mjs','src/body-text-evidence.mjs','src/pdf-visual-body-evidence.mjs','src/body-field-evidence.mjs'];
   return hash(JSON.stringify(files.map(file=>[file,hash(fs.readFileSync(path.join(appRoot,file)))])));
 }
 export function createPdfIndexBinding(businessDate,pdfFiles,recognizerFingerprint) {

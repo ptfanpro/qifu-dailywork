@@ -7,6 +7,7 @@ import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
 import {createChineseBodyReader} from './chinese-body-reader.mjs';
 import {rankBodyTextEvidence} from './body-text-evidence.mjs';
+import {compareBodyFieldEvidence} from './body-field-evidence.mjs';
 import {buildVisualBodyPages,visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
 const require=createRequire(import.meta.url), hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const id=p=>`${p.pdfSha256}:${p.pageNumber}`;
@@ -20,13 +21,16 @@ export function assessBodyClaim(views,pages,claim) {
     return {view:name,observedGrams:evidence.observedGrams,ranked:evidence.ranked};
   });
   const candidates=results.map(r=>r.ranked.filter(p=>p.uniqueMatchedGrams>0));
+  const fieldEvidence=compareBodyFieldEvidence(views,pages);
+  const fieldCandidates=fieldEvidence.readings.map(r=>r.ranked.filter(p=>p.specificExactFields>0));
   // Even a non-leading foreign candidate is contrary content, not a vote
   // that a higher score may cancel. One-view evidence stays ambiguous.
-  const foreign=candidates.map(ps=>ps.filter(p=>id(p)!==id(claim)).map(id));
+  const foreign=candidates.map((ps,i)=>[...new Set([...ps,...fieldCandidates[i]]
+    .filter(p=>id(p)!==id(claim)).map(id))]);
   const pairedForeign=[0,2].some(i=>foreign[i].some(key=>foreign[i+1].includes(key)));
   const status=pairedForeign?'conflicting-body':foreign.some(ps=>ps.length)?'ambiguous-body'
-    :candidates.some(ps=>ps.length)?'observed-body-consistent':'no-specific-body-evidence';
-  return {status,bindingVerified:false,results};
+    :candidates.some(ps=>ps.length)||fieldCandidates.some(ps=>ps.length)?'observed-body-consistent':'no-specific-body-evidence';
+  return {status,bindingVerified:false,results,fieldEvidence};
 }
 
 export function bodyReviewBlockReason(item) {

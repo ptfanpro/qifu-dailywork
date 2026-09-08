@@ -54,3 +54,5 @@ UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读
 正文否决保护候选使用随仓库携带的 `models/paddleocr-zh-v4` 两份固定模型，`ui/Run-Tests.ps1` 强制执行实际模型横排/旋转竖排行烟雾测试；模型缺失或哈希错误必须失败，不能跳过。生产 `bodyClaimReview` 只表示当前 PDF 的正文观察检查，不证明完整订单集合。冻结完整计划回放必须同时检查该字段、最终 assignments 与允许上传编号；不能仅看早先 `pdfClaimRecheck.confirmed` 数量。共用读取/语料原语移入 `src` 后，试验源码指纹也须包括实际 `src` 依赖，旧冻结副本保持不变。
 
 续跑输入保护由 `photo-upload-body-gate-regression.mjs`、`photo-upload-input-regression.mjs` 验证混合目录、过期计划、同名替换及精确处理回执；`photo-upload-receipt-integration.mjs` 实际生成 JPEG 并调用处理事务，验证真实回执可续跑、被替换的成品不可复用。均已纳入普通 Node 入口。新原图不会自动成为可上传文件，也不会单因出现而使不变的已验证成品失效。旧数字图待改号时，不得仅完成只读计划就沿用旧名上传。上述只证明文件身份和续跑入口保护，不能替代 OCR/订单归属验收。
+
+完整短字段原语已移至 `src/body-field-evidence.mjs`，试验入口只转导出，产品和诊断指纹均覆盖实际依赖。`body-short-field-guard-regression.mjs` 验证四字片段漏掉的三字外页字段会触发否决，并覆盖同名、子串、模板、跨行及逐字 PDF。完整产品回放应同时检查 `bodyClaimReview.results[].fieldEvidence`，不能把字段读数一致当作 `bindingVerified=true`，也不能使用已知历史答案自动改号。既有冻结诊断目录不可原位更新。
