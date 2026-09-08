@@ -1150,13 +1150,18 @@ export async function recognizeWithPortableLocalOcr(
     read.status='unavailable';read.errorCode='portable-source-unavailable';
     return outcome();
   }
-  const recordReading=(result,layout,variant)=>{
+  read.sourceDimensions={width:decoded.raw.width,height:decoded.raw.height};
+  const recordReading=(result,layout,variant,extract)=>{
     read.readCount++;
     const parsed=parseCompletePrintedCodes(result.text,expectedPrefix);
     if(!parsed.codes.length)read.emptyReadCount++;
     read.incompleteTailObserved ||= parsed.incompleteTailObserved;
     for(const code of parsed.codes)read.observations.push({...code,expectedPrefix:String(expectedPrefix),
       engine:'paddle',crop:`${layout.name}:${variant}`,fullCodeValidated:true,
+      // fullCodeValidated is legacy syntax validation, NOT physical line coverage.
+      // Keep the actual oriented-image window so a later geometry review need
+      // not reconstruct it from a layout name or silently invent missing glyphs.
+      cropBounds:{...extract},physicalCodeExtent:'unverified',
       prefixDistance:code.prefix===String(expectedPrefix)?0:null,
       confidence:Number.isFinite(result.confidence)?result.confidence*100:null,
       modelSha256:read.modelSha256});
@@ -1200,7 +1205,7 @@ export async function recognizeWithPortableLocalOcr(
     try {
       const diagnostic = await extractCrop(decoded,extract);
       const result = await recognizeLine(appRoot, diagnostic);
-      recordReading(result,layout,'color');
+      recordReading(result,layout,'color',extract);
       if(read.blockReason)return outcome();
       if (Number(result.confidence || 0) < 0.55) { read.coverage.completedLayouts++; continue; }
       const parsedItems = parseLocalOcrCodeCandidates(result.text, expectedPrefix, expectedNumbers);
@@ -1220,7 +1225,7 @@ export async function recognizeWithPortableLocalOcr(
         && Number(result.confidence || 0) >= 0.65) {
         const normalizedDiagnostic = await extractCrop(decoded,extract,{normalized:true});
         const normalizedResult = await recognizeLine(appRoot, normalizedDiagnostic);
-        recordReading(normalizedResult,layout,'normalized');
+        recordReading(normalizedResult,layout,'normalized',extract);
         if(read.blockReason)return outcome();
         const normalizedItems = Number(normalizedResult.confidence || 0) >= 0.55
           ? parseLocalOcrCodeCandidates(normalizedResult.text, expectedPrefix, expectedNumbers) : [];

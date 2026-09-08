@@ -53,6 +53,13 @@ try {
   assert.equal(one.portableCodeRead.observations.length,1);
   assert.equal(one.portableCodeRead.coverage.completed,true);
   assert.equal(one.portableCodeRead.observations[0].confidence,60);
+  const firstLayout=photo.localOcrCodeLayoutsForPhoto({})[0];
+  assert.deepEqual(one.portableCodeRead.sourceDimensions,{width:1000,height:1000});
+  assert.deepEqual(one.portableCodeRead.observations[0].cropBounds,{
+    left:Math.floor(firstLayout.left*1000),top:Math.floor(firstLayout.top*1000),
+    width:Math.floor(firstLayout.width*1000),height:Math.floor(firstLayout.height*1000)});
+  assert.equal(one.portableCodeRead.observations[0].physicalCodeExtent,'unverified',
+    'a complete OCR string does not prove the crop contains every printed character');
   assert.ok(one.portableCodeRead.readCount>1);
   assert.equal(one.portableCodeRead.emptyReadCount,one.portableCodeRead.readCount-1);
   assert.equal(photo.portableCodeIssueCategory({reliable:false,portableCodeRead:one.portableCodeRead}),'unconfirmed');
