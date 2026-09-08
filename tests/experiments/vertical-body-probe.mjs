@@ -23,7 +23,8 @@ const checked = file => {
 };
 const fingerprint = sha(JSON.stringify(['tests/experiments/vertical-body-probe.mjs',
   'tests/experiments/text-regions.mjs', 'tests/experiments/chinese-text-reader.mjs',
-  'tests/experiments/body-text-evidence.mjs', 'src/local-ocr.mjs']
+  'tests/experiments/body-text-evidence.mjs', 'src/local-ocr.mjs','src/chinese-body-reader.mjs',
+  'src/body-text-detector.mjs','src/vertical-body-regions.mjs','src/body-text-evidence.mjs']
   .map(name => [name, sha(fs.readFileSync(path.join(appRoot, name)))])));
 const inventory = JSON.parse(fs.readFileSync(path.join(root, 'inventory.json')));
 const output = fs.mkdtempSync(path.join(root, 'vertical-body-probe-'));

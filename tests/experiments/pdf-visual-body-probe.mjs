@@ -39,7 +39,9 @@ const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.
 const sourceFiles = ['tests/experiments/pdf-visual-body-probe.mjs', 'tests/experiments/pdf-visual-body-evidence.mjs',
   'tests/experiments/body-text-evidence.mjs', 'tests/experiments/body-probe-summary.mjs',
   'tests/experiments/chinese-text-reader.mjs', 'tests/experiments/vertical-body-regions.mjs',
-  'tests/experiments/text-regions.mjs', 'tests/experiments/body-field-evidence.mjs', 'src/local-ocr.mjs'];
+  'tests/experiments/text-regions.mjs', 'tests/experiments/body-field-evidence.mjs', 'src/local-ocr.mjs',
+  'src/chinese-body-reader.mjs','src/body-text-detector.mjs','src/vertical-body-regions.mjs',
+  'src/body-text-evidence.mjs','src/pdf-visual-body-evidence.mjs'];
 const fingerprint = () => sha(JSON.stringify(sourceFiles.map(name => [name, sha(fs.readFileSync(path.join(appRoot, name)))])));
 const sourceFingerprint = fingerprint();
 const output = fs.mkdtempSync(path.join(root, 'pdf-visual-body-probe-'));

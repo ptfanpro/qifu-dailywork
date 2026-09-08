@@ -10,6 +10,7 @@ import { measureFlameStructure } from './scene-structure.mjs';
 import { getMachineLocalStateRoot } from './runtime-paths.mjs';
 import {decodeOcrSource,extractOcrCrop,writeImageFile} from './ocr-image.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
+import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
 
 const require = createRequire(import.meta.url);
 const sharp = require('sharp');
@@ -2126,6 +2127,8 @@ export function independentCodeConsensus(observations) {
 // unavailable or contradictory independent reading is NOT permission to run
 // a missing-slot repair. Re-evaluate recorded observations, not a method label.
 export function photoCodeAuditBlockReason(item) {
+  const bodyReason=bodyReviewBlockReason(item);
+  if(bodyReason)return bodyReason;
   const history=item?.codeAuditHistory;
   if(!history)return null;
   if(!Array.isArray(history)||!history.length)return 'independent-code-audit-incomplete';
@@ -2887,7 +2890,7 @@ export function hasDirectVisibleCodeEvidence(item) {
 export function isLikelyScene(item) {
   // Failure to disambiguate a previously proposed printed code does not turn
   // the photographed paper into a scene, even if candles fill its background.
-  if(item?.codeAuditHistory?.length)return false;
+  if(item?.codeAuditHistory?.length || item?.bodyReviewHistory?.length)return false;
   // Role evidence is ordered, not blended: a full visible business code that
   // was independently read in adjacent/strict code crops is conclusive paper
   // evidence.  Global colour and brightness heuristics may never overrule it.
@@ -3982,6 +3985,22 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     issues.push('编号二次复核发生异常；为防止错误上传，本轮所有自动编号均已停止。');
   }
 
+  // Review the actual final numeric claim, including an existing-file repair.
+  // The current-PDF content guard can only withhold a claim, never replace it
+  // with its highest-ranking body page or clear a prior code conflict.
+  const bodyClaims=[...recognized,...existingNumericAuditItems]
+    .filter(item=>item.reliable && Number.isInteger(item.number));
+  for(const repair of numericCodeRepairs) {
+    const existing=bodyClaims.find(item=>path.resolve(item.file)===path.resolve(repair.source));
+    if(existing)existing.number=repair.to;
+    else bodyClaims.push({file:repair.source,number:repair.to,reliable:true,evidence:repair.evidence});
+  }
+  const bodyClaimReview=await reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndexBinding,claims:bodyClaims,onProgress});
+  if(bodyClaimReview.blocked)pendingIssues.push(`有 ${bodyClaimReview.blocked} 张照片的正文归属存在冲突或检查不可用；保留原图，未按数字共识或正文最高分自动改号。`);
+  const bodyBlockedPaths=new Set(bodyClaims.filter(bodyReviewBlockReason).map(item=>path.resolve(item.file)));
+  const bodyBlockedExistingNumbers=new Set(images.filter(file=>bodyBlockedPaths.has(path.resolve(file)) && /^\d+$/.test(path.parse(file).name))
+    .map(file=>Number(path.parse(file).name)));
+  for(let index=numericCodeRepairs.length-1;index>=0;index--)if(bodyBlockedPaths.has(path.resolve(numericCodeRepairs[index].source)))numericCodeRepairs.splice(index,1);
   const assignments = [];
   const occupiedNames = new Set();
   const assignedNumbers = new Set();
@@ -4019,7 +4038,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   for (const file of images) {
     if (numericRepairSources.has(path.resolve(file))) continue;
     const stem = path.parse(file).name;
-    const numeric = /^\d+$/.test(stem) && expectedNumbers.has(Number(stem));
+    const numeric = /^\d+$/.test(stem) && expectedNumbers.has(Number(stem)) && !bodyBlockedPaths.has(path.resolve(file));
     const scene = ['2.1', '2.2', '2.5', '2.6'].includes(stem);
     if (!numeric && !scene) continue;
     const metadata = autoOrientedMetadata(await sharpFile(file).metadata());
@@ -4034,8 +4053,9 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       evidence:{method:'already-numbered-spec-normalization'},
     });
   }
-  if (foreignNumericFiles.length) {
-    pendingIssues.push(`有 ${foreignNumericFiles.length} 张纯数字照片不属于本日唯一 PDF 编号，已从本日上传和计数中排除：${foreignNumericFiles.map((file)=>path.basename(file)).join('、')}。请将其移入原业务日期后补跑。`);
+  const outOfScopeNumericFiles=foreignNumericFiles.filter(file=>!bodyBlockedPaths.has(path.resolve(file)));
+  if (outOfScopeNumericFiles.length) {
+    pendingIssues.push(`有 ${outOfScopeNumericFiles.length} 张纯数字照片不属于本日唯一 PDF 编号，已从本日上传和计数中排除：${outOfScopeNumericFiles.map((file)=>path.basename(file)).join('、')}。请核对原业务日期后补跑。`);
   }
   const reliableGroups = new Map();
   for (const item of recognized.filter((value) => value.reliable && !photoCodeAuditBlockReason(value))) {
@@ -4141,7 +4161,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     photoInputBinding,
     pdfPages,
     expectedCodeCount: expectedNumbers.size,
-    allowedBlessingNumbers: [...expectedNumbers].sort((a,b)=>a-b),
+    allowedBlessingNumbers: [...expectedNumbers].filter(number=>!bodyBlockedExistingNumbers.has(number)).sort((a,b)=>a-b),
     foreignNumericFiles,
     assignments,
     duplicateSources: verifiedBatch.duplicateSources,
@@ -4152,6 +4172,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     cloudVision,
     localPageMatch,
     pdfClaimRecheck,
+    bodyClaimReview,
     issues: [...new Set(issues)],
     pendingIssues: [...new Set(pendingIssues)],
     manualReview: {

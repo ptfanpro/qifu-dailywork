@@ -32,7 +32,8 @@ const output = fs.mkdtempSync(path.join(root, 'body-text-probe-'));
 const sourceFingerprint = sha(JSON.stringify(['tests/experiments/body-text-probe.mjs',
   'tests/experiments/body-text-evidence.mjs', 'tests/experiments/chinese-text-reader.mjs', 'tests/experiments/vertical-body-regions.mjs',
   'tests/experiments/text-regions.mjs', 'src/local-ocr.mjs', 'src/photo-prepare.mjs', 'src/ocr-image.mjs',
-  'ui/Read-WindowsOcr.ps1'].map(name => [name, sha(fs.readFileSync(path.join(appRoot, name)))])));
+  'ui/Read-WindowsOcr.ps1','src/chinese-body-reader.mjs','src/body-text-detector.mjs',
+  'src/vertical-body-regions.mjs','src/body-text-evidence.mjs'].map(name => [name, sha(fs.readFileSync(path.join(appRoot, name)))])));
 const pdfjs = await import(pathToFileURL(require.resolve('pdfjs-dist/legacy/build/pdf.mjs')).href);
 const standardFontDataUrl = path.join(path.dirname(require.resolve('pdfjs-dist/package.json')), 'standard_fonts').replaceAll('\\', '/') + '/';
 const pageCache = new Map();

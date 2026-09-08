@@ -12,7 +12,7 @@ const part=Number(partText),parts=Number(partsText),appRoot=path.resolve(path.di
 if(!root||!modelFile||!Number.isInteger(part)||!Number.isInteger(parts)||part<0||part>=parts) throw Error('PRIVATE_AUDIT_ROOT MODEL PART PARTS [DATES]');
 requirePrivateAuditRoot(root);
 const sha=data=>crypto.createHash('sha256').update(data).digest('hex');
-const inputs=['tests/experiments/text-regions.mjs','src/photo-prepare.mjs','src/local-ocr.mjs'].map(file=>[file,sha(fs.readFileSync(path.join(appRoot,file)))]);
+const inputs=['tests/experiments/text-regions.mjs','src/photo-prepare.mjs','src/local-ocr.mjs','src/body-text-detector.mjs'].map(file=>[file,sha(fs.readFileSync(path.join(appRoot,file)))]);
 const version=sha(JSON.stringify(inputs)),dir=path.join(root,`detection-${version.slice(0,12)}`);
 fs.mkdirSync(dir,{recursive:true});
 fs.writeFileSync(path.join(dir,`version-${part}.json`),JSON.stringify({version,inputs,modelSha256:sha(fs.readFileSync(modelFile)),mode:'two-engines-content-only'}));
