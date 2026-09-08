@@ -5,6 +5,7 @@ import path from 'node:path';
 import {requirePrivateAuditRoot} from './audit-paths.mjs';
 import {summarizeBodyProbeReports} from './experiments/body-probe-summary.mjs';
 import {summarizeVisualBodyComparison} from './experiments/pdf-visual-body-summary.mjs';
+import {summarizeProductReplay} from './audit-replay-summary.mjs';
 const root=requirePrivateAuditRoot(process.argv[2]);
 const inventory=JSON.parse(fs.readFileSync(path.join(root,'inventory.json')));
 const rounds=[],bodyProbeRounds=[],visualBodyProbeRounds=[];
@@ -42,6 +43,17 @@ for(const entry of fs.readdirSync(root,{withFileTypes:true})) {
     }
   }
   if(!entry.isDirectory()||! /^(?:replay|structure|pdf-index|detection)-[a-f\d]+$/.test(entry.name))continue;
+  if(entry.name.startsWith('replay-')) {
+    const records=[];
+    for(const day of fs.readdirSync(path.join(root,entry.name),{withFileTypes:true})) {
+      if(!day.isDirectory()||!/^2026-\d\d-\d\d$/.test(day.name))continue;
+      const file=path.join(root,entry.name,day.name,'report.json');
+      if(!fs.existsSync(file))continue;
+      let report=null;try {report=JSON.parse(fs.readFileSync(file));} catch {}
+      records.push({date:day.name,report});
+    }
+    rounds.push(summarizeProductReplay(entry.name,inventory.days,records));continue;
+  }
   const round=path.join(root,entry.name),reports=[];
   let checkpointPhotos=0;
   for(const day of fs.readdirSync(round,{withFileTypes:true})) {

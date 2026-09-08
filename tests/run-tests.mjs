@@ -22,6 +22,7 @@ import './photo-online-regression.mjs';
 import './ocr-crop-regression.mjs';
 import './code-coverage-regression.mjs';
 import './annual-contract-regression.mjs';
+import './audit-replay-summary-regression.mjs';
 import './recognition-provenance-regression.mjs';
 import './windows-code-evidence-regression.mjs';
 import './independent-code-provenance-regression.mjs';
