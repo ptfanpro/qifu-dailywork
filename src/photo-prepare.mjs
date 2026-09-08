@@ -3730,85 +3730,31 @@ export async function classifyScenes(files, occupiedNames) {
   if (!files.length) return { assignments: [], issues: [] };
   const availableLamp = ['2.1.jpg', '2.2.jpg'].filter((name) => !occupiedNames.has(name));
   const availableWater = ['2.5.jpg', '2.6.jpg'].filter((name) => !occupiedNames.has(name));
-  if (files.length > 4) return { assignments: [], issues: [`剩余 ${files.length} 张场景候选，超过四个场景命名位置，已停止自动归类。`] };
   const scored = [];
   for (const file of files) scored.push({ file, ...(await sceneVisualScore(file)) });
-  scored.sort((a, b) => b.luminance - a.luminance || path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }));
-
-  // 白天供水全景和暗场灯阵的结构差异远强于单纯平均亮度：供水图暗像素少、
-  // 暖色高光少；灯阵图恰好相反。三张标准场景图满足 1 水 + 2 灯时直接按
-  // 该独立证据分类，避免因为平均亮度差不足 25 而全部留给人工。
+  // 命名空位只是容量，不是视觉证据。先独立分类，再检查该类容量；已有
+  // 两张供灯不能证明下一张一定是供水，相对亮度也不能覆盖单图未决。
   const explicitWater = scored.filter((item) => classifySceneVisualScore(item) === 'scene-water');
   const explicitLamp = scored.filter((item) => classifySceneVisualScore(item) === 'scene-lamp');
-  // 补图经常只收到某一类场景。只要每张候选都独立满足强供灯/供水特征，
-  // 不要求两类必须同时出现；缺少的另一类继续作为待补项，不得把同类图片
-  // 强拆成一灯一水。
-  if (explicitWater.length + explicitLamp.length > 0
-    && explicitWater.length + explicitLamp.length === scored.length
-    && explicitWater.length <= availableWater.length && explicitLamp.length <= availableLamp.length) {
-    return {
-      assignments: [
-        ...explicitWater.sort((a, b) => path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }))
-          .map((item, index) => ({ source: item.file, targetName: availableWater[index], kind: 'scene-water', evidence: { method: 'scene-dark-warm-structure' } })),
-        ...explicitLamp.sort((a, b) => path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }))
-          .map((item, index) => ({ source: item.file, targetName: availableLamp[index], kind: 'scene-lamp', evidence: { method: 'scene-dark-warm-structure' } })),
-      ],
-      issues: [],
-    };
+  const assignments = [], issues = [];
+  for (const [items, names, kind, label] of [
+    [explicitWater, availableWater, 'scene-water', '供水'],
+    [explicitLamp, availableLamp, 'scene-lamp', '供灯'],
+  ]) {
+    if (items.length > names.length) {
+      issues.push(`场景图识别为${label} ${items.length} 张，但该类仅剩 ${names.length} 个命名位置（每类最多 2 张）；该类保留待确认，不会改成另一类。`);
+      continue;
+    }
+    items.sort((a, b) => path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }));
+    assignments.push(...items.map((item, index) => ({
+      source: item.file, targetName: names[index], kind,
+      evidence: {method: 'scene-dark-warm-structure', luminance: item.luminance,
+        warmBrightRatio: item.warmBrightRatio, darkRatio: item.darkRatio},
+    })));
   }
-
-  // 历史补图经常发生在另一类场景已经占满命名位置之后。候选在进入这里前
-  // 已通过场景结构检测，因此当仅剩一类可用位置时，可按剩余业务槽位归类，
-  // 不再要求用户为了满足“至少两张”而重复发送已上传的场景图。
-  if (!availableLamp.length && files.length <= availableWater.length) {
-    return {
-      assignments: scored
-        .sort((a, b) => path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }))
-        .map((item, index) => ({ source: item.file, targetName: availableWater[index], kind: 'scene-water', evidence: { method: 'remaining-water-scene-slots' } })),
-      issues: [],
-    };
-  }
-  if (!availableWater.length && files.length <= availableLamp.length) {
-    return {
-      assignments: scored
-        .sort((a, b) => path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }))
-        .map((item, index) => ({ source: item.file, targetName: availableLamp[index], kind: 'scene-lamp', evidence: { method: 'remaining-lamp-scene-slots' } })),
-      issues: [],
-    };
-  }
-
-  if (files.length === 1) {
-    return { assignments: [], issues: ['剩余 1 张场景候选，但单图视觉证据不足且供灯、供水位置均可用，已保留等待人工确认。'] };
-  }
-
-  // 文件名只表示微信保存顺序，不表示供灯/供水。寻找最强明暗断层决定实际分组，
-  // 不再把 4 张候选强制拆成 2+2；真实的 1 水+3 灯必须明确报出超量。
-  const splits = [];
-  for (let index = 1; index < scored.length; index += 1) {
-    const boundary = scored[index - 1].luminance - scored[index].luminance;
-    const ratio = scored[index - 1].luminance / Math.max(scored[index].luminance, 1);
-    splits.push({ waterCount: index, boundary, ratio, score: boundary * Math.max(ratio, 1) });
-  }
-  splits.sort((a, b) => b.score - a.score || b.boundary - a.boundary || a.waterCount - b.waterCount);
-  const bestSplit = splits[0];
-  const waterCount = bestSplit?.waterCount || 0;
-  const boundary = bestSplit?.boundary || 0;
-  const ratio = bestSplit?.ratio || 0;
-  if (boundary < 25 || ratio < 1.3) {
-    return { assignments: [], issues: ['场景图明暗特征没有形成可靠分组，已停止，需人工标注供灯/供水。'] };
-  }
-  const water = scored.slice(0, waterCount).sort((a, b) => path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }));
-  const lamp = scored.slice(waterCount).sort((a, b) => path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }));
-  if (water.length > availableWater.length || lamp.length > availableLamp.length) {
-    return { assignments: [], issues: [`场景图识别为供灯 ${lamp.length} 张、供水 ${water.length} 张；每类最多保留 2 张，请确认多余照片后重试。`] };
-  }
-  return {
-    assignments: [
-      ...water.map((item, index) => ({ source: item.file, targetName: availableWater[index], kind: 'scene-water', evidence: { method: 'scene-brightness-cluster', boundary, ratio } })),
-      ...lamp.map((item, index) => ({ source: item.file, targetName: availableLamp[index], kind: 'scene-lamp', evidence: { method: 'scene-brightness-cluster', boundary, ratio } })),
-    ],
-    issues: [],
-  };
+  const unknownCount = scored.length - explicitWater.length - explicitLamp.length;
+  if (unknownCount) issues.push(`剩余 ${unknownCount} 张场景候选，单图视觉证据不足，已保留等待人工确认；不会按剩余命名位置或相对明暗猜测类别。`);
+  return {assignments, issues};
 }
 
 export async function planPhotoPreparation({ appRoot, folder, photoDir, date, expectedPrefix, workDir, onProgress = null }) {
@@ -4147,35 +4093,10 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   }
   // 场景图的视觉类别与未决福单编号相互独立。即使有模糊福单，也应继续
   // 处理已明确归类的场景图和对应已上传订单。
-  if (verifiedBatch.applied) {
-    if (sceneCandidates.length) {
-        const verifiedLampCount = verifiedBatch.sceneAssignments.filter((item) => item.kind === 'scene-lamp').length;
-        const verifiedWaterCount = verifiedBatch.sceneAssignments.filter((item) => item.kind === 'scene-water').length;
-        if (verifiedLampCount >= 2 && verifiedWaterCount === 0 && sceneCandidates.length <= 2) {
-          const availableWater = ['2.5.jpg', '2.6.jpg'].filter((name) => !occupiedNames.has(name));
-          if (sceneCandidates.length <= availableWater.length) {
-            assignments.push(...sceneCandidates
-              .sort((a, b) => path.basename(a).localeCompare(path.basename(b), 'zh-CN', { numeric: true }))
-              .map((source, index) => ({
-                source,
-                targetName: availableWater[index],
-                kind: 'scene-water',
-                evidence: { method: 'remaining-scene-after-two-verified-lamp-scenes' },
-              })));
-          } else {
-            pendingIssues.push('补入的供水场景图数量超过可用的 2.5/2.6 命名位置，已保留等待人工确认。');
-          }
-        } else {
-          const sceneResult = await classifyScenes(sceneCandidates, occupiedNames);
-          assignments.push(...sceneResult.assignments);
-          pendingIssues.push(...sceneResult.issues);
-        }
-      }
-  } else {
-    const sceneResult = await classifyScenes(sceneCandidates, occupiedNames);
-    assignments.push(...sceneResult.assignments);
-    pendingIssues.push(...sceneResult.issues);
-  }
+  // 已验证批次只能占用自己的位置，不能替新来的图片证明视觉类别。
+  const sceneResult = await classifyScenes(sceneCandidates, occupiedNames);
+  assignments.push(...sceneResult.assignments);
+  pendingIssues.push(...sceneResult.issues);
 
   const targetNames = assignments.map((item) => item.targetName.toLowerCase());
   if (new Set(targetNames).size !== targetNames.length) issues.push('自动处理目标文件名发生重复。');

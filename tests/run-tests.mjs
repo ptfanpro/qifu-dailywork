@@ -16,6 +16,7 @@ import { AutomationApiClient, canonicalTokenRequest, createTokenRequest, normali
 import { decodePaddleCtc, recognizeLocalTextLine, verifyLocalOcrAssets } from '../src/local-ocr.mjs';
 import {createPhotoInputBinding} from '../src/recognition-provenance.mjs';
 import {runPhotoPdfCommitRegression} from './photo-pdf-commit-regression.mjs';
+import {runSceneCategoryCapacityRegression} from './scene-category-capacity-regression.mjs';
 import './weekend-regression.mjs';
 import './photo-online-regression.mjs';
 import './ocr-crop-regression.mjs';
@@ -44,6 +45,7 @@ const { PDFDocument } = require('pdf-lib');
 const sharp = require('sharp');
 
 await runPhotoPdfCommitRegression();
+await runSceneCategoryCapacityRegression();
 
 // 2026-08-30 平台在 119 条供灯订单下超过旧版 10 秒才挂载场景上传 iframe。
 // 等待预算必须覆盖迟到窗口，并且只接管明确的场景上传页面。
@@ -1453,8 +1455,8 @@ const ambiguousSingleResult=await classifyScenes([ambiguousSceneFile],new Set())
 assert.equal(ambiguousSingleResult.assignments.length,0);
 assert.match(ambiguousSingleResult.issues[0],/单图视觉证据不足/);
 const occupiedLampResult=await classifyScenes([ambiguousSceneFile],new Set(['2.1.jpg','2.2.jpg']));
-assert.equal(occupiedLampResult.issues.length,0);
-assert.deepEqual(occupiedLampResult.assignments.map((item)=>[item.targetName,item.kind]),[['2.5.jpg','scene-water']]);
+assert.equal(occupiedLampResult.assignments.length,0);
+assert.match(occupiedLampResult.issues[0],/单图视觉证据不足/);
 fs.rmSync(sameKindSceneRoot,{recursive:true,force:true});
 const globallyAmbiguousPhotos=[
   {file:'actual-466.jpg',reliable:false,number:null,paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{},candidates:[{number:466,votes:2,prefixDistance:2.2},{number:468,votes:2,prefixDistance:2.3}]},
