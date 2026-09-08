@@ -50,3 +50,7 @@ UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读
 逐字提取的竖排 PDF 可另使用 `visibleFieldViews` 中同布局两视图一致的完整汉字行作为诊断字段；不可把 PDF 文字流中的邻接汉字直接拼成姓名。报告分开记录 `distinctExtractedFields`、`visibleConsensusFields` 与两种来源的特有字段命中。零个提取字段绝不算完整覆盖。可见来源必须与同页补充语料精确一致，不能缺视图或混入别页。不同 PDF 文字项、不同 OCR 行和来源之间也不能拼接四字片段；因而新旧源码的文字层可用性计数可能不同，不能混合计算通过率。
 
 `node tests/scene-category-replay.mjs PRIVATE_OUTPUT BASELINE_SOURCE [YYYY-MM-DD ...]` 仅对库存中已有场景参考标签的照片做类别/容量 A/B，文件名以哈希匿名化，分别测试整批空位、单张空位、供灯位置已满和供水位置已满。旧/新源码必须冻结并记录指纹，输入前后核验哈希；照片、报告留在本机专用临时目录。旧标签仅选取语料，不是真值；该专项不测试福单/场景入口、不执行 OCR 或订单绑定、改名、上传。不可将其计数当作全年自动识别验收。`scene-category-capacity-regression.mjs` 的生成图反例已纳入普通 Node 全套回归。
+
+正文否决保护候选使用随仓库携带的 `models/paddleocr-zh-v4` 两份固定模型，`ui/Run-Tests.ps1` 强制执行实际模型横排/旋转竖排行烟雾测试；模型缺失或哈希错误必须失败，不能跳过。生产 `bodyClaimReview` 只表示当前 PDF 的正文观察检查，不证明完整订单集合。冻结完整计划回放必须同时检查该字段、最终 assignments 与允许上传编号；不能仅看早先 `pdfClaimRecheck.confirmed` 数量。共用读取/语料原语移入 `src` 后，试验源码指纹也须包括实际 `src` 依赖，旧冻结副本保持不变。
+
+续跑输入保护由 `photo-upload-body-gate-regression.mjs`、`photo-upload-input-regression.mjs` 验证混合目录、过期计划、同名替换及精确处理回执；`photo-upload-receipt-integration.mjs` 实际生成 JPEG 并调用处理事务，验证真实回执可续跑、被替换的成品不可复用。均已纳入普通 Node 入口。新原图不会自动成为可上传文件，也不会单因出现而使不变的已验证成品失效。旧数字图待改号时，不得仅完成只读计划就沿用旧名上传。上述只证明文件身份和续跑入口保护，不能替代 OCR/订单归属验收。

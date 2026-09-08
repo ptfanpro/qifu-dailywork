@@ -8,7 +8,8 @@ import { Timing } from './timing.mjs';
 import { calculateQuantities, normalizeText, venueMessage } from './quantity.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolder as photoDayFolder, scanPhotoWorkday, splitUploadBatches } from './photos.mjs';
 import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs';
-import {createPdfIndexBinding,recognitionSourceFingerprint,canReusePdfIndex} from './recognition-provenance.mjs';
+import {createPdfIndexBinding,recognitionSourceFingerprint,canReusePdfIndex,createPhotoInputBinding} from './recognition-provenance.mjs';
+import {mustRebuildPhotoPlan,assertWritePlanReady,photoFilesMatchPlan,assertPhotoFilesMatchPlan} from './photo-plan-gate.mjs';
 import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
@@ -461,9 +462,9 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
     }
     photoTiming.start('pdf-index');
     const photoInbox = path.join(photoDayFolder(root, photoDate), '1');
-    const quickImageCount = fs.existsSync(photoInbox)
-      ? fs.readdirSync(photoInbox).filter((name) => /\.(?:jpe?g|png)$/i.test(name)).length
-      : 0;
+    const photoFileNames = fs.existsSync(photoInbox)
+      ? fs.readdirSync(photoInbox).filter((name) => /\.(?:jpe?g|png)$/i.test(name)) : [];
+    const quickImageCount = photoFileNames.length;
     log(`照片目录快速清点：发现 ${quickImageCount} 张图片。初始化预检不读取未编号原图做 OCR；正式识别和编号由照片处理阶段完成。`);
     const cachedPlanFile = path.join(photoRunDir,'photo-prepare-plan.json');
     let cachedPhotoPlan = readJson(cachedPlanFile,null);
@@ -473,19 +474,23 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
     const currentPdfBinding = createPdfIndexBinding(photoDate,currentPdfFiles,recognitionSourceFingerprint(appRoot));
     const indexReusable = canReusePdfIndex(cachedPhotoPlan,currentPdfBinding);
     if(cachedPhotoPlan&&!indexReusable) log('本地编号索引缺少有效凭据，或 PDF 文件/识别规则已变化，不能复用旧编号；已保留上传回执。');
-    let allowedBlessingNumbers = indexReusable
+    const writePhotoAction = ['photo-upload','photo-scenes'].includes(args.action);
+    const preparationReceipt = writePhotoAction ? readJson(path.join(photoRunDir,'photo-prepare-receipt.json'),null) : null;
+    const photoIdentityMatches = !writePhotoAction || photoFilesMatchPlan(cachedPhotoPlan,preparationReceipt,
+      createPhotoInputBinding(photoInbox,photoFileNames.map(name=>path.join(photoInbox,name))).files);
+    if(writePhotoAction&&indexReusable&&!photoIdentityMatches) log('照片新增、替换或缺少处理哈希凭据，将重新核对，不沿用同名照片的旧识别结论。');
+    let allowedBlessingNumbers = indexReusable && photoIdentityMatches
       && Array.isArray(cachedPhotoPlan.allowedBlessingNumbers)
       ? new Set(cachedPhotoPlan.allowedBlessingNumbers.map(Number).filter(Number.isInteger))
       : null;
-    // V9.5.44 及更早断点没有保存“本日唯一编号集”。如果目录已经全部是
-    // 纯数字/场景规范名，可只重建 PDF 索引（不会 OCR 原图、不会改 NAS），
-    // 防止升级后把跨日补图重新计入本日上传。
+    // Old or changed plans need read-only recognition before actual writes.
+    // Raw-image initialization stays lightweight; it is not an upload permit.
     const standardizedOnly = fs.existsSync(photoInbox) && fs.readdirSync(photoInbox)
       .filter((name) => /\.(?:jpe?g|png)$/i.test(name))
       .every((name) => /^\d+$/.test(path.parse(name).name) || /^2\.[1256]$/.test(path.parse(name).name));
-    if (!allowedBlessingNumbers && standardizedOnly && quickImageCount > 0) {
+    if (mustRebuildPhotoPlan({indexReusable:allowedBlessingNumbers!==null,standardizedOnly,imageCount:quickImageCount,action:args.action})) {
       const [year, month, day] = photoDate.split('-').map(Number);
-      log('检测到旧版照片断点缺少编号归属索引，正在只读重建本日 PDF 唯一编号集。');
+      log('检测到旧版或已失效照片计划，正在只读重新核对本日 PDF、编号和正文归属；不会按旧断点直接上传。');
       cachedPhotoPlan = await planPhotoPreparation({
         appRoot,folder:path.join(root,`${month}月${day}日`),photoDir:photoInbox,date:photoDate,
         expectedPrefix:`${String(year).slice(-2)}${month}`,workDir:photoRunDir,onProgress:(message)=>log(message),
@@ -493,6 +498,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
       atomic(cachedPlanFile,cachedPhotoPlan);
       allowedBlessingNumbers = new Set((cachedPhotoPlan.allowedBlessingNumbers || []).map(Number).filter(Number.isInteger));
     }
+    assertWritePlanReady(cachedPhotoPlan,{imageCount:quickImageCount,action:args.action});
     let expectedNumberModes = null;
     if (allowedBlessingNumbers && Array.isArray(cachedPhotoPlan?.pdfPages)) {
       const indexedModes = new Map();
@@ -510,6 +516,8 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
       else log('本地 PDF 编号分类索引不完整，将继续使用整日场景保守校验。');
     }
     const manifest = await scanPhotoWorkday(root,photoDate,photoRunDir,{runOcr:false,expectedNumbers:allowedBlessingNumbers,expectedNumberModes});
+    if(writePhotoAction&&quickImageCount>0) assertPhotoFilesMatchPlan(cachedPhotoPlan,preparationReceipt,
+      Object.entries(manifest.fileHashes||{}).map(([name,sha256])=>({name,sha256})));
     photoTiming.setCount('photo_count',manifest.counts.allImages);
     photoTiming.setCount('pdf_page_count',manifest.counts.pdfPages);
     photoTiming.count('manual_review_count',manifest.counts.unexpected);
