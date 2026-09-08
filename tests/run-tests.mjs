@@ -27,6 +27,7 @@ import './recognition-provenance-regression.mjs';
 import './windows-code-evidence-regression.mjs';
 import './independent-code-provenance-regression.mjs';
 import './photo-code-audit-retention-regression.mjs';
+import './full-code-prefix-retention-regression.mjs';
 import './foreground-paper-scene-regression.mjs';
 import './body-content-guard-regression.mjs';
 import './body-short-field-guard-regression.mjs';

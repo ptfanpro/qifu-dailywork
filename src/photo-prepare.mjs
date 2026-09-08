@@ -1247,6 +1247,10 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     const reading = summarizeWindowsCodeObservations(
       [...windows].map(([crop,value])=>({crop,text:value.text})),expectedPrefix);
     windowsCodeDiagnostics.push(...reading.observations);
+    if (reading.prefixConflict) return {
+      file,...reading,paperGeometry:paperEvidence.geometry,visualMetrics,sceneMetrics,
+      windowsCodeObservations:reading.observations,
+    };
     if (reading.reliable && expectedNumbers.has(reading.number)) {
       return {
         file,
@@ -1553,6 +1557,10 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     // an out-of-range contradictory crop silently disappears.
     const reading = summarizeWindowsCodeObservations(
       [...windows].map(([crop,value])=>({crop,text:value.text})),expectedPrefix);
+    if (reading.prefixConflict) return {
+      file,...reading,paperGeometry:paperEvidence.geometry,visualMetrics,sceneMetrics,
+      windowsCodeObservations:[...windowsCodeDiagnostics,...reading.observations],
+    };
     if (reading.reliable && expectedNumbers.has(reading.number)) {
       return {
         file,
@@ -2020,25 +2028,32 @@ async function photoShapeFingerprints(item) {
 // the current PDF contains only 32. WinRT does not return confidence values.
 export function parseCompletePrintedCodes(rawText,expectedPrefix) {
   const prefix=String(expectedPrefix||'');
-  if(!/^\d{3,4}$/.test(prefix))return {numbers:[],incompleteTailObserved:false};
   const text=normalizeOcr(rawText||'').replace(/[·•﹣－−]/g,'-').replace(/\s*-\s*/g,'-');
-  const matches=[...text.matchAll(new RegExp(`(?<![\\d-])${prefix}-1-(\\d{1,4})(?![\\d-])`,'g'))];
-  const numbers=[];
+  // Keep ALL complete printed prefixes before relating them to the task's
+  // month. Otherwise a foreign full code disappears and creates consensus.
+  const matches=[...text.matchAll(/(?<![\d-])(\d{3,4})-1-(\d{1,4})(?![\d-])/g)];
+  const codes=[],seen=new Set();
   let incompleteTailObserved=false;
   for(const match of matches) {
     const after=text.slice(match.index+match[0].length);
-    if(/^\s+\d/.test(after)&&!new RegExp(`^\\s+${prefix}-1-\\d`).test(after)) {
+    if(/^\s+\d/.test(after)&&!/^\s+\d{3,4}-1-\d/.test(after)) {
       incompleteTailObserved=true;
       continue;
     }
-    if(Number(match[1])>0)numbers.push(Number(match[1]));
+    if(Number(match[2])>0&&!seen.has(match[0])) {
+      seen.add(match[0]);
+      codes.push({prefix:match[1],number:Number(match[2]),fullCode:match[0]});
+    }
   }
-  return {numbers:[...new Set(numbers)],incompleteTailObserved};
+  // Legacy callers may still request matching tails, but strict collectors
+  // must retain codes, including a contrary prefix or a different print year.
+  const numbers=[...new Set(codes.filter(code=>code.prefix===prefix).map(code=>code.number))];
+  return {numbers,codes,incompleteTailObserved};
 }
 
 export function summarizeWindowsCodeObservations(readings,expectedPrefix) {
   const observations=[],groups=new Map();
-  let incompleteTailObserved=false;
+  let incompleteTailObserved=false,prefixConflict=false;
   for (const reading of readings) {
     if (!reading?.crop) continue;
     const crop=String(reading.crop);
@@ -2048,18 +2063,25 @@ export function summarizeWindowsCodeObservations(readings,expectedPrefix) {
     // repair would turn "269-123" into the invented full code "269-1-23".
     const parsed=parseCompletePrintedCodes(reading.text,expectedPrefix);
     incompleteTailObserved ||= parsed.incompleteTailObserved;
-    for (const number of parsed.numbers) {
+    for (const code of parsed.codes) {
+      const prefixMatches=code.prefix===String(expectedPrefix);
+      prefixConflict ||= !prefixMatches;
+      observations.push({...code,crop,engine:'windows-ocr',confidence:null,
+        expectedPrefix:String(expectedPrefix),prefixDistance:prefixMatches?0:null,fullCodeValidated:true});
+      if(!prefixMatches)continue;
+      const number=code.number;
       if (!groups.has(number)) groups.set(number,new Set());
       groups.get(number).add(crop);
-      observations.push({number,crop,engine:'windows-ocr',confidence:null,prefixDistance:0,fullCodeValidated:true});
     }
   }
   const candidates=[...groups].sort(([a],[b])=>a-b).map(([number,crops])=>({
     number,votes:crops.size,prefixDistance:0,maxConfidence:null,layouts:[...crops],
   }));
-  const reliable=!incompleteTailObserved&&candidates.length===1&&candidates[0].votes>=2;
+  const reliable=!prefixConflict&&!incompleteTailObserved&&candidates.length===1&&candidates[0].votes>=2;
   const number=reliable?candidates[0].number:null;
-  return {reliable,number,observations,candidates,evidence:reliable?{
+  return {reliable,number,observations,candidates,prefixConflict,
+    ...(prefixConflict?{codeAuditHistory:[{status:'unresolved',reason:'printed-code-prefix-conflict',
+      number:null,observations:observations.map(value=>({...value}))}]}:{}),evidence:reliable?{
     method:'windows-ocr-full-code-multi-crop',votes:candidates[0].votes,prefixDistance:0,
     maxConfidence:null,fullCodeValidated:true,independentEngines:['windows-ocr'],
     layouts:candidates[0].layouts,observations,
@@ -2070,6 +2092,7 @@ function hasWindowsFullCodeEvidence(item) {
   const evidence=item?.evidence;
   return evidence?.method==='windows-ocr-full-code-multi-crop'
     && evidence.fullCodeValidated===true && Number.isInteger(item.number)
+    && !hasCompleteCodePrefixConflict(evidence.observations)
     && evidence.observations?.length>=2
     && evidence.observations.every(o=>o.engine==='windows-ocr'&&o.fullCodeValidated===true
       &&o.prefixDistance===0&&o.number===item.number&&o.crop)
@@ -2104,7 +2127,25 @@ export async function auditExistingNumericPhotoCode({ appRoot, file, expectedPre
 
 // Preprocessing twice is not an independent OCR engine. Duplicate full-code
 // claims need an independent reading, not a guess based on the missing tail.
+function hasCompleteCodePrefixConflict(observations) {
+  const prefixes=new Set();
+  for(const item of observations || []) {
+    if(item.fullCodeValidated!==true||!item.crop
+      ||!['windows','windows-ocr','tesseract','paddle'].includes(item.engine))continue;
+    // Old synthetic/legacy evidence has no fullCode field. New collection
+    // always records it; source-fingerprint gates invalidate old real plans.
+    if(item.fullCode==null)continue;
+    const match=/^(\d{3,4})-1-(\d{1,4})$/.exec(item.fullCode);
+    if(!match||Number(match[2])!==item.number||item.number<=0
+      ||item.prefixDistance!==0||(item.prefix!=null&&item.prefix!==match[1])
+      ||(item.expectedPrefix!=null&&item.expectedPrefix!==match[1]))return true;
+    prefixes.add(match[1]);
+  }
+  return prefixes.size>1;
+}
+
 export function independentCodeConsensus(observations) {
+  if(hasCompleteCodePrefixConflict(observations))return null;
   const support = new Map();
   for (const item of observations || []) {
     if (!Number.isInteger(item.number) || item.number<=0 || item.prefixDistance!==0
@@ -2144,13 +2185,15 @@ export function recordIndependentCodeAudit(item,audit,expectedNumbers) {
   const observations=(audit?.observations || []).map(value=>({
     number:value.number,engine:value.engine,crop:value.crop,
     prefixDistance:value.prefixDistance,fullCodeValidated:value.fullCodeValidated,
+    fullCode:value.fullCode,prefix:value.prefix,expectedPrefix:value.expectedPrefix,
   }));
   const observedNumber=independentCodeConsensus(observations);
   const validNumbers=new Set(observations.filter(value=>Number.isInteger(value.number)
     && value.number>0 && value.prefixDistance===0 && value.fullCodeValidated===true
     && ['windows','tesseract','paddle'].includes(value.engine) && value.crop).map(value=>value.number));
   const reason=audit?.errorCode ? 'independent-code-audit-unavailable'
-    : validNumbers.size>1 ? 'independent-code-audit-conflicting'
+    : hasCompleteCodePrefixConflict(observations) ? 'independent-code-audit-prefix-conflict'
+      : validNumbers.size>1 ? 'independent-code-audit-conflicting'
       : !Number.isInteger(observedNumber) ? 'independent-code-audit-incomplete'
         : !expectedNumbers.has(observedNumber) ? 'independent-code-audit-outside-pdf'
           : audit.number!==observedNumber ? 'independent-code-audit-number-mismatch' : null;
@@ -2193,8 +2236,10 @@ export async function auditConflictingPhotoCode({worker,appRoot,item,expectedPre
   try {
     const windows=readWindowsOcrTails(appRoot,files,cropDir);
     const appendReading=(engine,text,file)=>{
-      for(const number of parseCompletePrintedCodes(text,expectedPrefix).numbers) {
-        observations.push({number,prefixDistance:0,fullCodeValidated:true,engine,crop:path.basename(file)});
+      for(const code of parseCompletePrintedCodes(text,expectedPrefix).codes) {
+        observations.push({...code,expectedPrefix:String(expectedPrefix),
+          prefixDistance:code.prefix===String(expectedPrefix)?0:null,
+          fullCodeValidated:true,engine,crop:path.basename(file)});
       }
     };
     // Save each engine's results immediately. If the next engine throws on

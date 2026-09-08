@@ -58,3 +58,5 @@ UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读
 完整短字段原语已移至 `src/body-field-evidence.mjs`，试验入口只转导出，产品和诊断指纹均覆盖实际依赖。`body-short-field-guard-regression.mjs` 验证四字片段漏掉的三字外页字段会触发否决，并覆盖同名、子串、模板、跨行及逐字 PDF。完整产品回放应同时检查 `bodyClaimReview.results[].fieldEvidence`，不能把字段读数一致当作 `bindingVerified=true`，也不能使用已知历史答案自动改号。既有冻结诊断目录不可原位更新。
 
 产品回放汇总由 `audit-replay-summary.mjs` 独立处理 `pdfPages/assignments`，显示 `pages/assignedPhotos`，不把分配写成已验证归属（`confirmed=null`）。只取每日期的 `report.json`，不与同目录 `summary.json` 重复累加。缺源日期、失败日期、报告无效、原件变化分别列出；逐图哈希多重集须与库存一致，分配/未决/参考差异须与逐行计数一致。`audit-replay-summary-regression.mjs` 先复现旧页数为零，再覆盖上述情况和私有内容不泄漏，已纳入实际普通测试入口。历史结构第一版的源文件未变证据保存在每个 `rows[].sourceUnchanged`，不能因顶层字段缺失直接当作有变更，也不能未核对逐行就标通过。
+
+`full-code-prefix-retention-regression.mjs` 验证完整码不同前缀不能在 Windows 汇总或独立引擎收集前被删除；同尾不同月、不同预处理读到不同前缀、引擎中途失败、后续成功覆盖失败和规范名复用分别覆盖。新增固定模型诊断只比较既有自动框，不把同家族中文/英文模型计为独立订单确认；新源码须冻结另跑完整日期，不能修改正在进行的旧年度快照。
