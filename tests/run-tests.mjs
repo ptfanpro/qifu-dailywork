@@ -48,6 +48,7 @@ import './experiments/chinese-reader-regression.mjs';
 import './experiments/body-probe-summary-regression.mjs';
 import './experiments/vertical-body-regions-regression.mjs';
 import './horizontal-body-regions-regression.mjs';
+import './paper-orientation-regression.mjs';
 import './experiments/pdf-visual-body-evidence-regression.mjs';
 import './experiments/pdf-visual-body-summary-regression.mjs';
 import './experiments/body-field-evidence-regression.mjs';
@@ -1228,8 +1229,10 @@ const structuralPdfPages=[
   {number:28,portrait:true,pdfName:'92红纸2.pdf',_localShapeFingerprint:shapePages[1]._localShapeFingerprint},
 ];
 const structuralDuplicatePhotos=[
-  {file:'landscape-red.jpg',reliable:true,number:23,candidates:[{number:23,votes:1,prefixDistance:0,maxConfidence:100}],paperGeometry:{usablePaper:true,width:.82,height:.58},visualMetrics:{},evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:.25,maxConfidence:100}},
-  {file:'portrait-red-with-corruption-band.jpg',reliable:true,number:23,candidates:[{number:23,votes:3,prefixDistance:.25,maxConfidence:100}],paperGeometry:{usablePaper:true,width:.731,height:.925},visualMetrics:{},evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:.25,maxConfidence:100}},
+  // Explicit synthetic square canvas preserves the intended physical shapes;
+  // these are not measured dimensions of a historical photo.
+  {file:'landscape-red.jpg',reliable:true,number:23,candidates:[{number:23,votes:1,prefixDistance:0,maxConfidence:100}],paperGeometry:{usablePaper:true,left:0,top:0,width:.82,height:.58,imageWidth:1000,imageHeight:1000},visualMetrics:{},evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:.25,maxConfidence:100}},
+  {file:'portrait-red-with-corruption-band.jpg',reliable:true,number:23,candidates:[{number:23,votes:3,prefixDistance:.25,maxConfidence:100}],paperGeometry:{usablePaper:true,left:0,top:0,width:.731,height:.925,imageWidth:1000,imageHeight:1000},visualMetrics:{},evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:.25,maxConfidence:100}},
 ];
 const structuralCorrections=await reconcileDuplicatePhotoNumbersByPdfStructure(
   structuralDuplicatePhotos,structuralPdfPages,new Set([23,28]),new Set(),
@@ -1245,7 +1248,7 @@ assert.equal(structuralRecheck.confirmed,2);
 assert.equal(structuralDuplicatePhotos[1].evidence.pdfRecheck.method,'orientation-color-and-global-pdf-bijection');
 const sameOrientationDuplicate=structuralDuplicatePhotos.map((item,index)=>({
   ...item,number:23,reliable:true,
-  paperGeometry:{usablePaper:true,width:.82,height:.58},
+  paperGeometry:{usablePaper:true,left:0,top:0,width:.82,height:.58,imageWidth:1000,imageHeight:1000},
   evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:.25,maxConfidence:100},
 }));
 assert.deepEqual(await reconcileDuplicatePhotoNumbersByPdfStructure(
@@ -1253,7 +1256,7 @@ assert.deepEqual(await reconcileDuplicatePhotoNumbersByPdfStructure(
 ),[]);
 const wrongColorDuplicate=structuralDuplicatePhotos.map((item,index)=>({
   ...item,number:23,reliable:true,
-  paperGeometry:index?{usablePaper:true,width:.731,height:.925}:{usablePaper:true,width:.82,height:.58},
+  paperGeometry:{...structuralDuplicatePhotos[index].paperGeometry},
   evidence:{method:'windows-ocr-strict-code-crop',votes:1,prefixDistance:.25,maxConfidence:100},
 }));
 assert.deepEqual(await reconcileDuplicatePhotoNumbersByPdfStructure(

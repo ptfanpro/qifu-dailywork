@@ -470,9 +470,12 @@ const VERIFIED_BATCH_EVIDENCE = {
   },
 };
 
-function paperCodeLayoutsFromGeometry(geometry) {
+export function paperCodeLayoutsFromGeometry(geometry) {
   if (!geometry?.usablePaper && !geometry?.rectangularPaper) return [];
-  const portraitPaper = geometry.height > geometry.width * 1.25;
+  const portraitPaper = paperPortraitFromGeometry(geometry);
+  // Old cached ratios without their source canvas cannot establish direction.
+  // Fixed image-wide fallbacks still run; do not invent a square source image.
+  if (portraitPaper === null) return [];
   return [
     !portraitPaper ? {
       name: 'paper-relative-landscape-code-upper-right',
@@ -527,8 +530,14 @@ function paperCodeLayoutsFromGeometry(geometry) {
 }
 
 async function detectPaperEvidence(file) {
-  const { data, info } = await sharpFile(file).rotate().resize({ width: 320, height: 240, fit: 'fill' }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const image = sharpFile(file);
+  const metadata = autoOrientedMetadata(await image.metadata());
+  const { data, info } = await image.rotate().resize({ width: 320, height: 240, fit: 'fill' }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
   const geometry = largestPaperGeometry(data, info);
+  if (geometry) {
+    geometry.imageWidth = metadata.width;
+    geometry.imageHeight = metadata.height;
+  }
   return { geometry, layouts: paperCodeLayoutsFromGeometry(geometry) };
 }
 
@@ -2417,7 +2426,9 @@ export async function matchPdfPagesLocally(recognized, pdfPages, onProgress = nu
     // 候选集合，否则 599–601 会被错误排除，只剩 602 红纸页参与比较。
     const sameColorPages = paperColor === 'red' ? indexedPages.filter((page)=>/(?:红纸|供水)/.test(page.pdfName || ''))
       : paperColor === 'yellow' ? indexedPages.filter((page)=>/黄纸/.test(page.pdfName || '')) : [];
-    const sameOrientationPages = indexedPages.filter((page)=>page.portrait === (item.paperGeometry.height > item.paperGeometry.width * 1.25));
+    const photoPortrait = paperPortraitFromGeometry(item.paperGeometry);
+    const sameOrientationPages = photoPortrait === null ? []
+      : indexedPages.filter((page)=>page.portrait === photoPortrait);
     const candidatePages = sameColorPages.length ? sameColorPages
       : sameOrientationPages.length ? sameOrientationPages : indexedPages;
     const scores = candidatePages
@@ -3753,10 +3764,16 @@ export async function dominantPaperColor(file, geometry = null) {
   return null;
 }
 
-function photoPortraitFromGeometry(item) {
-  const width = Number(item?.paperGeometry?.width || 0);
-  const height = Number(item?.paperGeometry?.height || 0);
-  if (!(width > 0) || !(height > 0)) return null;
+export function paperPortraitFromGeometry(geometry) {
+  const {imageWidth,imageHeight,left,top,width:ratioWidth,height:ratioHeight}=geometry || {};
+  if (![imageWidth,imageHeight].every(value=>Number.isSafeInteger(value)&&value>0)
+    || ![left,top,ratioWidth,ratioHeight].every(Number.isFinite)
+    || left<0 || top<0 || ratioWidth<=0 || ratioHeight<=0
+    || left+ratioWidth>1+1e-9 || top+ratioHeight>1+1e-9) return null;
+  // Each ratio has a different denominator. Compare physical pixel extents,
+  // not coordinates on the stretched 320 x 240 mask or a fictitious square.
+  const width = ratioWidth * imageWidth;
+  const height = ratioHeight * imageHeight;
   return height > width * 1.25;
 }
 
@@ -3798,7 +3815,7 @@ export async function reconcileDuplicatePhotoNumbersByPdfStructure(
     const claimedPages = pdfPages.filter((page) => page.number === duplicateNumber);
     if (claimedPages.length !== 1 || typeof claimedPages[0].portrait !== 'boolean') continue;
     const claimedPage = claimedPages[0];
-    const structuredGroup = group.map((entry) => ({ ...entry, portrait:photoPortraitFromGeometry(entry.item) }));
+    const structuredGroup = group.map((entry) => ({ ...entry, portrait:paperPortraitFromGeometry(entry.item.paperGeometry) }));
     if (structuredGroup.some(({ portrait }) => typeof portrait !== 'boolean')) continue;
     const incompatible = structuredGroup.filter(({ portrait }) => portrait !== claimedPage.portrait);
     const compatible = structuredGroup.filter(({ portrait }) => portrait === claimedPage.portrait);
