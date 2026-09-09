@@ -92,3 +92,5 @@ UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读
 `tests/experiments/db-reference-geometry.py` 是 Apache-2.0 的 PaddleOCR 2.7 参考几何适配：轮廓、最小旋转矩形、fast score、unclip、透视裁图；不自动旋转竖行，超过候选预算直接拒绝，返回 `physicalCodeExtentVerified=false` 和 `mayClearCodeConflict=false`。显式测试命令为 `python -B tests/experiments/db-reference-geometry-tests.py`。运行前将经过验证的隔离依赖目录放入本进程 `PYTHONPATH`；本轮使用 opencv-python-headless 4.13.0.92 和 pyclipper 1.3.0.post6，没有安装到全局或产品运行时，缺依赖不得跳过伪装通过。
 
 真实几何 A/B 必须使用相同输入像素与同一次概率图，保留旧/新路径所有视图、相反读数、无读数和异常；原件前后哈希核验，地图、裁图、OCR 编号与试验输出仅放本机私有目录，不进 Git 或网络。无既有自动窗口的照片单列未测试。旋转框、严格完整码语法、两个引擎同号，都不证明物理字段完整、编号正确或订单归属；本轮实图已观察到双引擎同号但前缀错误。不能将该候选接入赋号，或据它删除先前冲突。
+
+印刷版式试验见 `tests/experiments/PRINTED-LAYOUT-EXPERIMENT.md`；显式 Python 回归现为 12 项，不包含在普通 Node 32 项统计中。新印刷坐标轮次与旧画布轮次必须按完全相同的照片/逐页身份及派生像素比较；每图多个页面提议不是多张识别成功。版式外推包络不得冒称完整编号字段，局部支持凸包也不得作为所有正常编号的强制通过门槛。新增的“照片另有模板外编号”和“编号只在投影框内、不在观察凸包内”两个生成反例，只保护诊断权限边界，不代表真实赋号通过。完整复核只读保存结果，不能回写已完成试验、覆盖原照片或重计已结算耗时。

@@ -26,6 +26,35 @@ def page(seed=713):
 
 
 class LayoutTests(unittest.TestCase):
+    def test_shared_decoration_cannot_certify_photo_only_code(self):
+        # A printed revision may move/add its code beyond the template ink.
+        # Geometry still fits the shared frame, but excludes that extra field.
+        source = page()
+        photo = np.full((1000, 1200), 245, np.uint8)
+        photo[200:800, 150:950] = source
+        cv.putText(photo, 'TEST-19', (760, 170), cv.FONT_HERSHEY_SIMPLEX, .7, 0, 2)
+        result = g.match_layout(g.prepare_template(source, 'printed-ink'), g.prepare_photo(photo))
+        self.assertTrue(result['candidate'], result['reason'])
+        outline = np.float32(result['geometry']['points'])
+        self.assertLess(cv.pointPolygonTest(outline, (820., 160.), False), 0)
+        self.assertFalse(result['physicalCodeExtentVerified'])
+        self.assertFalse(result['bindingVerified'])
+        self.assertFalse(result['mayAssignNumber'])
+        self.assertFalse(result['mayClearCodeConflict'])
+
+    def test_projected_envelope_contains_more_than_observed_hull(self):
+        # Four quadrants and a wide span can coexist with an unsupported code.
+        s = np.float32([[100, 100], [650, 100], [650, 500], [100, 500], [400, 300]])
+        result = g.geometry_evidence(np.eye(3), s, s, (600, 800), (900, 1200))
+        self.assertTrue(result['accepted'])
+        observed = g.local_support(np.eye(3), s, s)
+        self.assertTrue(observed['observed'])
+        code_point = (750., 30.)
+        self.assertGreater(cv.pointPolygonTest(np.float32(result['points']), code_point, False), 0)
+        self.assertLess(cv.pointPolygonTest(np.float32(observed['projectedHull']), code_point, False), 0)
+        self.assertFalse(observed['physicalCodeExtentVerified'])
+        self.assertFalse(observed['completePageVerified'])
+
     def test_white_canvas_is_not_printed_frame(self):
         source = np.full((900, 1500), 255, np.uint8)
         source[150:750, 350:1150] = page()
