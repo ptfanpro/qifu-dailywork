@@ -30,6 +30,7 @@ import './photo-code-audit-retention-regression.mjs';
 import './photo-capture-evidence-regression.mjs';
 import './full-code-prefix-retention-regression.mjs';
 import './portable-code-retention-regression.mjs';
+import './portable-conflict-review-regression.mjs';
 import './foreground-paper-scene-regression.mjs';
 import './body-content-guard-regression.mjs';
 import './body-short-field-guard-regression.mjs';

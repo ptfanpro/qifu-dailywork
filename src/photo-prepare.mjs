@@ -1139,7 +1139,9 @@ export async function recognizeWithPortableLocalOcr(
   const layouts=localOcrCodeLayoutsForPhoto(paperGeometry,preferredNames);
   const read={schemaVersion:1,status:'unresolved',expectedPrefix:String(expectedPrefix),modelSha256:null,
     observations:[],readCount:0,emptyReadCount:0,incompleteTailObserved:false,partialCodeObserved:false,errorCode:null,blockReason:null,
+    conflictReview:null,
     coverage:{kind:'fixed-narrow-grid',plannedLayouts:layouts.length,completedLayouts:0,skippedLayouts:0,completed:false}};
+  let currentLayoutIndex=0;
   const observations=[];
   const outcome=(proposal=null)=>({number:proposal?.number ?? null,evidence:proposal?.evidence ?? null,
     candidates:proposal?.candidates ?? groupObservations(observations).slice(0,5),
@@ -1180,6 +1182,15 @@ export async function recognizeWithPortableLocalOcr(
       : new Set(read.observations.map(code=>code.number)).size>1?'portable-code-number-conflict'
         : read.observations.some(code=>!expectedNumbers.has(code.number))?'portable-code-outside-pdf'
           : read.incompleteTailObserved?'portable-code-incomplete-tail':null;
+    // A syntax-valid string from an unverified narrow window is not a proven
+    // whole-field reading. Keep it, but do not abort evidence collection at
+    // the first bad crop. A bounded suffix of the existing deterministic scan
+    // can expose omitted digits/contrary reads without a PDF-driven repair.
+    // This review NEVER cancels the block or returns a reliable proposal.
+    if(read.blockReason&&!read.conflictReview)read.conflictReview={
+      firstReason:read.blockReason,firstRead:read.readCount,firstLayoutIndex:currentLayoutIndex,
+      maxFollowingLayouts:16,followingLayouts:0,stopReason:null,physicalCodeExtentVerified:false,
+    };
   };
   const appendObservations = (parsedItems, result, layout, variant) => {
     const complete=parseCompletePrintedCodes(result.text,expectedPrefix).codes;
@@ -1193,6 +1204,7 @@ export async function recognizeWithPortableLocalOcr(
     });
   };
   const resolvedConsensus = () => {
+    if(read.blockReason)return null;
     const groups = groupObservations(observations);
     const best = groups[0] || null;
     if (!isReliableOcrConsensus(best, groups[1] || null, 55)
@@ -1217,14 +1229,22 @@ export async function recognizeWithPortableLocalOcr(
       candidates: groups.slice(0, 5),
     };
   };
-  for (const layout of layouts) {
+  for (const [layoutIndex,layout] of layouts.entries()) {
+    currentLayoutIndex=layoutIndex;
+    const review=read.conflictReview;
+    if(review) {
+      if(layoutIndex-review.firstLayoutIndex>review.maxFollowingLayouts) {
+        review.stopReason='layout-budget';
+        return outcome();
+      }
+      review.followingLayouts=layoutIndex-review.firstLayoutIndex;
+    }
     const extract = cropFromRatios(metadata, layout);
     if (!isUsableOcrExtract(extract)) { read.coverage.skippedLayouts++; continue; }
     try {
       const diagnostic = await extractCrop(decoded,extract);
       const result = await recognizeLine(appRoot, diagnostic);
       recordReading(result,layout,'color',extract);
-      if(read.blockReason)return outcome();
       if (Number(result.confidence || 0) < 0.55) { read.coverage.completedLayouts++; continue; }
       const parsedItems = parseLocalOcrCodeCandidates(result.text, expectedPrefix, expectedNumbers);
       if (process.env.PRAYER_LOCAL_OCR_TRACE === 'yes' && parsedItems.length) {
@@ -1244,7 +1264,6 @@ export async function recognizeWithPortableLocalOcr(
         const normalizedDiagnostic = await extractCrop(decoded,extract,{normalized:true});
         const normalizedResult = await recognizeLine(appRoot, normalizedDiagnostic);
         recordReading(normalizedResult,layout,'normalized',extract);
-        if(read.blockReason)return outcome();
         const normalizedItems = Number(normalizedResult.confidence || 0) >= 0.55
           ? parseLocalOcrCodeCandidates(normalizedResult.text, expectedPrefix, expectedNumbers) : [];
         if (process.env.PRAYER_LOCAL_OCR_TRACE === 'yes' && normalizedItems.length) {
@@ -1260,10 +1279,12 @@ export async function recognizeWithPortableLocalOcr(
       // a code exclusion. Preserve only a fixed reason, never exception text.
       read.status='unavailable';read.errorCode='portable-reader-unavailable';
       if(read.observations.length)read.blockReason=read.errorCode;
+      if(read.conflictReview)read.conflictReview.stopReason='reader-error';
       return outcome();
     }
   }
   read.coverage.completed=read.coverage.skippedLayouts===0;
+  if(read.conflictReview)read.conflictReview.stopReason='grid-exhausted';
   read.status=read.observations.length?'unresolved':'no-complete-code';
   return outcome();
 }
