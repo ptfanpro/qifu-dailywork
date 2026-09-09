@@ -40,6 +40,7 @@ import './ocr-long-path-regression.mjs';
 import './photo-input-binding-regression.mjs';
 import './experiments/text-regions-regression.mjs';
 import './experiments/detected-code-observation-regression.mjs';
+import './experiments/detection-cache-regression.mjs';
 import './experiments/tiled-text-regions-regression.mjs';
 import './experiments/code-window-context-regression.mjs';
 import './experiments/body-text-evidence-regression.mjs';
