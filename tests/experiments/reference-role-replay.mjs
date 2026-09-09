@@ -4,9 +4,12 @@ import fs from 'node:fs';import path from 'node:path';import crypto from 'node:c
 import {fileURLToPath} from 'node:url';
 import {requirePrivateAuditRoot} from '../audit-paths.mjs';
 import {createReferenceImageEncoder,createReferenceRoleClassifier,referenceExperimentFingerprint} from './reference-role-reader.mjs';
-const [rootArg,modelDir,appRoot,labelsFile,...dates]=process.argv.slice(2);
+import {createBalancedReferenceRoleClassifier} from './balanced-reference-role-reader.mjs';
+const args=process.argv.slice(2),balanced=args.at(-1)==='--balanced-dates';
+if(balanced)args.pop();
+const [rootArg,modelDir,appRoot,labelsFile,...dates]=args;
 if(!rootArg||!modelDir||!appRoot||!labelsFile||!dates.length||new Set(dates).size!==dates.length)
-  throw Error('PRIVATE_ROOT MODEL_DIR FROZEN_APP_ROOT PRIVATE_CALIBRATION_JSON EVALUATION_DATE [...]');
+  throw Error('PRIVATE_ROOT MODEL_DIR FROZEN_APP_ROOT PRIVATE_CALIBRATION_JSON EVALUATION_DATE [...] [--balanced-dates]');
 const root=requirePrivateAuditRoot(rootArg),labelsPath=fs.realpathSync(labelsFile);
 const relative=path.relative(root,labelsPath);if(relative.startsWith('..')||path.isAbsolute(relative))throw Error('Labels must remain private');
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex'),labelsBytes=fs.readFileSync(labelsPath);
@@ -22,7 +25,7 @@ for(const date of calibrationDates){
 const trainingHashes=new Set(labels.rows.map(r=>r.sha256));
 if(selected.some(d=>d.photos.some(p=>trainingHashes.has(p.sha256))))throw Error('Exact image leakage');
 const here=path.dirname(fileURLToPath(import.meta.url));
-const sourceFiles=['reference-role-replay.mjs','reference-role-reader.mjs','clip-role-reader.mjs','../audit-paths.mjs']
+const sourceFiles=['reference-role-replay.mjs','reference-role-reader.mjs','balanced-reference-role-reader.mjs','clip-role-reader.mjs','../audit-paths.mjs']
  .map(f=>[f,sha(fs.readFileSync(path.join(here,f)))]);
 const dir=fs.mkdtempSync(path.join(root,'reference-role-replay-')),start=performance.now();
 const encoder=await createReferenceImageEncoder(appRoot,modelDir),allSources=[],calibration=[],evaluated=[];
@@ -40,9 +43,9 @@ try {
   if(!p)throw Error('Unknown calibration source');
   calibration.push({...await readImage(row.date,p),role:row.role,reviewed:row.reviewed===true});
  }
- const model=createReferenceRoleClassifier(calibration,encoder.identity);
+ const model=(balanced?createBalancedReferenceRoleClassifier:createReferenceRoleClassifier)(calibration,encoder.identity);
  const version={schemaVersion:1,startedAt:new Date().toISOString(),sourceFiles,calibrationLabelSha256:sha(labelsBytes),
-  model:model.identity,calibrationDates,evaluationDates:dates,mode:'offline-reference-role-diagnostic'};
+  model:model.identity,calibrationDates,evaluationDates:dates,mode:balanced?'offline-balanced-date-role-diagnostic':'offline-reference-role-diagnostic'};
  version.fingerprint=referenceExperimentFingerprint(version);
  fs.writeFileSync(path.join(dir,'version.json'),JSON.stringify(version,null,2));
  fs.writeFileSync(path.join(dir,'calibration.json'),JSON.stringify(calibration));
