@@ -6,6 +6,8 @@
 
 区域定位对照见 `experiments/PAPER-REGION-EXPERIMENT.md`：先冻结轮廓/凸包四边形提议，再用同一固定角色模型测全部候选。八项显式 Python 生成图/像素管道测试不在普通 Node 套件中，必须单列实际执行结果。候选不是前景/纸张/完整编号证明，尤其不得把水碗背景中的小纸牌当成照片主体；不接入产品、不清除失败观察、不按角色第一名直接赋号。
 
+印刷版式定位见 `experiments/PRINTED-LAYOUT-EXPERIMENT.md`：使用全部当前 PDF 页的外周特征提出整页投影。共用印刷花边不证明页/订单身份，完整跨度也不证明编号可读或纸张是前景。七项显式 Python 合成图/真实协议测试单列；整日实图轮次完成前只报告实际进度，不修改运行中的冻结匹配器，不把多个页面对同一纸面的提议计为多张识别成功。
+
 ```text
 node tests/annual-replay.mjs inventory BUSINESS_ROOT PRIVATE_OUTPUT
 node tests/annual-replay.mjs structure BUSINESS_ROOT PRIVATE_OUTPUT
