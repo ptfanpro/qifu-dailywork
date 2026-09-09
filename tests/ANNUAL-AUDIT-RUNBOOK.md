@@ -8,6 +8,8 @@
 
 印刷版式定位见 `experiments/PRINTED-LAYOUT-EXPERIMENT.md`：使用全部当前 PDF 页的外周特征提出整页投影。共用印刷花边不证明页/订单身份，完整跨度也不证明编号可读或纸张是前景。七项显式 Python 合成图/真实协议测试单列；整日实图轮次完成前只报告实际进度，不修改运行中的冻结匹配器，不把多个页面对同一纸面的提议计为多张识别成功。
 
+该试验另可显式选择 `--printed-ink`：使用全部印刷像素外包矩形作坐标系，不把 PDF 空白画布与实物纸张混同；匹配参数不降低。新旧坐标系各自冻结、逐完整日期比较，不混合统计。局部匹配凸包仅保存观察，不证明完整码、整页或订单。对应 Python 测试已增至十项，仍须单列执行，不算入普通 Node 套件。
+
 ```text
 node tests/annual-replay.mjs inventory BUSINESS_ROOT PRIVATE_OUTPUT
 node tests/annual-replay.mjs structure BUSINESS_ROOT PRIVATE_OUTPUT

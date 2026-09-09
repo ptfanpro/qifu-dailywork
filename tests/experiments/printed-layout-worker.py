@@ -13,7 +13,7 @@ g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
 
 
-def run(root):
+def run(root, coordinate_frame='canvas'):
     cv.setNumThreads(1)
     started = time.monotonic()
     root = Path(root).resolve(strict=True)
@@ -36,7 +36,7 @@ def run(root):
         return image
 
     for day in manifest['days']:
-        templates = [(p, g.prepare_template(load(p))) for p in day['pages']]
+        templates = [(p, g.prepare_template(load(p), coordinate_frame)) for p in day['pages']]
         for photo in day['photos']:
             tick = time.monotonic()
             observed = g.prepare_photo(load(photo))
@@ -48,12 +48,12 @@ def run(root):
                 bindingVerified=False, mayAssignNumber=False, mayClearCodeConflict=False,
                 mayUploadScene=False)), flush=True)
     print(json.dumps(dict(complete=True, kind='worker-complete', seconds=time.monotonic()-started,
-                          parameters=g.PARAMETERS, opencv=cv.__version__)), flush=True)
+                          parameters=g.PARAMETERS, coordinateFrame=coordinate_frame, opencv=cv.__version__)), flush=True)
 
 
 if __name__ == '__main__':
     try:
-        run(sys.argv[1])
+        run(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else 'canvas')
     except Exception as error:
         # Do not expose paths, image contents or the full exception message.
         print(json.dumps(dict(complete=False, errorType=type(error).__name__)), flush=True)

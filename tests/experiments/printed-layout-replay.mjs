@@ -9,7 +9,9 @@ import {createRequire} from 'node:module';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {requirePrivateAuditRoot} from '../audit-paths.mjs';
 const require=createRequire(import.meta.url),sharp=require('sharp'),{createCanvas}=require('@napi-rs/canvas');
-const [rootArg,python,cvDependencies,...dates]=process.argv.slice(2);
+const [rootArg,python,cvDependencies,...tail]=process.argv.slice(2);
+const coordinateFrame=tail[0]==='--printed-ink'?'printed-ink':'canvas';
+const dates=coordinateFrame==='printed-ink'?tail.slice(1):tail;
 if(!rootArg||!python||!cvDependencies||!dates.length||new Set(dates).size!==dates.length||dates.some(d=>!/^2026-\d\d-\d\d$/.test(d)))
   throw Error('PRIVATE_ROOT PYTHON ISOLATED_CV_DIR YYYY-MM-DD [...]');
 const root=requirePrivateAuditRoot(rootArg),scriptDir=path.dirname(fileURLToPath(import.meta.url));
@@ -26,11 +28,11 @@ const cvPackage=path.join(cvDependencies,'cv2'),cvBinary=fs.readdirSync(cvPackag
 if(cvBinary.length!==1)throw Error('Isolated OpenCV binary required');
 const runtimeFiles=[path.join(cvPackage,cvBinary[0]),require.resolve('sharp'),require.resolve('pdfjs-dist/package.json')]
   .map(f=>[path.basename(f),sha(fs.readFileSync(f))]);
-const fingerprint=sha(JSON.stringify({sourceFiles,runtimeFiles,sharpVersions:sharp.versions}));
+const fingerprint=sha(JSON.stringify({sourceFiles,runtimeFiles,sharpVersions:sharp.versions,coordinateFrame}));
 const out=fs.mkdtempSync(path.join(root,'printed-layout-replay-')),scripts=path.join(out,'scripts');
 fs.mkdirSync(scripts);
 for(const f of files)fs.copyFileSync(path.join(scriptDir,f),path.join(scripts,f));
-fs.writeFileSync(path.join(out,'version.json'),JSON.stringify({fingerprint,sourceFiles,runtimeFiles,sharpVersions:sharp.versions,dates,
+fs.writeFileSync(path.join(out,'version.json'),JSON.stringify({fingerprint,sourceFiles,runtimeFiles,sharpVersions:sharp.versions,dates,coordinateFrame,
   startedAt:new Date().toISOString(),frozenBeforeFirstRealPhoto:true},null,2));
 const checked=record=>{
   const real=fs.realpathSync(record.file);
@@ -65,7 +67,7 @@ try {
     manifest.days.push(derived);
   }
   fs.writeFileSync(path.join(out,'input.json'),JSON.stringify(manifest));
-  const worker=spawn(python,['-B',path.join(scripts,'printed-layout-worker.py'),out],
+  const worker=spawn(python,['-B',path.join(scripts,'printed-layout-worker.py'),out,coordinateFrame],
     {windowsHide:true,env:{...process.env,PYTHONPATH:cvDependencies},stdio:['ignore','pipe','pipe']});
   let stderr=false,completed=null,protocolError=false;
   worker.stderr.on('data',()=>{stderr=true;});
@@ -80,7 +82,10 @@ try {
     const expected=inputDay?.pages.map(p=>`${p.pdfSha256}:${p.pageNumber}`).sort();
     if(!photo||JSON.stringify(expected)!==JSON.stringify(row.pages.map(p=>`${p.pdfSha256}:${p.pageNumber}`).sort())
        ||rows.some(r=>r.date===row.date&&r.photoSha256===row.photoSha256)||row.mayAssignNumber||row.bindingVerified
-       ||row.mayClearCodeConflict||row.mayUploadScene)throw Error('Invalid worker identities or authority');
+       ||row.mayClearCodeConflict||row.mayUploadScene
+       ||row.pages.some(p=>p.coordinateFrame!==coordinateFrame||p.paperVerified||p.foregroundVerified
+         ||p.physicalCodeExtentVerified||p.bindingVerified||p.mayAssignNumber||p.mayClearCodeConflict||p.mayUploadScene
+         ||p.localSupport?.completePageVerified||p.localSupport?.physicalCodeExtentVerified))throw Error('Invalid worker identities or authority');
     checked(photo);row.sourceUnchanged=true;row.referenceLabel=photo.referenceLabel;
     rows.push(row);fs.writeFileSync(path.join(out,`${row.date}-${row.photoSha256}.json`),JSON.stringify(row));
     const progress={photos:rows.length,total:days.reduce((n,d)=>n+d.photos.length,0),date:row.date,
@@ -90,10 +95,11 @@ try {
   }} catch(error){protocolError=true;worker.kill();throw error;}
   finally {reader.close();if(protocolError)await exited;}
   const exitCode=await exited;
-  if(exitCode!==0||stderr||!completed||rows.length!==days.reduce((n,d)=>n+d.photos.length,0))throw Error('Incomplete layout diagnostic');
+  if(exitCode!==0||stderr||!completed||completed.coordinateFrame!==coordinateFrame
+    ||rows.length!==days.reduce((n,d)=>n+d.photos.length,0))throw Error('Incomplete layout diagnostic');
   for(const day of days)for(const item of [...day.photos,...day.pdfs])checked(item);
   for(const [file,hash] of sourceFiles)if(sha(fs.readFileSync(path.join(scripts,file)))!==hash)throw Error('Frozen script changed');
-  const summary={fingerprint,dates,photos:rows.length,pages:manifest.days.reduce((n,d)=>n+d.pages.length,0),
+  const summary={fingerprint,coordinateFrame,dates,photos:rows.length,pages:manifest.days.reduce((n,d)=>n+d.pages.length,0),
     candidates:rows.reduce((n,r)=>n+r.candidates,0),photosWithCandidates:rows.filter(r=>r.candidates).length,
     sourceUnchanged:true,errors:0,seconds:(performance.now()-started)/1000,worker:completed,
     referenceMatrix:rows.reduce((m,r)=>{const key=r.referenceLabel+' -> '+(r.candidates?'layout-candidate':'none');m[key]=(m[key]||0)+1;return m;},{}),

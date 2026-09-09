@@ -26,6 +26,52 @@ def page(seed=713):
 
 
 class LayoutTests(unittest.TestCase):
+    def test_white_canvas_is_not_printed_frame(self):
+        source = np.full((900, 1500), 255, np.uint8)
+        source[150:750, 350:1150] = page()
+        matrix = np.float64([[1, .03, 60], [0, 1, 50], [0, 0, 1]])
+        photo = cv.warpPerspective(source, matrix, (1700, 1100), borderValue=70)
+        observed = g.prepare_photo(photo)
+        old = g.match_layout(g.prepare_template(source), observed)
+        self.assertFalse(old['candidate'])
+        template = g.prepare_template(source, 'printed-ink')
+        result = g.match_layout(template, observed)
+        self.assertTrue(result['candidate'], result['reason'])
+        x0, y0, x1, y1 = template['bounds']
+        expected = cv.perspectiveTransform(np.float32([[x0, y0], [x1-1, y0],
+            [x1-1, y1-1], [x0, y1-1]]).reshape(-1, 1, 2), matrix).reshape(-1, 2)
+        np.testing.assert_allclose(result['geometry']['points'], expected, atol=3)
+        self.assertEqual(result['geometry']['scope'], 'printed-content-envelope')
+        self.assertTrue(result['localSupport']['observed'])
+        self.assertFalse(result['localSupport']['completePageVerified'])
+        for flag in ['paperVerified', 'foregroundVerified', 'physicalCodeExtentVerified',
+                     'bindingVerified', 'mayClearCodeConflict', 'mayAssignNumber', 'mayUploadScene']:
+            self.assertFalse(result[flag])
+
+    def test_ink_outside_main_decoration_not_removed(self):
+        source = np.full((600, 800), 255, np.uint8)
+        cv.rectangle(source, (200, 100), (600, 500), 0, 4)
+        cv.putText(source, 'TEST', (680, 40), cv.FONT_HERSHEY_SIMPLEX, .5, 0, 1)
+        x0, y0, x1, y1 = g.printed_bounds(source)
+        self.assertLess(y0, 40)
+        self.assertGreater(x1, 700)
+        self.assertLessEqual(x0, 200)
+        self.assertGreaterEqual(y1, 500)
+        self.assertIsNone(g.printed_bounds(np.full((600, 800), 255, np.uint8)))
+
+    def test_partial_match_evidence_never_becomes_complete_page(self):
+        s = np.float32([[20, 20], [120, 20], [120, 100], [20, 100], [60, 60]])
+        result = g.local_support(np.eye(3), s, s)
+        self.assertTrue(result['observed'])
+        self.assertFalse(result['completePageVerified'])
+        self.assertFalse(result['physicalCodeExtentVerified'])
+        self.assertLessEqual(max(p[0] for p in result['projectedHull']), 120)
+        self.assertFalse(g.geometry_evidence(np.eye(3), s, s, (600, 800), (900, 1200))['accepted'])
+        mirror = np.float64([[-1, 0, 1000], [0, 1, 0], [0, 0, 1]])
+        t = cv.perspectiveTransform(s.reshape(-1, 1, 2), mirror)
+        self.assertFalse(g.local_support(mirror, s, t)['observed'])
+        self.assertFalse(g.local_support(np.eye(3), s, s+20)['observed'])
+
     def test_projected_whole_page_recovered_not_only_body_box(self):
         source = page()
         target = np.float32([[170, 160], [970, 100], [1030, 740], [110, 780]])
@@ -93,6 +139,13 @@ class LayoutTests(unittest.TestCase):
             self.assertEqual(rows[0]['photoSha256'], 'b'*64)
             self.assertEqual(rows[-1]['kind'], 'worker-complete')
             self.assertFalse(rows[0]['bindingVerified'])
+            ink = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('printed-layout-worker.py')), tmp, 'printed-ink'],
+                                 capture_output=True, text=True, timeout=40)
+            self.assertEqual(ink.returncode, 0, ink.stderr)
+            ink_rows = [json.loads(s) for s in ink.stdout.splitlines()]
+            self.assertEqual(ink_rows[-1]['coordinateFrame'], 'printed-ink')
+            self.assertEqual(ink_rows[0]['pages'][0]['coordinateFrame'], 'printed-ink')
+            self.assertFalse(ink_rows[0]['mayAssignNumber'])
             manifest['days'][0]['photos'][0]['pngSha256'] = 'c'*64
             (root/'input.json').write_text(json.dumps(manifest), encoding='utf-8')
             failed = subprocess.run([sys.executable, '-B', str(Path(__file__).with_name('printed-layout-worker.py')), tmp],
