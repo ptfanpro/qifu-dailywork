@@ -37,6 +37,8 @@ UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读
 
 `body-text-probe.mjs PRIVATE_OUTPUT --chinese --vertical PHOTO_SHA256 [...]` 额外读取文字检测器提出的竖排块。先以原图像素比例判断方向，按短边设置边距、旋转 270 度后送同一个中文模型；不按 PDF 答案选方向/裁框。横排路径保持原状，竖排仍是试验开关，不进入产品。报告显式记录 `expectedLayouts`；四个视图仍只有一个中文引擎。
 
+后续正文保护候选的横排路径也必须使用像素比例：`horizontal-body-regions-regression.mjs` 验证同一物理文字行在不同画布上的选择与边距一致，并拒绝非法坐标。旧快照仍保留旧运算，不原位替换。修正后须分别记录完整 PDF 语料与照片的实图读数，不能只验证 `readLine` 能读合成中文，不能把新增同引擎视图当作独立绑定证据。
+
 正文汇总 schema 2 要求完整的逐页排名，拒绝漏页/重复页。即使两个视图第一名相同，只要同一视图还读到另一个页面的特有正文，标为 `multi-page-body-evidence`；横竖路径指向不同页面则为 `conflicting-layout-evidence`。这可能来自旧页拆分、背景文字或噪声，不凭排名武断判断原因。
 
 `vertical-body-probe.mjs PRIVATE_OUTPUT PHOTO_SHA256 [...]` 保留 90/270 度方向的对照诊断，不赋号。合成中文烟雾测试仅证明固定模型能读横排及已旋转的竖排文字，不代表检测器一定会把竖排整列聚合成一个框；逐字分开的竖排仍是待验证限制。

@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
 import {decodePaddleCtc} from './local-ocr.mjs';
 import {createTextDetector} from './body-text-detector.mjs';
-import {verticalBodyCrop} from './vertical-body-regions.mjs';
+import {horizontalBodyCrop, verticalBodyCrop} from './vertical-body-regions.mjs';
 const require = createRequire(import.meta.url), sharp = require('sharp');
 export const CHINESE_BODY_MODEL_SHA256 = '48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b';
 
@@ -85,24 +85,19 @@ export async function createChineseBodyReader(appRoot, modelRoot) {
   return {modelSha256: CHINESE_BODY_MODEL_SHA256, dictionaryLength: dictionary.length, readLine,
     async read(source, {includeVertical = false} = {}) {
       const {regions, original} = await detector.detect(source);
-      const eligible = regions.filter(region => region.width / region.height >= 1.4 && region.height <= .12);
       const views = [];
       for (const padding of [.35, .65]) {
+        const crops = regions.map(region => horizontalBodyCrop(region, original.info, padding)).filter(Boolean);
         const lines = []; let errors = 0;
-        for (const region of eligible.slice(0, 300)) {
-          const pad = region.height * padding;
-          const left = Math.max(0, Math.floor((region.left - pad) * original.info.width));
-          const top = Math.max(0, Math.floor((region.top - pad) * original.info.height));
-          const right = Math.min(original.info.width, Math.ceil((region.left + region.width + pad) * original.info.width));
-          const bottom = Math.min(original.info.height, Math.ceil((region.top + region.height + pad) * original.info.height));
-          const crop = await sharp(original.data, {raw: original.info}).extract({left, top, width: right - left, height: bottom - top}).png().toBuffer();
+        for (const extract of crops.slice(0, 300)) {
           try {
+            const crop = await sharp(original.data, {raw: original.info}).extract(extract).png().toBuffer();
             const reading = await readLine(crop);
             if (reading.confidence >= .65) lines.push(reading.text);
           } catch { errors++; }
         }
         views.push({view: `chinese-detected-${padding}`, text: lines.join('。'), lineCount: lines.length,
-          errors, regions: eligible.length, truncated: eligible.length > 300});
+          errors, regions: crops.length, truncated: crops.length > 300});
       }
       // Opt-in while held-out evaluation is in progress. These are additional
       // views of ONE model, never independent engines or automatic bindings.
