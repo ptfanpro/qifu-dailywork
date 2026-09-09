@@ -97,6 +97,19 @@ try {
   assert.equal(split.portableCodeRead.incompleteTailObserved,true);
   assert.equal(photo.portableCodeIssueCategory({reliable:false,portableCodeRead:split.portableCodeRead}),'incomplete');
 
+  // Repeated tails are ONE model's weak readings, not a complete printed code.
+  // The prior collector promoted three agreeing partial crops to direct code
+  // evidence even though its strict complete-code observation list was empty.
+  args.expectedNumbers.add(168);
+  const tailConsensus=await collect([], {recognizeLine:async()=>({text:'168',confidence:.63})});
+  assert.equal(tailConsensus.number,null,'repeated tail-only reads must not become a reliable full-code proposal');
+  assert.equal(tailConsensus.portableCodeRead.observations.length,0);
+  assert.equal(tailConsensus.portableCodeRead.partialCodeObserved,true);
+  assert.ok(tailConsensus.candidates.some(c=>c.number===168),'retain the weak diagnostic candidate');
+  assert.equal(photo.canUseSceneAfterPortableRead(tailConsensus.portableCodeRead),false,
+    'rejecting weak numbering is not permission to relabel the paper as a scene');
+  assert.equal(photo.portableCodeIssueCategory({reliable:false,portableCodeRead:tailConsensus.portableCodeRead}),'incomplete');
+
   const good=await collect([{text:'269-1-68',confidence:.9},{text:'269-1-68',confidence:.9}]);
   assert.equal(good.number,68);
   assert.equal(good.portableCodeRead.observations.length,2);

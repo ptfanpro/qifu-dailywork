@@ -1074,7 +1074,7 @@ function isUsableOcrExtract(extract) {
 
 export function canUseSceneAfterPortableRead(read) {
   return Boolean(read && read.status==='no-complete-code' && !read.errorCode
-    && !read.incompleteTailObserved && read.coverage?.completed===true
+    && !read.incompleteTailObserved && !read.partialCodeObserved && read.coverage?.completed===true
     && Array.isArray(read.observations) && read.observations.length===0);
 }
 
@@ -1118,7 +1118,7 @@ export function portableCodeIssueCategory(item) {
   if(/(?:prefix|number|proposal)-conflict$/.test(reason || ''))return 'conflicting';
   if(reason==='portable-code-outside-pdf')return 'outside-pdf';
   if(read.errorCode)return 'unavailable';
-  if(read.incompleteTailObserved)return 'incomplete';
+  if(read.incompleteTailObserved || read.partialCodeObserved)return 'incomplete';
   if(read.observations?.length)return 'unconfirmed';
   return null;
 }
@@ -1129,7 +1129,7 @@ export async function recognizeWithPortableLocalOcr(
 ) {
   const layouts=localOcrCodeLayoutsForPhoto(paperGeometry,preferredNames);
   const read={schemaVersion:1,status:'unresolved',expectedPrefix:String(expectedPrefix),modelSha256:null,
-    observations:[],readCount:0,emptyReadCount:0,incompleteTailObserved:false,errorCode:null,blockReason:null,
+    observations:[],readCount:0,emptyReadCount:0,incompleteTailObserved:false,partialCodeObserved:false,errorCode:null,blockReason:null,
     coverage:{kind:'fixed-narrow-grid',plannedLayouts:layouts.length,completedLayouts:0,skippedLayouts:0,completed:false}};
   const observations=[];
   const outcome=(proposal=null)=>({number:proposal?.number ?? null,evidence:proposal?.evidence ?? null,
@@ -1173,6 +1173,9 @@ export async function recognizeWithPortableLocalOcr(
           : read.incompleteTailObserved?'portable-code-incomplete-tail':null;
   };
   const appendObservations = (parsedItems, result, layout, variant) => {
+    const complete=parseCompletePrintedCodes(result.text,expectedPrefix).codes;
+    read.partialCodeObserved ||= parsedItems.some(item=>!complete.some(code=>
+      code.prefix===String(expectedPrefix) && code.number===item.number));
     for (const item of parsedItems) observations.push({
       ...item,
       confidence: Math.max(0, Math.min(100, Number(result.confidence || 0) * 100)),
@@ -1185,6 +1188,12 @@ export async function recognizeWithPortableLocalOcr(
     const best = groups[0] || null;
     if (!isReliableOcrConsensus(best, groups[1] || null, 55)
       || !hasAdjacentLocalOcrConsensus(observations, best.number)) return null;
+    // A repeated partial/tail reading may be a useful candidate, but cannot
+    // masquerade as direct full-code evidence. Require actual complete-code
+    // observations from the agreeing windows, not a method name or vote count.
+    const complete=read.observations.filter(item=>item.prefix===String(expectedPrefix)
+      && item.number===best.number && item.confidence>=55);
+    if(new Set(complete.map(item=>item.crop)).size<2)return null;
     return {
       number: best.number,
       evidence: {
@@ -1194,7 +1203,7 @@ export async function recognizeWithPortableLocalOcr(
         maxConfidence: best.maxConfidence,
         layouts: best.layouts,
         modelSha256: assets.modelSha256,
-        successfulCropNames:[...new Set(observations.filter(item=>item.number===best.number && item.prefixDistance<=.1).map(item=>item.variant.split(':')[0]))].slice(0,8),
+        successfulCropNames:[...new Set(complete.map(item=>item.crop.split(':')[0]))].slice(0,8),
       },
       candidates: groups.slice(0, 5),
     };

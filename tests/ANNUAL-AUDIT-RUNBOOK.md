@@ -69,6 +69,8 @@ UI 回归同时运行 `windows-ocr-long-path-integration.mjs`：真实 WinRT 读
 
 `portable-code-retention-regression.mjs` 已加入普通入口。先在旧版复现“单次完整码被场景覆盖”，再验证实际异步便携收集器保留全前缀、低分完整观察、范围外四位尾号和失败前结果；生成图实际跑 `recognizePreparedImage` 分派，避免只验证手造历史。合成 OCR 结果只验证流程，不是模型准确率。私有产品回放需同时检查 `recognized[].portableCodeRead`、未决历史、最终分配、正文证据和实际提示分类，扫描没有完整码、扫描未完成、码不在当前 PDF 中必须区分。保留原三个场景失败门槛及正常灯阵退化，不得因为新流程测试通过就宣布这些实图已修复。
 
+同一收集器另覆盖“反复读到三位尾号却有零条完整码观察”的失败样本；弱候选不得直接升级为可靠完整码。`partialCodeObserved` 表示读到不完整代码候选，不能据“完整码列表为空”改判场景；仍可继续获取独立证据。真实回放必须从最新固定快照启动，并检查是否只是转为未决，而非已经恢复正确识别。
+
 便携来源回归另核对旋正图像尺寸、实际裁框坐标及 `physicalCodeExtent=unverified`；不能从旧 `fullCodeValidated` 名称推断物理字段已完整读取。`tests/experiments/code-window-context-regression.mjs` 已纳入普通入口，测试局部上下文扩展、检测框回投、预算/异常、边界关系不得解除冲突。该助手仅为诊断，不由产品赋号路径调用。实际对照需保留所有检测/预处理视图及不同引擎读数，零完整码与引擎错误分开；不得只统计某个成功视图，更不能将候选检测框当完整字符范围证明。
 
 `tests/experiments/db-map-reader.mjs` 仅提取与产品相同预处理/固定模型的 DB 概率图。`node tests/experiments/db-map-reader-smoke.mjs [APP_ROOT]` 显式加载真实模型，比较四种合成输入与产品连通域结果，缺模型/依赖或错误哈希必须失败。它不是照片验收，不进入产品赋号路径。
