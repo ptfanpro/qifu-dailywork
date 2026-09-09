@@ -20,7 +20,7 @@ assert.equal(checked.inconclusive,1,'ambiguity is retained without blocking unre
 // The one-anchor template run used to bypass the conflict check applied to
 // the other sequence paths. A missing slot is not new recognition evidence.
 const template={...paper,score:.3,boxArea:.5,fill:.8,top:.2};
-const sequenceItem=(number,index)=>({file:`sequence-${index}.jpg`,number,reliable:Number.isInteger(number),
+const sequenceItem=(number,index)=>({file:`微信图片_2026030112000${index}_sequence.jpg`,number,reliable:Number.isInteger(number),
   paperGeometry:{...template},visualMetrics:{edgeDensity:.2},evidence:{...evidence},candidates:[]});
 const run=[sequenceItem(65,0),sequenceItem(null,1),sequenceItem(null,2)];
 run[1].candidates=[{number:99,votes:2,prefixDistance:0,maxConfidence:85}];
@@ -51,8 +51,9 @@ for(const audit of [
   assert.equal(photo.isLikelyScene({...item,visualMetrics:{edgeDensity:.01},sceneMetrics:{darkRatio:.9}}),false);
   assert.deepEqual(photo.resolveAmbiguousPhotosByGlobalSet([item],new Set([66,68]),new Set([68])),[]);
   assert.equal(item.number,null,'remaining PDF slots cannot turn a failed audit into a new number');
-  const frame=(number,index)=>({file:`frame-${index}.jpg`,number,reliable:true,paperGeometry:{...paper,score:.3,boxArea:.5,fill:.8},
+  const frame=(number,index)=>({file:`微信图片_2026030112000${index}_frame.jpg`,number,reliable:true,paperGeometry:{...paper,score:.3,boxArea:.5,fill:.8},
     evidence:{...evidence},visualMetrics:{edgeDensity:.2}});
+  item.file='微信图片_20260301120001_conflict.jpg';
   const sequence=[frame(65,0),item,frame(67,2),frame(68,3)];
   photo.inferPhotoSequences(sequence,new Set([65,66,67,68]));
   photo.inferPhotoGapsAroundExistingNumbers(sequence,new Set([65,66,67,68]));

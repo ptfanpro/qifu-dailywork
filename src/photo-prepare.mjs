@@ -3241,23 +3241,29 @@ export function hasStrongOcrConflict(item, expectedNumber, assignedNumbers = new
 // 微信原图文件名包含实际拍摄时间（YYYYMMDDhhmmss）。顺序推断只能在同一
 // 次连续拍摄内使用；摄影者停顿后补拍旧编号时，文件序号仍会继续增加，但
 // 业务编号可能跳回前段。旧版忽略这个批次边界，把 19:14:54/55 的 597/598
-// 接在 19:14:25 的 613 后面推成 614/615。没有时间戳时保持旧的保守行为；
-// 两边都有时间戳时，超过 12 秒或时间倒退都视为新的拍摄段，禁止顺序猜号。
+// 接在 19:14:25 的 613 后面推成 614/615。时间未知不等于连续拍摄：规范数字
+// 文件或脱敏文件名的排列顺序不能充当拍摄证据。两端必须都有有效时间戳，
+// 超过 12 秒或时间倒退都视为新的拍摄段，禁止顺序猜号。
 export function photoCaptureTimestamp(file) {
   const match = /(?:^|\D)((?:19|20)\d{12})(?:\D|$)/.exec(path.basename(String(file || '')));
   if (!match) return null;
   const value = match[1];
-  const timestamp = Date.UTC(
-    Number(value.slice(0, 4)), Number(value.slice(4, 6)) - 1, Number(value.slice(6, 8)),
-    Number(value.slice(8, 10)), Number(value.slice(10, 12)), Number(value.slice(12, 14)),
-  );
-  return Number.isFinite(timestamp) ? timestamp : null;
+  const parts = [Number(value.slice(0, 4)), Number(value.slice(4, 6)) - 1, Number(value.slice(6, 8)),
+    Number(value.slice(8, 10)), Number(value.slice(10, 12)), Number(value.slice(12, 14))];
+  const timestamp = Date.UTC(...parts);
+  if (!Number.isFinite(timestamp)) return null;
+  // Date.UTC normalizes invalid dates (for example February 30); reject them
+  // instead of manufacturing capture evidence from that normalization.
+  const date = new Date(timestamp);
+  const actual = [date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(),
+    date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds()];
+  return actual.every((part, index) => part === parts[index]) ? timestamp : null;
 }
 
 export function isContinuousPhotoCapture(left, right, maximumGapMilliseconds = 12_000) {
   const leftTime = photoCaptureTimestamp(left?.file);
   const rightTime = photoCaptureTimestamp(right?.file);
-  if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return true;
+  if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return false;
   const gap = rightTime - leftTime;
   return gap >= 0 && gap <= maximumGapMilliseconds;
 }
@@ -3497,7 +3503,8 @@ export function inferPhotoGapsAroundExistingNumbers(recognized, expectedNumbers,
         && !compatible(recognized[index], recognized[rightIndex])) { indices.length = 0; break; }
       indices.push(index);
     }
-    if (!indices.length) continue;
+    if (!indices.length
+      || !isContinuousPhotoCapture(recognized[rightIndex - 1], recognized[rightIndex])) continue;
     const leftNumber = assignedByIndex.get(leftIndex);
     const rightNumber = assignedByIndex.get(rightIndex);
     const direction = rightNumber > leftNumber ? 1 : -1;

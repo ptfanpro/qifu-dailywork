@@ -27,6 +27,7 @@ import './recognition-provenance-regression.mjs';
 import './windows-code-evidence-regression.mjs';
 import './independent-code-provenance-regression.mjs';
 import './photo-code-audit-retention-regression.mjs';
+import './photo-capture-evidence-regression.mjs';
 import './full-code-prefix-retention-regression.mjs';
 import './portable-code-retention-regression.mjs';
 import './foreground-paper-scene-regression.mjs';
@@ -1064,7 +1065,7 @@ const descendingPhotos = [
   {reliable:true,number:298,candidates:[],paperGeometry:{rectangularPaper:true}},
   {reliable:false,number:null,candidates:[],paperGeometry:{rectangularPaper:true}},
   {reliable:true,number:296,candidates:[],paperGeometry:{rectangularPaper:true}},
-];
+].map((item,index)=>({...item,file:`微信图片_2026030112000${index}_descending.jpg`}));
 inferPhotoSequences(descendingPhotos,new Set([296,297,298,299,300]));
 assert.deepEqual(descendingPhotos.map((item)=>item.number),[300,299,298,297,296]);
 assert.match(descendingPhotos[1].evidence.method,/descending-sequence/);
@@ -1111,6 +1112,7 @@ assert.deepEqual(parseLooseWindowsCodeCandidates('268 一 1 乇 31','268',new Se
 assert.deepEqual(parseLooseWindowsCodeCandidates('77 2027','268',new Set([577])),[]);
 assert.deepEqual(parseLooseWindowsCodeCandidates('768 刁 77','268',new Set([577,677])),[]);
 const twoAnchorPhotos=Array.from({length:8},(_,index)=>({
+  file:`微信图片_2026030112000${index}_two-anchors.jpg`,
   reliable:index<2,
   number:index<2?339+index:null,
   candidates:[],
@@ -1142,7 +1144,7 @@ assert.ok(lowFillOutdoorPhotos.slice(2).every((item)=>item.evidence.method==='ca
 const gapGeometry={usablePaper:true,rectangularPaper:true,score:.2,boxArea:.3,width:.58,height:.49,fill:.7,top:.5};
 const gapMetrics={edgeDensity:.12,upperEdgeDensity:.10,uniformity:.35};
 const gapPhotos=[486,487,488,489].map((number,index)=>({
-  file:`gap-${index}.jpg`,reliable:index===3,number:index===3?number:null,
+  file:`微信图片_2026030112000${index}_gap.jpg`,reliable:index===3,number:index===3?number:null,
   paperGeometry:{...gapGeometry},visualMetrics:{...gapMetrics},candidates:[],evidence:index===3?{method:'ocr'}:null,
 }));
 inferPhotoGapsAroundExistingNumbers(gapPhotos,new Set([486,487,488,489]),new Set());
@@ -1176,7 +1178,7 @@ const duplicatedSixEightPhotos=[
   {file:'467.jpg',reliable:true,number:467,candidates:[],paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{}},
   {file:'actual-468.jpg',reliable:true,number:468,candidates:[],paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{}},
   {file:'469.jpg',reliable:true,number:469,candidates:[],paperGeometry:{usablePaper:true,rectangularPaper:true},visualMetrics:{}},
-];
+].map((item,index)=>({...item,file:`微信图片_2026030112000${index}_six-eight.jpg`}));
 assert.deepEqual(reconcileDuplicatePhotoNumbers(duplicatedSixEightPhotos,new Set([466,467,468,469])).map((item)=>[item.from,item.to]),[[468,466]]);
 assert.equal(duplicatedSixEightPhotos[0].evidence.method,'global-one-to-one-capture-sequence-six-eight-repair');
 const unsafeDuplicatePhotos=duplicatedSixEightPhotos.slice(0,2).map((item)=>({...item,number:468,evidence:{method:'ocr'}}));
@@ -1261,7 +1263,7 @@ assert.equal(hasStrongOcrConflict({candidates:[{number:568,votes:2,prefixDistanc
 assert.equal(hasStrongOcrConflict({candidates:[{number:580,votes:1,prefixDistance:0,maxConfidence:29}]},595,new Set([569])),true);
 assert.equal(hasStrongOcrConflict({candidates:[{number:580,votes:1,prefixDistance:0,maxConfidence:9}]},595,new Set([569])),false);
 const occupiedDuplicateSequence=[579,580,581,582,583].map((number,index)=>({
-  file:`occupied-${index}.jpg`,
+  file:`微信图片_2026030112000${index}_occupied.jpg`,
   reliable:index!==1,
   number:index!==1?number:null,
   candidates:index===1?[{number:569,votes:2,prefixDistance:0,maxConfidence:66}]:[],
