@@ -9,7 +9,8 @@
     "url": "https://github.com/ptfanpro/qifu-dailywork.git"
   },
   "scripts": {
-    "test": "node tests/run-tests.mjs"
+    "test": "node tests/run-tests.mjs",
+    "test:release": "node tests/release-gates.mjs"
   },
   "dependencies": {
     "onnxruntime-node": "1.29.0"
