@@ -1,11 +1,12 @@
 import crypto from 'node:crypto';
+import {validDetectedCodeReview} from '../../src/detected-code-reader.mjs';
 const digest=row=>crypto.createHash('sha256').update(JSON.stringify(row)).digest('hex');
 export function sealDetectionRow(row,identity){
   const result={...row,schemaVersion:2,identity};
   return {...result,evidenceSha256:digest(result)};
 }
 export function canReuseDetectionRow(row,identity,currentSourceSha256){
-  if(!row||row.schemaVersion!==2||row.error||row.sourceUnchanged!==true
+  if(!row||!validDetectedCodeReview(row)||row.schemaVersion!==2||row.error||row.sourceUnchanged!==true
     ||row.bindingVerified!==false||row.engines!==2||row.errors!==0
     ||currentSourceSha256!==identity.sha256||row.sha256!==identity.sha256)return false;
   if(!['sourceVersion','modelSha256','date','sha256'].every(key=>row.identity?.[key]===identity[key]))return false;

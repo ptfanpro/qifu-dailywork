@@ -12,7 +12,7 @@ import {decodeOcrSource,extractOcrCrop,writeImageFile} from './ocr-image.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
 import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
-import {readDetectedCodes,createTextDetector} from './detected-code-reader.mjs';
+import {readDetectedCodes,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
 export {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 
 const require = createRequire(import.meta.url);
@@ -1311,6 +1311,7 @@ export async function createOcrWorker(appRoot) {
   await worker.setParameters({
     tessedit_pageseg_mode: PSM.SINGLE_LINE,
     tessedit_char_whitelist: '0123456789-',
+    user_defined_dpi: '300',
   });
   return worker;
 }
@@ -1327,7 +1328,8 @@ export function summarizeDetectedCodeRead(read,expectedPrefix,expectedNumbers) {
     &&o.crop.left>=0&&o.crop.top>=0&&o.crop.width>0&&o.crop.height>0
     &&o.crop.left+o.crop.width<=dimensions.width&&o.crop.top+o.crop.height<=dimensions.height;
   let reason=null;
-  if(raw.some(o=>!['paddle','tesseract'].includes(o.engine)||!validCrop(o)
+  if(!validDetectedCodeReview(read))reason='detected-code-review-incomplete';
+  else if(raw.some(o=>!['paddle','tesseract'].includes(o.engine)||!validCrop(o)
     ||![.45,.75].includes(o.padding)||!Number.isInteger(o.index)||o.index<0||o.index>=read.regions
     ||!/^\d{3,4}-1-\d{1,4}$/.test(o.fullCode || '')||!Number.isFinite(o.confidence)
     ||o.confidence<0||o.confidence>(o.engine==='paddle'?1:100)))reason='detected-code-invalid-observation';

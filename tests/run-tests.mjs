@@ -32,6 +32,7 @@ import './full-code-prefix-retention-regression.mjs';
 import './portable-code-retention-regression.mjs';
 import './portable-conflict-review-regression.mjs';
 import './detected-code-dispatch-regression.mjs';
+import './detected-code-review-regression.mjs';
 import './photo-availability-regression.mjs';
 import './experiments/server-code-reader-regression.mjs';
 import './foreground-paper-scene-regression.mjs';
