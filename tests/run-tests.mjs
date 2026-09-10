@@ -33,6 +33,7 @@ import './portable-code-retention-regression.mjs';
 import './portable-conflict-review-regression.mjs';
 import './detected-code-dispatch-regression.mjs';
 import './detected-code-review-regression.mjs';
+import './detected-code-word-review-regression.mjs';
 import './replay-comparison-regression.mjs';
 import './photo-review-isolation-regression.mjs';
 import './photo-availability-regression.mjs';

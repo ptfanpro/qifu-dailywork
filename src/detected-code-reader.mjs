@@ -16,9 +16,16 @@ export function validDetectedCodeReview(read) {
   if(['observations','independent','readings'].some(key=>read?.[key]!==undefined
     &&(!Array.isArray(read[key])||read[key].some(o=>!o||typeof o!=='object'))))return false;
   const extra=(read?.independent||[]).filter(o=>o.preprocessing!=null);
-  const review=read?.review;
+  if(extra.some(o=>!['red-channel-96-v1','gray-96-word-v1'].includes(o.preprocessing)))return false;
+  return validSupplementalReview(read,'review','red-channel-96-v1')
+    &&validSupplementalReview(read,'segmentationReview','gray-96-word-v1');
+}
+function validSupplementalReview(read,key,recipe) {
+  const extra=(read?.independent||[]).filter(o=>o.preprocessing===recipe);
+  const review=read?.[key];
   if(review===undefined)return extra.length===0;
-  if(!review||review.recipe!=='red-channel-96-v1'||review.maxRegions!==4||review.completed!==true
+  if(key==='segmentationReview'&&(!read.review?.completed||review?.restoreCompleted!==true))return false;
+  if(!review||review.recipe!==recipe||review.maxRegions!==4||review.completed!==true
     ||!Number.isInteger(review.attemptedRegions)||review.attemptedRegions<1||review.attemptedRegions>4
     ||!Array.isArray(review.readings)||review.readings.length!==review.attemptedRegions*2)return false;
   const keys=new Set(),indexes=new Set();
@@ -48,17 +55,17 @@ export async function readDetectedCodes(detector,appRoot,source,prefix,{worker=n
   const eligible=regions.map((region,index)=>({region,index,
     crops:[.45,.75].map(padding=>({padding,crop:horizontalBodyCrop(region,original.info,padding)}))}))
     .filter(item=>item.crops.every(view=>view.crop));
-  let incompleteTailObserved=false,errors=0,review=null;
-  const record=(result,engine,region,index,padding,crop,errorCode=null,supplemental=false)=>{
+  let incompleteTailObserved=false,errors=0,review=null,segmentationReview=null;
+  const record=(result,engine,region,index,padding,crop,errorCode=null,supplemental=null)=>{
     const parsed=parseCompletePrintedCodes(result?.text||'',String(prefix));
     const confidence=Number.isFinite(result?.confidence)?result.confidence:0;
     incompleteTailObserved ||= parsed.incompleteTailObserved;
     if(errorCode)errors++;
-    (supplemental?review.readings:readings).push({engine,index,padding,crop:{...crop},confidence,codeCount:parsed.codes.length,
+    (supplemental?supplemental.readings:readings).push({engine,index,padding,crop:{...crop},confidence,codeCount:parsed.codes.length,
       incompleteTailObserved:parsed.incompleteTailObserved,errorCode});
     for(const code of parsed.codes)(engine==='paddle'?observations:independent).push({
       ...code,engine,confidence,padding,region:{...region},index,crop:{...crop},physicalCodeExtent:'unverified',
-      ...(supplemental?{preprocessing:'red-channel-96-v1'}:{})});
+      ...(supplemental?{preprocessing:supplemental.recipe}:{})});
   };
   // No filename, historical number, PDF expected set, or capture order is used.
   // Read both paddings and engines even if the first is blank. A second engine
@@ -103,17 +110,53 @@ export async function readDetectedCodes(detector,appRoot,source,prefix,{worker=n
         try {
           const bytes=await sharp(original.data,{raw:original.info}).extract(crop).png().toBuffer();
           const result=await worker.recognize(await detectedCodeContrastImage(bytes));
-          record(result.data,'tesseract',region,index,padding,crop,null,true);
-        } catch {record(null,'tesseract',region,index,padding,crop,'contrast-reader-unavailable',true);}
+          record(result.data,'tesseract',region,index,padding,crop,null,review);
+        } catch {record(null,'tesseract',region,index,padding,crop,'contrast-reader-unavailable',review);}
       }
     }
     review.completed=review.attemptedRegions===reviewIndexes.length&&errors===0;
     coverage.completed&&=review.completed;
   }
+  // A printed code is one token. Line segmentation can give a blank or a
+  // low-scored reading even when the identical pixels are legible in word
+  // mode. Keep the fast line path and every contrary observation; review
+  // only the still-unconfirmed, otherwise consistent case after contrast.
+  // This is still the SAME second engine, not an extra independent vote.
+  if(worker&&typeof worker.setParameters==='function'&&review?.completed&&unique()
+    &&supported(observations,.65)&&!supported(independent,30)) {
+    segmentationReview={recipe:'gray-96-word-v1',maxRegions:4,attemptedRegions:0,
+      completed:false,restoreCompleted:false,readings:[]};
+    try {
+      for(const {region,index,crops} of eligible.filter(item=>reviewIndexes.includes(item.index))) {
+        segmentationReview.attemptedRegions++;
+        for(const {padding,crop} of crops) {
+          try {
+            const bytes=await sharp(original.data,{raw:original.info}).extract(crop)
+              .resize({height:96}).greyscale().normalize().png().toBuffer();
+            const result=await worker.recognize(bytes,{tessedit_pageseg_mode:'8'});
+            record(result.data,'tesseract',region,index,padding,crop,null,segmentationReview);
+          } catch {record(null,'tesseract',region,index,padding,crop,'word-reader-unavailable',segmentationReview);}
+        }
+      }
+    } finally {
+      // The bundled worker restores per-call options only on success. Reset
+      // explicitly also after failure so the next photo/PDF keeps line mode.
+      try {
+        await worker.setParameters({tessedit_pageseg_mode:'7'});
+        segmentationReview.restoreCompleted=true;
+      } catch {
+        try {await worker.terminate();} catch {}
+        throw Error('detected-code-settings-restore-failed');
+      }
+    }
+    segmentationReview.completed=segmentationReview.attemptedRegions===reviewIndexes.length&&errors===0;
+    coverage.completed&&=segmentationReview.completed;
+  }
   const corroborated=unique()&&supported(observations,.65)&&(!worker||supported(independent,30));
   // Legacy `confirmed` is a diagnostic candidate only, never a product plan.
   return {regions:regions.length,observations,independent,readings,coverage,errors,incompleteTailObserved,
     ...(review?{review}:{}),
+    ...(segmentationReview?{segmentationReview}:{}),
     sourceDimensions:{width:original.info.width,height:original.info.height},engines:worker?2:1,
     confirmed:corroborated?code.number:null,bindingVerified:false,seconds:(Date.now()-started)/1000};
 }
