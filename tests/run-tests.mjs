@@ -31,6 +31,7 @@ import './photo-capture-evidence-regression.mjs';
 import './full-code-prefix-retention-regression.mjs';
 import './portable-code-retention-regression.mjs';
 import './portable-conflict-review-regression.mjs';
+import './experiments/server-code-reader-regression.mjs';
 import './foreground-paper-scene-regression.mjs';
 import './body-content-guard-regression.mjs';
 import './body-short-field-guard-regression.mjs';
