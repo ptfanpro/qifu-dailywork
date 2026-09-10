@@ -15,6 +15,7 @@ requirePrivateAuditRoot(root);
 const sha=data=>crypto.createHash('sha256').update(data).digest('hex');
 const inputs=['tests/experiments/annual-detection-replay.mjs','tests/experiments/text-regions.mjs','tests/experiments/detection-cache.mjs',
   'src/photo-prepare.mjs','src/local-ocr.mjs','src/body-text-detector.mjs','src/vertical-body-regions.mjs',
+  'src/detected-code-reader.mjs','src/printed-code-parser.mjs',
   'models/paddleocr-en-v5/inference.onnx','models/paddleocr-en-v5/ppocrv5_en_dict.txt','ocr-data/eng.traineddata.gz']
   .map(file=>[file,sha(fs.readFileSync(path.join(appRoot,file)))]);
 const modelSha256=sha(fs.readFileSync(modelFile));

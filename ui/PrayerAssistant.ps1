@@ -544,13 +544,20 @@ function Refresh-PhotoCard {
     $manifestHash = [string]$manifest.fileSetHash
     $sceneReceipt = Read-JsonFile (Join-Path $photoRunDir 'scene-upload-receipt.json')
     $missingCount = [int]$manifest.counts.missingBlessing
+    $pendingPhotoText = if ($manifest.photoAvailability -and $manifest.photoAvailability.summary) {
+        [string]$manifest.photoAvailability.summary
+    } elseif ($missingCount -gt 0) {
+        if ([int]$manifest.counts.unexpected -gt 0) {
+            "$missingCount 个 PDF 页面尚未匹配已确认福单图；目录另有 $([int]$manifest.counts.unexpected) 张待识别或确认图片，不能直接判定缺图"
+        } else { "$missingCount 个 PDF 页面尚未匹配已确认福单图，请核对原图与 PDF 批次" }
+    } else { '请核对尚未确认的图片及场景类别' }
     if ($sceneReceipt -and $sceneReceipt.complete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash -and $blockingErrorCount -eq 0 -and $manualIssueCount -eq 0) {
         Set-PhotoResult "$date 照片业务已完成：福单图 $blessingCount 张，场景图 $sceneCount 张。" ([System.Drawing.Color]::DarkGreen) 100 '照片业务已完成' $false $null
         return
     }
     if ($sceneReceipt -and $sceneReceipt.partialComplete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash -and ($missingCount -gt 0 -or $manualIssueCount -gt 0)) {
         $completedOrders = [int]$sceneReceipt.completedOrderCount
-        Set-PhotoResult "$date 已确定福单图 $blessingCount 张及其 $completedOrders 条订单已分批完成；仍有 $missingCount 张待补、$manualIssueCount 项待人工确认。补图后只处理新增图片和剩余订单。" ([System.Drawing.Color]::DarkOrange) 78 '检测并处理补入照片' $true 'photo-prepare'
+        Set-PhotoResult "$date 已确定福单图 $blessingCount 张及其 $completedOrders 条订单已分批完成；$pendingPhotoText。另有 $manualIssueCount 项待人工确认。" ([System.Drawing.Color]::DarkOrange) 78 '核对并处理未匹配照片' $true 'photo-prepare'
         return
     }
     if ($blockingErrorCount -gt 0 -or $manifest.blessingReady -ne $true) {
@@ -571,7 +578,7 @@ function Refresh-PhotoCard {
         return
     }
     if ($missingCount -gt 0) {
-        Set-PhotoResult "$date 现有福单图 $blessingCount 张已上传，仍待补 $missingCount 张；下一步只处理福单已上传的订单状态，未上传订单继续保留待补。" ([System.Drawing.Color]::DarkBlue) 70 '处理已上传订单并继续待补' $true 'photo-scenes'
+        Set-PhotoResult "$date 现有福单图 $blessingCount 张已上传；$pendingPhotoText。下一步只处理福单已上传的订单状态，未上传订单保留待处理。" ([System.Drawing.Color]::DarkBlue) 70 '处理已上传订单并继续核对' $true 'photo-scenes'
         return
     }
     $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
@@ -888,7 +895,7 @@ function Complete-Runner([int]$code) {
         Refresh-PhotoCard
         if ($script:photoNextAction -eq 'photo-prepare') {
             Write-WorkflowCheckpoint 'photo' 'waiting-supplement' $completedAction 0
-            $globalStatus.Text = '现有照片及其已上传订单已分批完成，当前等待补图；补入原图后再次点击照片主按钮只处理新增图片和剩余订单。'
+            $globalStatus.Text = '现有照片及其已上传订单已分批完成；请先核对未匹配图片及场景类别，确认缺图后再补图。再次点击照片主按钮只处理新增图片和剩余订单。'
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
             return
         }

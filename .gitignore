@@ -57,6 +57,7 @@ order-manifest.json
 
 # Local diagnostics and screenshots
 diagnostics/
+body-observation-cache/
 screenshots/
 *.png
 *.jpg

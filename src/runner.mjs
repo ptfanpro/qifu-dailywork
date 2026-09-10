@@ -455,7 +455,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
         const receipt = await applyPhotoPreparation(plan,photoRunDir);
         atomic(path.join(photoRunDir,'photo-prepare-receipt.json'),receipt);
         photoTiming.end();
-        log(`自动处理和编号完成：福单图 ${receipt.blessingCount} 张，供灯场景图 ${receipt.lampSceneCount} 张，供水场景图 ${receipt.waterSceneCount} 张；原图备份已保存。${plan.missingExpected.length ? ` 仍待补 ${plan.missingExpected.length} 张，不阻断现有福单图上传。` : ''}`);
+        log(`自动处理和编号完成：福单图 ${receipt.blessingCount} 张，供灯场景图 ${receipt.lampSceneCount} 张，供水场景图 ${receipt.waterSceneCount} 张；原图备份已保存。${plan.missingExpected.length ? ` 仍有 ${plan.missingExpected.length} 个 PDF 编号待匹配，请核对未识别原图；不阻断现有福单图上传。` : ''}`);
       } else {
         log('照片已经是规范名称，本次没有重复处理或重复改名。');
       }
@@ -525,7 +525,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
     photoTiming.end();
     log(`发现本日可上传福单图 ${manifest.counts.blessing} 张，供灯场景图 ${manifest.counts.lampScene} 张，供水场景图 ${manifest.counts.waterScene} 张，PDF ${manifest.counts.pdfPages} 页。${manifest.counts.foreignBlessing ? ` 已隔离跨日/范围外纯数字照片 ${manifest.counts.foreignBlessing} 张。` : ''}`);
     if (manifest.warnings.length) {
-      log(`规格/待补提醒 ${manifest.warnings.length} 项，已写入照片清单。`);
+      log(`规格/待核对提醒 ${manifest.warnings.length} 项，已写入照片清单。`);
       for (const message of manifest.warnings) log(`提醒：${message}`);
     }
     if (manifest.ocrSuggestions.length) {
@@ -543,7 +543,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
       log('照片预检完成：没有可安全上传的福单图。处理硬性问题后重新预检。');
     } else {
       log(manifest.counts.missingBlessing > 0
-        ? `照片增量预检通过：现有 ${manifest.counts.blessing} 张可先上传，仍待补 ${manifest.counts.missingBlessing} 张。`
+        ? `照片增量预检通过：现有 ${manifest.counts.blessing} 张可先上传；${manifest.photoAvailability.summary}。`
         : '照片预检通过：编号命名、PDF页数、重复项和图片硬性规格均通过。');
     }
     if (args.action === 'photo-upload') {
@@ -608,7 +608,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
         receipt.completedAt = new Date().toISOString();
         atomic(receiptFile,receipt);
         log(manifest.counts.missingBlessing > 0
-          ? `现有 ${receipt.uploadedCount} 张福单图均已有上传凭据；仍待补 ${manifest.counts.missingBlessing} 张，本次没有重复上传。`
+          ? `现有 ${receipt.uploadedCount} 张福单图均已有上传凭据；${manifest.photoAvailability.summary}。本次没有重复上传。`
           : `相同图片集合已经完成上传，共 ${receipt.uploadedCount} 张；本次不会重复提交。`);
         photoTiming.finish();
         process.exit(0);
@@ -866,7 +866,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
       atomic(receiptFile,receipt);
       photoTiming.end();
       log(manifest.counts.missingBlessing > 0
-        ? `现有福单图增量上传完成并校验：本次新增 ${pendingFiles.length} 张、累计 ${receipt.uploadedCount} 张；仍待补 ${manifest.counts.missingBlessing} 张。`
+        ? `现有福单图增量上传完成并校验：本次新增 ${pendingFiles.length} 张、累计 ${receipt.uploadedCount} 张；${manifest.photoAvailability.summary}。`
         : `全部福单图上传完成并校验：${receipt.uploadedCount} 张。场景图和订单批量完成尚未在本按钮中执行。`);
       await photoSite.close();
     } else if (args.action === 'photo-scenes') {
@@ -920,7 +920,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
           process.exit(0);
         }
         if (previous.fileSetHash === manifest.fileSetHash && previous.partialComplete === true && previous.tabletCompletionVerified === true) {
-          log(`相同图片集合中所有已上传订单已经分批完成：供灯/供水 ${previous.regularCompletedOrderCount ?? 0} 条、牌位 ${previous.tabletCompletedOrderCount ?? 0} 条；仍待补 ${manifest.counts.missingBlessing} 张，本次不会重复提交。`);
+          log(`相同图片集合中所有已上传订单已经分批完成：供灯/供水 ${previous.regularCompletedOrderCount ?? 0} 条、牌位 ${previous.tabletCompletedOrderCount ?? 0} 条；${manifest.photoAvailability.summary}。本次不会重复提交。`);
           photoTiming.finish();
           process.exit(0);
         }

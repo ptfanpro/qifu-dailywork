@@ -257,6 +257,23 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
   if (!pdfFiles.length) blockingErrors.push('当天目录没有 PDF，无法做页数闭环校验');
   const missingBlessingCount = Math.max(0, pdfPageCount - blessing.length);
   const extraBlessingCount = Math.max(0, blessing.length - pdfPageCount);
+  // This is an unmatched-page count, not proof that a physical photo is absent.
+  // Keep missingBlessing for old checkpoints and completion gates; use the
+  // explicit diagnosis in messages so an OCR failure does not request re-shoots.
+  const photoAvailability = {
+    schemaVersion: 1,
+    unmatchedPages: missingBlessingCount,
+    unclassifiedPhotos: unexpected.length,
+    summary: missingBlessingCount > 0
+      ? `${missingBlessingCount} 个 PDF 页面尚未匹配已确认福单图；${unexpected.length
+        ? `目录另有 ${unexpected.length} 张待识别或确认图片，不能直接判定缺图。请先核对现有图片`
+        : '请核对对应原图与 PDF 批次，确认缺图后再补入原图'}`
+      : extraBlessingCount > 0
+        ? `福单图数量比 PDF 页数多 ${extraBlessingCount} 张，请核对编号及 PDF 批次`
+      : unexpected.length > 0
+        ? `福单图数量与 PDF 页数已齐；目录另有 ${unexpected.length} 张待识别或确认图片，仍需核对类别`
+        : '福单图数量与 PDF 页数已齐；编号及业务闭环以各项校验结果为准',
+  };
   if (pdfFiles.length && extraBlessingCount > 0) manualIssues.push(`本日可用福单图比 PDF 页数多 ${extraBlessingCount} 张；超出项已进入人工清单，唯一确认项仍可继续`);
   // A day's PDFs can contain categories whose photos have not arrived yet.  Only
   // require scenes for blessing photos that are actually present in this batch.
@@ -288,7 +305,7 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
   const ocrSuggestions = runOcr && unexpected.length ? await recognizeUnexpectedImages(unexpected, date, workDir) : [];
   const digestFiles = [...blessing, ...lampScenes, ...waterScenes];
   const warnings = allInspections.flatMap((item) => item.warnings.map((message) => `${item.name}：${message}`));
-  if (missingBlessingCount > 0) warnings.push(`仍缺少 ${missingBlessingCount} 张福单图；现有照片可先上传，补图后只处理新增文件`);
+  if (missingBlessingCount > 0) warnings.push(`${photoAvailability.summary}；已确认照片可先上传`);
   const fileHashes = Object.fromEntries(digestFiles.map((file) => [path.basename(file), hashFile(file)]));
   const manifest = {
     schemaVersion: 3,
@@ -307,8 +324,10 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
       pdf: pdfFiles.length,
       pdfPages: pdfPageCount,
       missingBlessing: missingBlessingCount,
+      unmatchedBlessing: missingBlessingCount,
       extraBlessing: extraBlessingCount,
     },
+    photoAvailability,
     files: { blessing, lampScenes, waterScenes, unexpected, foreignBlessing },
     inspections: allInspections,
     ocrSuggestions,

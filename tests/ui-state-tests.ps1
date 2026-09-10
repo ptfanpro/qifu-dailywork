@@ -52,15 +52,19 @@ try {
     if ($photoStatus.Text -notmatch '上次中断在场景图与牌位批量完成') { throw '没有显示照片中断环节' }
 
     $manifest.counts.missingBlessing = 2
+    $manifest.counts.unexpected = 2
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
     Refresh-PhotoCard
     Assert-Equal $script:photoNextAction 'photo-scenes' '缺图批次上传现有照片后应先处理已上传订单'
     if ($photoStatus.Text -notmatch '只处理福单已上传的订单状态') { throw '缺图分批完成状态提示不正确' }
+    if ($photoStatus.Text -notmatch '2 个 PDF 页面尚未匹配' -or $photoStatus.Text -notmatch '2 张待识别或确认' -or $photoStatus.Text -match '张待补|仍待补 2') { throw '已在目录内的未识别图片不能误报为缺照片' }
     Write-TestJson (Join-Path $photoRunDir 'scene-upload-receipt.json') ([ordered]@{complete=$false;partialComplete=$true;fileSetHash='hash-1';completedOrderCount=150;tabletCompletionVerified=$true})
     Refresh-PhotoCard
     Assert-Equal $script:photoNextAction 'photo-prepare' '现有已上传订单分批完成后应等待新增补图'
     if ($photoStatus.Text -notmatch '150 条订单已分批完成') { throw '缺图分批完成回执没有显示' }
+    if ($photoStatus.Text -notmatch '不能直接判定缺图') { throw '分批完成后的提示也必须保留待识别说明' }
     $manifest.counts.missingBlessing = 0
+    $manifest.counts.unexpected = 0
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
 
     Write-TestJson (Join-Path $photoRunDir 'photo-online-closure.json') ([ordered]@{

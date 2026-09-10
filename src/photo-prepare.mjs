@@ -11,6 +11,9 @@ import { getMachineLocalStateRoot } from './runtime-paths.mjs';
 import {decodeOcrSource,extractOcrCrop,writeImageFile} from './ocr-image.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
 import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
+import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
+import {readDetectedCodes,createTextDetector} from './detected-code-reader.mjs';
+export {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 
 const require = createRequire(import.meta.url);
 const sharp = require('sharp');
@@ -1312,9 +1315,75 @@ export async function createOcrWorker(appRoot) {
   return worker;
 }
 
+export function summarizeDetectedCodeRead(read,expectedPrefix,expectedNumbers) {
+  const raw=[...(read?.observations || []),...(read?.independent || [])];
+  const observations=raw.map(o=>({...o,cropBounds:o.crop,crop:`detected-${o.index}-${o.padding}`,
+    fullCodeValidated:true,expectedPrefix:String(expectedPrefix),prefixDistance:o.prefix===String(expectedPrefix)?0:null}));
+  const candidate=independentCodeConsensus(observations);
+  const dimensions=read?.sourceDimensions;
+  const geometryValid=Boolean(dimensions&&Number.isInteger(dimensions.width)&&dimensions.width>0
+    &&Number.isInteger(dimensions.height)&&dimensions.height>0);
+  const validCrop=o=>geometryValid&&o.crop&&['left','top','width','height'].every(k=>Number.isInteger(o.crop[k]))
+    &&o.crop.left>=0&&o.crop.top>=0&&o.crop.width>0&&o.crop.height>0
+    &&o.crop.left+o.crop.width<=dimensions.width&&o.crop.top+o.crop.height<=dimensions.height;
+  let reason=null;
+  if(raw.some(o=>!['paddle','tesseract'].includes(o.engine)||!validCrop(o)
+    ||![.45,.75].includes(o.padding)||!Number.isInteger(o.index)||o.index<0||o.index>=read.regions
+    ||!/^\d{3,4}-1-\d{1,4}$/.test(o.fullCode || '')||!Number.isFinite(o.confidence)
+    ||o.confidence<0||o.confidence>(o.engine==='paddle'?1:100)))reason='detected-code-invalid-observation';
+  else if(hasCompleteCodePrefixConflict(observations))reason='detected-code-prefix-conflict';
+  else if(new Set(raw.map(o=>o.fullCode)).size>1)reason='detected-code-number-conflict';
+  else if(read?.incompleteTailObserved)reason='detected-code-incomplete-tail';
+  else if(raw.length && (!read.coverage?.completed || read.errors || read.errorCode || read.engines!==2
+    ||read.coverage.kind!=='detected-horizontal-regions'||!Number.isInteger(read.regions)||read.regions<1
+    ||!Number.isInteger(read.coverage.eligibleRegions)||read.coverage.eligibleRegions<1
+    ||read.coverage.eligibleRegions>read.regions||read.coverage.processedRegions!==read.coverage.eligibleRegions))reason='detected-code-reader-incomplete';
+  else if(raw.length && (!Number.isInteger(candidate) || !['paddle','tesseract'].every(engine=>
+    new Set(raw.filter(o=>o.engine===engine && o.confidence>=(engine==='paddle'?.65:30)).map(o=>o.padding)).size===2)))
+    reason='detected-code-unconfirmed';
+  else if(raw.length && !expectedNumbers.has(candidate))reason='detected-code-outside-pdf';
+  const number=!reason&&raw.length?candidate:null;
+  return {number,reason,observations,evidence:Number.isInteger(number)?{
+    method:'independent-ocr-engines-full-code-consensus',number,observations,
+    votes:observations.length,prefixDistance:0,maxConfidence:null,
+    fullCodeValidated:true,independentEngines:['paddle','tesseract'],
+    locationMethod:'content-detected-horizontal-lines',bindingVerified:false,
+  }:null};
+}
+
+function detectedCodeReadBlockReason(item) {
+  if(!item?.detectedCodeRead)return null;
+  const read=item.detectedCodeRead;
+  const review=summarizeDetectedCodeRead(read,read.expectedPrefix,new Set([item.number]));
+  return review.reason || (review.number!==null && review.number!==item.number?'detected-code-proposal-conflict':null);
+}
+
+function retainDetectedCodeRead(item,read,expectedPrefix,expectedNumbers) {
+  if(!read)return item;
+  item.detectedCodeRead={...structuredClone(read),expectedPrefix:String(expectedPrefix)};
+  const review=summarizeDetectedCodeRead(read,expectedPrefix,expectedNumbers);
+  if(review.reason) {
+    item.codeAuditHistory=[...(item.codeAuditHistory || []),{status:'unresolved',reason:review.reason,
+      previousNumber:item.number,number:null,observations:structuredClone(review.observations)}];
+    item.reliable=false;item.number=null;
+  }
+  return item;
+}
+
+async function readPhotoDetectedCode({appRoot,worker,file,expectedPrefix},detector=null) {
+  let reader=detector;
+  try {
+    reader ||= await createTextDetector(appRoot,path.join(appRoot,'models/paddleocr-zh-v4/ch_PP-OCRv4_det_mobile.onnx'));
+    return await readDetectedCodes(reader,appRoot,fs.readFileSync(file),expectedPrefix,{worker,maxRegions:100});
+  } catch {return {observations:[],independent:[],errors:1,errorCode:'detected-code-reader-unavailable',
+    coverage:{completed:false},confirmed:null,bindingVerified:false};}
+  finally {if(reader&&!detector)await reader.release();}
+}
+
 export async function recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot = null,
-  {preferredNames=[],portableOcrServices} = {}) {
+  {preferredNames=[],portableOcrServices,detectedCodeServices} = {}) {
   let portableCodeRead=null;
+  let detectedCodeRead=null;
   const recognize=async()=>{
   // sharp().rotate().metadata() 仍返回原始像素宽高，不会把 EXIF 方向 6/8 的宽高
   // 自动互换；直接使用会把横向微信照片的比例框裁到完全错误的位置。
@@ -1325,6 +1394,18 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   const paperEvidence = await detectPaperEvidence(file);
   const visualMetrics = await imageVisualMetrics(file);
   const sceneMetrics = await sceneVisualScore(file);
+  // Locate visible text before consulting any camera-specific window. Read
+  // both paddings/engines across ALL eligible lines; never choose a line from
+  // PDF expected values. A detected line is not proof of order identity: the
+  // existing PDF/body/duplicate gates still run on every resulting proposal.
+  if(appRoot) {
+    try {detectedCodeRead=await (detectedCodeServices?.read || readPhotoDetectedCode)({appRoot,worker,file,expectedPrefix});}
+    catch {detectedCodeRead={observations:[],independent:[],errors:1,errorCode:'detected-code-reader-unavailable',coverage:{completed:false}};}
+    const detected=summarizeDetectedCodeRead(detectedCodeRead,expectedPrefix,expectedNumbers);
+    if(Number.isInteger(detected.number)||detected.reason)return {file,reliable:!detected.reason,
+      number:detected.number,paperGeometry:paperEvidence.geometry,visualMetrics,sceneMetrics,
+      evidence:detected.evidence,candidates:[]};
+  }
   // Scene heuristics are deliberately provisional.  A blessing sheet photographed
   // in front of lit candles can have the same dark/warm/global-colour metrics as a
   // lamp scene.  Returning here used to prevent the number strip from ever being
@@ -1361,7 +1442,8 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   // No consensus is not absence of printed codes. A partial/failed search or
   // even one complete observation must reach the fallback, not this shortcut.
   // A completed fixed grid still does NOT prove whole-image code exclusion.
-  if (preliminaryScene && canUseSceneAfterPortableRead(portableCodeRead)) return {
+  if (preliminaryScene && !detectedCodeRead?.errors && detectedCodeRead?.coverage?.completed
+    && canUseSceneAfterPortableRead(portableCodeRead)) return {
     file,
     reliable: false,
     number: null,
@@ -1737,7 +1819,8 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     candidates: grouped.slice(0, 5),
   };
   };
-  return retainPortableCodeRead(await recognize(),portableCodeRead);
+  return retainDetectedCodeRead(retainPortableCodeRead(await recognize(),portableCodeRead),
+    detectedCodeRead,expectedPrefix,expectedNumbers);
 }
 
 export async function diagnosePhotoCode({ appRoot, file, expectedPrefix, expectedNumbers, cropDir }) {
@@ -2173,31 +2256,6 @@ async function photoShapeFingerprints(item) {
 // Source observations deliberately have no PDF expected-set parameter. In
 // particular, 32 and 33 from different crops must stay contradictory even if
 // the current PDF contains only 32. WinRT does not return confidence values.
-export function parseCompletePrintedCodes(rawText,expectedPrefix) {
-  const prefix=String(expectedPrefix||'');
-  const text=normalizeOcr(rawText||'').replace(/[·•﹣－−]/g,'-').replace(/\s*-\s*/g,'-');
-  // Keep ALL complete printed prefixes before relating them to the task's
-  // month. Otherwise a foreign full code disappears and creates consensus.
-  const matches=[...text.matchAll(/(?<![\d-])(\d{3,4})-1-(\d{1,4})(?![\d-])/g)];
-  const codes=[],seen=new Set();
-  let incompleteTailObserved=false;
-  for(const match of matches) {
-    const after=text.slice(match.index+match[0].length);
-    if(/^\s+\d/.test(after)&&!/^\s+\d{3,4}-1-\d/.test(after)) {
-      incompleteTailObserved=true;
-      continue;
-    }
-    if(Number(match[2])>0&&!seen.has(match[0])) {
-      seen.add(match[0]);
-      codes.push({prefix:match[1],number:Number(match[2]),fullCode:match[0]});
-    }
-  }
-  // Legacy callers may still request matching tails, but strict collectors
-  // must retain codes, including a contrary prefix or a different print year.
-  const numbers=[...new Set(codes.filter(code=>code.prefix===prefix).map(code=>code.number))];
-  return {numbers,codes,incompleteTailObserved};
-}
-
 export function summarizeWindowsCodeObservations(readings,expectedPrefix) {
   const observations=[],groups=new Map();
   let incompleteTailObserved=false,prefixConflict=false;
@@ -2248,28 +2306,18 @@ function hasWindowsFullCodeEvidence(item) {
 
 // Existing names are comparison references, not OCR input. Preserve full-code
 // observations even when outside the current PDF set; never repair from tails.
-export async function auditExistingNumericPhotoCode({ appRoot, file, expectedPrefix, expectedNumbers, cropDir }) {
+export async function auditExistingNumericPhotoCode({ appRoot, file, expectedPrefix, expectedNumbers, cropDir,
+  worker=null,detectedCodeServices,portableOcrServices }) {
   fs.mkdirSync(cropDir, { recursive:true });
-  const metadata = autoOrientedMetadata(await sharpFile(file).metadata());
-  const bandFiles = [];
-  for (const layout of OVERLAPPING_RIGHT_CODE_BANDS) {
-    const extract = cropFromRatios(metadata, layout);
-    if (!isUsableOcrExtract(extract)) continue;
-    const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}-existing-windows-color.png`);
-    await writeImageFile(sharpFile(file)
-      .rotate()
-      .extract(extract)
-      .resize({ height:420, withoutEnlargement:false })
-      .extend({ top:36, bottom:36, left:36, right:36, background:'white' })
-      .png(),diagnostic);
-    bandFiles.push(diagnostic);
+  const reader=worker || await createOcrWorker(appRoot);
+  try {
+    // Rechecks must benefit from the same fixes as new photos. Do not route
+    // numeric filenames back through the old Windows-only fixed crops.
+    return await recognizePreparedImage(reader,file,expectedPrefix,expectedNumbers,cropDir,appRoot,
+      {detectedCodeServices,portableOcrServices});
+  } finally {
+    if(!worker)await reader.terminate();
   }
-  const windows = readWindowsOcrTails(appRoot,bandFiles,cropDir);
-  const reading=summarizeWindowsCodeObservations(
-    [...windows].map(([crop,value])=>({crop,text:value.text})),expectedPrefix);
-  return {
-    file,...reading,ocrDiagnostics:windows.ocrDiagnostics,paperGeometry:{},visualMetrics:{},
-  };
 }
 
 // Preprocessing twice is not an independent OCR engine. Duplicate full-code
@@ -2317,6 +2365,8 @@ export function independentCodeConsensus(observations) {
 export function photoCodeAuditBlockReason(item) {
   const bodyReason=bodyReviewBlockReason(item);
   if(bodyReason)return bodyReason;
+  const detectedReason=detectedCodeReadBlockReason(item);
+  if(detectedReason)return detectedReason;
   const portableReason=portableCodeReadBlockReason(item);
   if(portableReason)return portableReason;
   const history=item?.codeAuditHistory;
@@ -3087,6 +3137,9 @@ export function isLikelyScene(item) {
   // Failure to disambiguate a previously proposed printed code does not turn
   // the photographed paper into a scene, even if candles fill its background.
   if(item?.codeAuditHistory?.length || item?.bodyReviewHistory?.length)return false;
+  if(item?.detectedCodeRead && (item.detectedCodeRead.errors || !item.detectedCodeRead.coverage?.completed
+    || item.detectedCodeRead.observations?.length || item.detectedCodeRead.independent?.length
+    || item.detectedCodeRead.incompleteTailObserved))return false;
   if(item?.portableCodeRead && !canUseSceneAfterPortableRead(item.portableCodeRead))return false;
   // Role evidence is ordered, not blended: a full visible business code that
   // was independently read in adjacent/strict code crops is conclusive paper
@@ -3985,6 +4038,11 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   fs.mkdirSync(cropDir, { recursive: true });
   const worker = await createOcrWorker(appRoot);
   let pdfPages;
+  let detectedDetectorPromise=null;
+  const detectedCodeServices={read:async args=>{
+    detectedDetectorPromise ||= createTextDetector(appRoot,path.join(appRoot,'models/paddleocr-zh-v4/ch_PP-OCRv4_det_mobile.onnx'));
+    return readPhotoDetectedCode(args,await detectedDetectorPromise);
+  }};
   const recognized = [];
   const numericCodeRepairs = [];
   // V9.5.43 起照片编号完全本地化：这里保留字段仅为兼容既有断点状态，
@@ -4024,7 +4082,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
         } else {
           current += 1;
           onProgress?.(`正在读取并识别新增原图 ${current}/${ocrImageCount}：${path.basename(file)}`);
-          const result = await recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot,{preferredNames});
+          const result = await recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot,{preferredNames,detectedCodeServices});
           // Reuse only where to look first, never a previous image's number.
           // Every new image still needs its own two-view code consensus.
           if(result.evidence?.successfulCropNames?.length) preferredNames=result.evidence.successfulCropNames;
@@ -4060,7 +4118,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
         numericAuditIndex += 1;
         onProgress?.(`正在重新核对现有数字照片 ${numericAuditIndex}/${numericAuditFiles.length}：${path.basename(file)}`);
         const observed = await auditExistingNumericPhotoCode({
-          appRoot,file,expectedPrefix,expectedNumbers,cropDir,
+          appRoot,file,expectedPrefix,expectedNumbers,cropDir,worker,detectedCodeServices,
         });
         existingNumericAuditItems.push({
           ...observed,
@@ -4083,7 +4141,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
         const existing = numericByNumber.get(item.number);
         if (!existing || checkedNumeric.has(existing)) continue;
         checkedNumeric.add(existing);
-        const existingResult = await recognizePreparedImage(worker, existing, expectedPrefix, expectedNumbers, cropDir, appRoot);
+        const existingResult = await recognizePreparedImage(worker, existing, expectedPrefix, expectedNumbers, cropDir, appRoot,{detectedCodeServices});
         if (!existingResult.reliable || existingResult.number === item.number
           || numericByNumber.has(existingResult.number) || !expectedNumbers.has(existingResult.number)) continue;
         numericCodeRepairs.push({
@@ -4120,7 +4178,8 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       onProgress?.(`已发现 ${rawPhotoCount} 张原始照片；PDF 没有任何唯一可用编号，暂缓照片 OCR 与改名，原图保持不变。`);
     }
   } finally {
-    await worker.terminate();
+    try {await worker.terminate();}
+    finally {await (await detectedDetectorPromise?.catch(()=>null))?.release();}
     for (const temporaryDir of [cropDir, path.join(workDir, 'pdf-code-crops')]) {
       try { fs.rmSync(temporaryDir, { recursive:true, force:true }); } catch {}
     }
@@ -4209,7 +4268,8 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     if(existing)existing.number=repair.to;
     else bodyClaims.push({file:repair.source,number:repair.to,reliable:true,evidence:repair.evidence});
   }
-  const bodyClaimReview=await reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndexBinding,claims:bodyClaims,onProgress});
+  const bodyClaimReview=await reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndexBinding,claims:bodyClaims,onProgress,
+    cacheDir:path.join(workDir,'body-observation-cache')});
   if(bodyClaimReview.blocked)pendingIssues.push(`有 ${bodyClaimReview.blocked} 张照片的正文归属存在冲突或检查不可用；保留原图，未按数字共识或正文最高分自动改号。`);
   const bodyBlockedPaths=new Set(bodyClaims.filter(bodyReviewBlockReason).map(item=>path.resolve(item.file)));
   const bodyBlockedExistingNumbers=new Set(images.filter(file=>bodyBlockedPaths.has(path.resolve(file)) && /^\d+$/.test(path.parse(file).name))
@@ -4336,7 +4396,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   const missingExpected = [...expectedNumbers].filter((number) => !assignedNumbers.has(number));
   if (missingExpected.length) {
     const detail = missingExpected.length <= 20 ? `：${missingExpected.sort((a, b) => a - b).join('、')}` : '';
-    pendingIssues.push(`仍缺少 ${missingExpected.length} 个 PDF 编号对应的福单照片${detail}；现有照片将先处理，补图后只识别新增文件。`);
+    pendingIssues.push(`仍有 ${missingExpected.length} 个 PDF 编号未匹配已确认福单照片${detail}；请先核对目录内未识别原图及 PDF 批次，不能仅凭未匹配就判定缺图。已确认照片可先处理。`);
   }
   if (verifiedBatch.applied) {
     assignments.push(...verifiedBatch.sceneAssignments);
