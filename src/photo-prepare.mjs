@@ -13,6 +13,7 @@ import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBindi
 import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 import {readDetectedCodes,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
+import {pdfReviewBlockReason,recordPdfClaimReview,createPhotoReviewExclusions,reviewExcludedPhotoNames,assertPhotoReviewIsolation} from './photo-review-isolation.mjs';
 export {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 
 const require = createRequire(import.meta.url);
@@ -2367,6 +2368,8 @@ export function independentCodeConsensus(observations) {
 // unavailable or contradictory independent reading is NOT permission to run
 // a missing-slot repair. Re-evaluate recorded observations, not a method label.
 export function photoCodeAuditBlockReason(item) {
+  const pdfReason=pdfReviewBlockReason(item);
+  if(pdfReason)return pdfReason;
   const bodyReason=bodyReviewBlockReason(item);
   if(bodyReason)return bodyReason;
   const detectedReason=detectedCodeReadBlockReason(item);
@@ -2639,6 +2642,7 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       item.evidence.pdfRecheck={method:'existing-filename-visible-code-and-pdf-index',status:'confirmed'};
     } else if (method === 'existing-numeric-filename-claim') {
       status = 'inconclusive';
+      reason = 'existing-filename-code-unconfirmed';
       inconclusive += 1;
     } else if (trustedManual(item)) {
       item.evidence.pdfRecheck={method:'preserved-manual-pdf-content-review',status:'confirmed'};
@@ -2691,7 +2695,7 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
         }
       }
     }
-    if (reason) {
+    if (reason && status !== 'inconclusive') {
       item.reliable = false;
       // No usable fingerprint / no discriminating margin is missing evidence,
       // not positive evidence of a wrong code. Keep this item unassigned, but
@@ -2703,6 +2707,7 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
     } else if (status === 'confirmed') {
       confirmed += 1;
     }
+    recordPdfClaimReview(item,{status,reason,claimedNumber});
     diagnostics.push({
       file:path.basename(item.file),claimedNumber,status,reason,
       top:scores.slice(0,5).map(({page,score,variant})=>({number:page.number,pdfName:page.pdfName,score:Number(score.toFixed(4)),variant})),
@@ -3140,7 +3145,7 @@ export function hasDirectVisibleCodeEvidence(item) {
 export function isLikelyScene(item) {
   // Failure to disambiguate a previously proposed printed code does not turn
   // the photographed paper into a scene, even if candles fill its background.
-  if(item?.codeAuditHistory?.length || item?.bodyReviewHistory?.length)return false;
+  if(pdfReviewBlockReason(item)||item?.codeAuditHistory?.length || item?.bodyReviewHistory?.length)return false;
   if(item?.detectedCodeRead && (item.detectedCodeRead.errors || !item.detectedCodeRead.coverage?.completed
     || item.detectedCodeRead.observations?.length || item.detectedCodeRead.independent?.length
     || item.detectedCodeRead.incompleteTailObserved))return false;
@@ -4249,7 +4254,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     );
     if (pdfClaimRecheck.rejected) {
       const rejectedFiles = pdfClaimRecheck.diagnostics.filter((item)=>item.status==='rejected').map((item)=>item.file);
-      issues.push(`编号二次复核未通过 ${pdfClaimRecheck.rejected} 张：${rejectedFiles.join('、')}。已停止改名和上传，请查看 PDF 指纹诊断。`);
+      pendingIssues.push(`编号二次复核未通过 ${pdfClaimRecheck.rejected} 张：${rejectedFiles.join('、')}。这些照片已隔离，不改名、不上传、不转为场景；其余独立确认照片可继续，请查看 PDF 指纹诊断。`);
     } else if (pdfClaimRecheck.attempted) {
       onProgress?.(`编号二次复核完成：${pdfClaimRecheck.confirmed}/${pdfClaimRecheck.attempted} 张得到第二证据确认，${pdfClaimRecheck.inconclusive || 0} 张暂缺足够复核证据，保留待确认；其他已确认照片可继续。`);
     }
@@ -4274,11 +4279,16 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   }
   const bodyClaimReview=await reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndexBinding,claims:bodyClaims,onProgress,
     cacheDir:path.join(workDir,'body-observation-cache')});
+  const photoReviewExclusions=createPhotoReviewExclusions([...recognized,...existingNumericAuditItems,...bodyClaims],photoInputBinding,photoCodeAuditBlockReason);
+  const reviewExcludedNames=reviewExcludedPhotoNames({photoReviewExclusions,photoInputBinding});
+  const isReviewExcluded=file=>reviewExcludedNames.has(path.basename(file).toLowerCase());
+  const reviewExcludedNumbers=new Set(images.filter(file=>isReviewExcluded(file)&&/^\d+$/.test(path.parse(file).name)).map(file=>Number(path.parse(file).name)));
+  if(photoReviewExclusions.files.length)pendingIssues.push(`有 ${photoReviewExclusions.files.length} 张照片未通过编号或正文复核，已按原图内容凭据隔离；不改名、不压缩、不上传、不转为场景，其他独立确认照片可继续。`);
   if(bodyClaimReview.blocked)pendingIssues.push(`有 ${bodyClaimReview.blocked} 张照片的正文归属存在冲突或检查不可用；保留原图，未按数字共识或正文最高分自动改号。`);
   const bodyBlockedPaths=new Set(bodyClaims.filter(bodyReviewBlockReason).map(item=>path.resolve(item.file)));
   const bodyBlockedExistingNumbers=new Set(images.filter(file=>bodyBlockedPaths.has(path.resolve(file)) && /^\d+$/.test(path.parse(file).name))
     .map(file=>Number(path.parse(file).name)));
-  for(let index=numericCodeRepairs.length-1;index>=0;index--)if(bodyBlockedPaths.has(path.resolve(numericCodeRepairs[index].source)))numericCodeRepairs.splice(index,1);
+  for(let index=numericCodeRepairs.length-1;index>=0;index--)if(isReviewExcluded(numericCodeRepairs[index].source)||reviewExcludedNumbers.has(numericCodeRepairs[index].to))numericCodeRepairs.splice(index,1);
   const assignments = [];
   const occupiedNames = new Set();
   const assignedNumbers = new Set();
@@ -4303,7 +4313,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       if (numericRepairSources.has(path.resolve(file))) continue;
       occupiedNames.add(lowerName);
       const audit = numericAuditByPath.get(path.resolve(file));
-      if (expectedNumbers.has(number) && (!audit || audit.reliable)) assignedNumbers.add(number);
+      if (expectedNumbers.has(number) && !isReviewExcluded(file) && (!audit || audit.reliable)) assignedNumbers.add(number);
       else foreignNumericFiles.push(file);
     } else if (['2.1', '2.2', '2.5', '2.6'].includes(stem)) {
       occupiedNames.add(lowerName);
@@ -4315,6 +4325,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   // 不超过 1.5 MiB 的 JPEG。
   for (const file of images) {
     if (numericRepairSources.has(path.resolve(file))) continue;
+    if (isReviewExcluded(file)) continue;
     const stem = path.parse(file).name;
     const numeric = /^\d+$/.test(stem) && expectedNumbers.has(Number(stem)) && !bodyBlockedPaths.has(path.resolve(file));
     const scene = ['2.1', '2.2', '2.5', '2.6'].includes(stem);
@@ -4331,7 +4342,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       evidence:{method:'already-numbered-spec-normalization'},
     });
   }
-  const outOfScopeNumericFiles=foreignNumericFiles.filter(file=>!bodyBlockedPaths.has(path.resolve(file)));
+  const outOfScopeNumericFiles=foreignNumericFiles.filter(file=>!isReviewExcluded(file));
   if (outOfScopeNumericFiles.length) {
     pendingIssues.push(`有 ${outOfScopeNumericFiles.length} 张纯数字照片不属于本日唯一 PDF 编号，已从本日上传和计数中排除：${outOfScopeNumericFiles.map((file)=>path.basename(file)).join('、')}。请核对原业务日期后补跑。`);
   }
@@ -4341,6 +4352,10 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     reliableGroups.get(item.number).push(item);
   }
   for (const [number, group] of reliableGroups) {
+    if(reviewExcludedNumbers.has(number)) {
+      pendingIssues.push(`照片编号 ${number} 与尚未通过复核的已有数字文件有关联，相关候选一并保留待确认；其他独立编号继续。`);
+      continue;
+    }
     if (group.length > 1) {
       // 同号的多张照片不能替程序挑一张；保留为人工待决，但不阻断其他已唯一
       // 确认的编号继续完成。
@@ -4363,6 +4378,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   const unresolved = recognized.filter((item) => !item.reliable && !duplicateSourceSet.has(item.file) && !verifiedSceneSourceSet.has(item.file)).map((item) => item.file);
   const sceneCandidates = recognized
     .filter((item) => item.reliable === false
+      && !isReviewExcluded(item.file)
       && !photoCodeAuditBlockReason(item)
       && item.pdfRecheck?.status !== 'inconclusive'
       && (item.evidence?.method === 'scene-visual-fast-path' || isLikelyScene(item)))
@@ -4413,6 +4429,12 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   assignments.push(...sceneResult.assignments);
   pendingIssues.push(...sceneResult.issues);
 
+  // Manual-batch bookkeeping cannot reintroduce a source vetoed earlier in
+  // this plan. Keep exclusions out of every kind, not just numeric proposals.
+  for(let index=assignments.length-1;index>=0;index--)if(isReviewExcluded(assignments[index].source))assignments.splice(index,1);
+  const duplicateSources=verifiedBatch.duplicateSources.filter(item=>!isReviewExcluded(item.source)
+    && !reviewExcludedNumbers.has(item.duplicateOfNumber));
+
   const targetNames = assignments.map((item) => item.targetName.toLowerCase());
   if (new Set(targetNames).size !== targetNames.length) issues.push('自动处理目标文件名发生重复。');
   const sceneClassificationBlocked = pendingIssues.some((message) => /^场景图识别为|^场景图明暗特征|^剩余 \d+ 张场景候选/.test(message));
@@ -4454,12 +4476,13 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     expectedPrefix,
     pdfIndexBinding,
     photoInputBinding,
+    photoReviewExclusions,
     pdfPages,
     expectedCodeCount: expectedNumbers.size,
-    allowedBlessingNumbers: [...expectedNumbers].filter(number=>!bodyBlockedExistingNumbers.has(number)).sort((a,b)=>a-b),
+    allowedBlessingNumbers: [...expectedNumbers].filter(number=>!bodyBlockedExistingNumbers.has(number)&&!reviewExcludedNumbers.has(number)).sort((a,b)=>a-b),
     foreignNumericFiles,
     assignments,
-    duplicateSources: verifiedBatch.duplicateSources,
+    duplicateSources,
     sceneCandidateCount: sceneCandidates.length,
     ambiguousPhotoCount: ambiguousCodeCandidates.length,
     missingExpected: missingExpected.sort((a, b) => a - b),
@@ -4478,7 +4501,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       missingExpected: missingExpected.sort((a, b) => a - b),
     },
     safeToApply: issues.length === 0,
-    ready: issues.length === 0 && assignedNumbers.size === expectedNumbers.size,
+    ready: issues.length === 0 && assignedNumbers.size === expectedNumbers.size && photoReviewExclusions.files.length === 0,
   };
 }
 
@@ -4498,6 +4521,7 @@ async function makeProcessedJpeg(source, destination) {
 
 export async function applyPhotoPreparation(plan, workDir) {
   if (!(plan?.ready || plan?.safeToApply) || plan.issues?.length) throw new Error('自动处理方案没有通过安全校验，未修改照片。');
+  assertPhotoReviewIsolation(plan);
   assertPhotoInputBinding(plan);
   const assertPdfInputsUnchanged = () => {
     if (!plan.pdfIndexBinding) return;

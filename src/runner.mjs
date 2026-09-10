@@ -10,6 +10,7 @@ import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolde
 import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,canReusePdfIndex,createPhotoInputBinding} from './recognition-provenance.mjs';
 import {mustRebuildPhotoPlan,assertWritePlanReady,photoFilesMatchPlan,assertPhotoFilesMatchPlan} from './photo-plan-gate.mjs';
+import {reviewExcludedPhotoNames} from './photo-review-isolation.mjs';
 import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
@@ -515,7 +516,8 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
       if (modeIndexComplete) expectedNumberModes = indexedModes;
       else log('本地 PDF 编号分类索引不完整，将继续使用整日场景保守校验。');
     }
-    const manifest = await scanPhotoWorkday(root,photoDate,photoRunDir,{runOcr:false,expectedNumbers:allowedBlessingNumbers,expectedNumberModes});
+    const excludedPhotoNames=reviewExcludedPhotoNames(cachedPhotoPlan);
+    const manifest = await scanPhotoWorkday(root,photoDate,photoRunDir,{runOcr:false,expectedNumbers:allowedBlessingNumbers,expectedNumberModes,excludedPhotoNames});
     if(writePhotoAction&&quickImageCount>0) assertPhotoFilesMatchPlan(cachedPhotoPlan,preparationReceipt,
       Object.entries(manifest.fileHashes||{}).map(([name,sha256])=>({name,sha256})));
     photoTiming.setCount('photo_count',manifest.counts.allImages);

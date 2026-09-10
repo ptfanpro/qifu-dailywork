@@ -34,6 +34,7 @@ import './portable-conflict-review-regression.mjs';
 import './detected-code-dispatch-regression.mjs';
 import './detected-code-review-regression.mjs';
 import './replay-comparison-regression.mjs';
+import './photo-review-isolation-regression.mjs';
 import './photo-availability-regression.mjs';
 import './experiments/server-code-reader-regression.mjs';
 import './foreground-paper-scene-regression.mjs';
@@ -318,7 +319,7 @@ const weakNumericFilenameConflict=[{
 const weakNumericFilenameConflictResult=await recheckReliablePhotoClaimsWithPdf(weakNumericFilenameConflict,shapePages);
 assert.equal(weakNumericFilenameConflictResult.rejected,0);
 assert.equal(weakNumericFilenameConflictResult.inconclusive,1);
-assert.equal(weakNumericFilenameConflict[0].reliable,true);
+assert.equal(weakNumericFilenameConflict[0].reliable,false,'an unconfirmed old filename must not grant upload permission');
 const strongVisibleCodeClaim=[{
   file:shapePhoto,reliable:true,number:402,candidates:[],visualMetrics:{},paperGeometry:{},
   evidence:{method:'targeted-landscape-code-threshold-consensus',votes:4,maxConfidence:91},
@@ -413,7 +414,7 @@ const unreadableExistingFilename=[{
 const unreadableExistingResult=await recheckReliablePhotoClaimsWithPdf(unreadableExistingFilename,shapePages);
 assert.equal(unreadableExistingResult.inconclusive,1);
 assert.equal(unreadableExistingResult.rejected,0);
-assert.equal(unreadableExistingFilename[0].reliable,true);
+assert.equal(unreadableExistingFilename[0].reliable,false,'unreadable is inconclusive, not a confirmed filename');
 const unreadableNewProposal=[{
   file:shapePhoto,reliable:true,number:401,candidates:[],visualMetrics:{},paperGeometry:{},
   evidence:{method:'capture-gap-after-existing-number-exclusion',votes:3},
@@ -1058,7 +1059,7 @@ assert.match(siteSource,/const selects = dialog\.locator\('select'\)/);
 assert.match(siteSource,/批量修改成\(\?:代理\|延续\)\?已处理状态/);
 assert.match(siteSource,/既没有已处理终态选项，也没有明确的/);
 assert.match(runnerSource,/照片目录快速清点/);
-assert.match(runnerSource,/scanPhotoWorkday\(root,photoDate,photoRunDir,\{runOcr:false,expectedNumbers:allowedBlessingNumbers,expectedNumberModes\}\)/);
+assert.match(runnerSource,/scanPhotoWorkday\(root,photoDate,photoRunDir,\{runOcr:false,expectedNumbers:allowedBlessingNumbers,expectedNumberModes,excludedPhotoNames\}\)/);
 assert.match(runnerSource,/const mode = \/供水\//);
 assert.match(runnerSource,/旧版或已失效照片计划/);
 assert.match(runnerSource,/不会按旧断点直接上传/);

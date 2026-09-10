@@ -203,7 +203,9 @@ export async function recognizeUnexpectedImages(files, date, workDir) {
   return results;
 }
 
-export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, expectedNumbers = null, expectedNumberModes = null } = {}) {
+export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, expectedNumbers = null, expectedNumberModes = null, excludedPhotoNames = new Set() } = {}) {
+  if(!(excludedPhotoNames instanceof Set)||[...excludedPhotoNames].some(name=>typeof name!=='string'||!name||/[\\/:]/.test(name)))throw Error('待复核照片隔离名单无效，停止扫描。');
+  const excludedNames=new Set([...excludedPhotoNames].map(name=>name.toLowerCase()));
   const folder = dayFolder(root, date);
   const photoDir = path.join(folder, '1');
   if (!fs.existsSync(photoDir)) throw new Error(`没有找到照片目录：${photoDir}`);
@@ -215,7 +217,9 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
   const lampScenes = [];
   const waterScenes = [];
   const unexpected = [];
+  const reviewExcluded = [];
   for (const file of imageFiles) {
+    if(excludedNames.has(path.basename(file).toLowerCase())) {reviewExcluded.push(file);continue;}
     const stem = path.parse(file).name;
     if (/^\d+$/.test(stem)) {
       const number = Number(stem);
@@ -242,6 +246,7 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
   const blockingErrors = allInspections.flatMap((item) => item.errors.map((message) => `${item.name}：${message}`));
   const manualIssues = [];
   const sceneManualIssues = [];
+  if(reviewExcluded.length)manualIssues.push(`有 ${reviewExcluded.length} 张照片未通过编号或正文复核，已排除本次处理和上传；原图保留，其他已确认照片可继续。`);
   if (!blessing.length) blockingErrors.push('没有发现纯整数命名的福单图');
   if (foreignBlessing.length) manualIssues.push(`有 ${foreignBlessing.length} 张纯数字照片不属于本日 PDF 唯一编号，已隔离且不会上传：${foreignBlessing.map((file)=>path.basename(file)).join('、')}`);
   if (unexpected.length) manualIssues.push(`有 ${unexpected.length} 张图片尚未确认编号或场景类别；已确认福单仍可继续处理`);
@@ -257,21 +262,22 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
   if (!pdfFiles.length) blockingErrors.push('当天目录没有 PDF，无法做页数闭环校验');
   const missingBlessingCount = Math.max(0, pdfPageCount - blessing.length);
   const extraBlessingCount = Math.max(0, blessing.length - pdfPageCount);
+  const unclassifiedCount=unexpected.length+reviewExcluded.length;
   // This is an unmatched-page count, not proof that a physical photo is absent.
   // Keep missingBlessing for old checkpoints and completion gates; use the
   // explicit diagnosis in messages so an OCR failure does not request re-shoots.
   const photoAvailability = {
     schemaVersion: 1,
     unmatchedPages: missingBlessingCount,
-    unclassifiedPhotos: unexpected.length,
+    unclassifiedPhotos: unclassifiedCount,
     summary: missingBlessingCount > 0
-      ? `${missingBlessingCount} 个 PDF 页面尚未匹配已确认福单图；${unexpected.length
-        ? `目录另有 ${unexpected.length} 张待识别或确认图片，不能直接判定缺图。请先核对现有图片`
+      ? `${missingBlessingCount} 个 PDF 页面尚未匹配已确认福单图；${unclassifiedCount
+        ? `目录另有 ${unclassifiedCount} 张待识别或确认图片，不能直接判定缺图。请先核对现有图片`
         : '请核对对应原图与 PDF 批次，确认缺图后再补入原图'}`
       : extraBlessingCount > 0
         ? `福单图数量比 PDF 页数多 ${extraBlessingCount} 张，请核对编号及 PDF 批次`
-      : unexpected.length > 0
-        ? `福单图数量与 PDF 页数已齐；目录另有 ${unexpected.length} 张待识别或确认图片，仍需核对类别`
+      : unclassifiedCount > 0
+        ? `福单图数量与 PDF 页数已齐；目录另有 ${unclassifiedCount} 张待识别或确认图片，仍需核对类别`
         : '福单图数量与 PDF 页数已齐；编号及业务闭环以各项校验结果为准',
   };
   if (pdfFiles.length && extraBlessingCount > 0) manualIssues.push(`本日可用福单图比 PDF 页数多 ${extraBlessingCount} 张；超出项已进入人工清单，唯一确认项仍可继续`);
@@ -321,6 +327,7 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
       waterScene: waterScenes.length,
       unexpected: unexpected.length,
       foreignBlessing: foreignBlessing.length,
+      reviewExcluded: reviewExcluded.length,
       pdf: pdfFiles.length,
       pdfPages: pdfPageCount,
       missingBlessing: missingBlessingCount,
@@ -328,7 +335,7 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
       extraBlessing: extraBlessingCount,
     },
     photoAvailability,
-    files: { blessing, lampScenes, waterScenes, unexpected, foreignBlessing },
+    files: { blessing, lampScenes, waterScenes, unexpected, foreignBlessing, reviewExcluded },
     inspections: allInspections,
     ocrSuggestions,
     pdfs,

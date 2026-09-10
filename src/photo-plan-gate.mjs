@@ -1,4 +1,5 @@
 import path from 'node:path';
+import {assertPhotoReviewIsolation} from './photo-review-isolation.mjs';
 const validHash=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 const validName=value=>typeof value==='string'&&value.length>0&&!/[\\/:]/.test(value)&&!['.','..'].includes(value);
 const key=name=>name.toLowerCase();
@@ -76,6 +77,7 @@ export function mustRebuildPhotoPlan({indexReusable,standardizedOnly,imageCount,
 }
 
 export function assertWritePlanReady(plan,{imageCount,action}) {
+  if(imageCount>0&&['photo-upload','photo-scenes'].includes(action))assertPhotoReviewIsolation(plan);
   if(imageCount>0 && ['photo-upload','photo-scenes'].includes(action)
     && (!plan?.safeToApply || plan.issues?.length || !Array.isArray(plan.allowedBlessingNumbers)
       || !['not-needed','veto-only-not-order-binding'].includes(plan.bodyClaimReview?.status))) {
