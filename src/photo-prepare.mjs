@@ -1317,6 +1317,9 @@ export async function createOcrWorker(appRoot) {
 }
 
 export function summarizeDetectedCodeRead(read,expectedPrefix,expectedNumbers) {
+  // Validate saved evidence before deriving observations: corrupt records must
+  // be rejected, not crash a resume or get treated as a fresh successful read.
+  if(!validDetectedCodeReview(read))return {number:null,reason:'detected-code-review-incomplete',observations:[],evidence:null};
   const raw=[...(read?.observations || []),...(read?.independent || [])];
   const observations=raw.map(o=>({...o,cropBounds:o.crop,crop:`detected-${o.index}-${o.padding}`,
     fullCodeValidated:true,expectedPrefix:String(expectedPrefix),prefixDistance:o.prefix===String(expectedPrefix)?0:null}));
@@ -1328,8 +1331,7 @@ export function summarizeDetectedCodeRead(read,expectedPrefix,expectedNumbers) {
     &&o.crop.left>=0&&o.crop.top>=0&&o.crop.width>0&&o.crop.height>0
     &&o.crop.left+o.crop.width<=dimensions.width&&o.crop.top+o.crop.height<=dimensions.height;
   let reason=null;
-  if(!validDetectedCodeReview(read))reason='detected-code-review-incomplete';
-  else if(raw.some(o=>!['paddle','tesseract'].includes(o.engine)||!validCrop(o)
+  if(raw.some(o=>!['paddle','tesseract'].includes(o.engine)||!validCrop(o)
     ||![.45,.75].includes(o.padding)||!Number.isInteger(o.index)||o.index<0||o.index>=read.regions
     ||!/^\d{3,4}-1-\d{1,4}$/.test(o.fullCode || '')||!Number.isFinite(o.confidence)
     ||o.confidence<0||o.confidence>(o.engine==='paddle'?1:100)))reason='detected-code-invalid-observation';

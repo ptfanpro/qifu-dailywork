@@ -13,6 +13,8 @@ export async function detectedCodeContrastImage(bytes) {
     .extractChannel(0).normalize().png().toBuffer();
 }
 export function validDetectedCodeReview(read) {
+  if(['observations','independent','readings'].some(key=>read?.[key]!==undefined
+    &&(!Array.isArray(read[key])||read[key].some(o=>!o||typeof o!=='object'))))return false;
   const extra=(read?.independent||[]).filter(o=>o.preprocessing!=null);
   const review=read?.review;
   if(review===undefined)return extra.length===0;
@@ -22,12 +24,14 @@ export function validDetectedCodeReview(read) {
   const keys=new Set(),indexes=new Set();
   const sameCrop=(a,b)=>a&&b&&['left','top','width','height'].every(k=>a[k]===b[k]);
   for(const r of review.readings) {
+    if(!r||typeof r!=='object')return false;
     const key=`${r.index}:${r.padding}`;
     if(keys.has(key)||r.engine!=='tesseract'||![.45,.75].includes(r.padding)||r.errorCode!==null
       ||!Number.isInteger(r.index)||r.index<0||r.index>=read.regions
       ||!Number.isFinite(r.confidence)||r.confidence<0||r.confidence>100
       ||!Number.isInteger(r.codeCount)||r.codeCount<0)return false;
-    const primary=(read.readings||[]).filter(o=>o.engine==='tesseract'&&o.index===r.index&&o.padding===r.padding);
+    if(!Array.isArray(read.readings))return false;
+    const primary=read.readings.filter(o=>o?.engine==='tesseract'&&o.index===r.index&&o.padding===r.padding);
     if(primary.length!==1||!sameCrop(primary[0].crop,r.crop))return false;
     const observations=extra.filter(o=>o.index===r.index&&o.padding===r.padding);
     if(observations.length!==r.codeCount||observations.some(o=>o.preprocessing!==review.recipe

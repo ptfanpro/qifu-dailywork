@@ -80,6 +80,10 @@ test('saved incomplete or altered supplemental reads cannot authorize a plan or 
     r=>r.review.readings[0].crop.left++,r=>r.review.attemptedRegions=9,
     r=>r.review.readings[0].errorCode='contrast-reader-unavailable',
     r=>r.review.readings[0].padding=.2,
+    r=>r.review.readings[0]=null,
+    r=>r.independent[0]=null,r=>r.independent={},r=>r.independent=null,
+    r=>r.observations[0]=null,r=>r.observations={},r=>r.observations=null,
+    r=>r.readings[0]=null,r=>r.readings={},r=>r.readings=null,
   ]) {
     const broken=structuredClone(read);mutate(broken);
     assert.equal(summarizeDetectedCodeRead(broken,'269',new Set([168])).number,null);
