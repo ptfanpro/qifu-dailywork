@@ -41,7 +41,11 @@ test('word review keeps opposite/partial/failed evidence and restores mode even 
   for(const word of [[{text:'269-1-169',confidence:0},confirmed],[{text:'268-1-168',confidence:0},confirmed],
     [{text:'269-1-16 8',confidence:90},confirmed],[new Error('private image details'),confirmed],[blank,confirmed]]) {
     const trial=await collect(word),read=await trial.run();
-    assert.equal(trial.calls,6);assert.equal(trial.reset,1);assert.equal(read.confirmed,null);
+    // A blank view alone can now reach the fixed final raw-line review;
+    // contrary/partial/error evidence must still stop before that review.
+    const rawReviewAllowed=word[0]===blank;
+    assert.equal(trial.calls,rawReviewAllowed?8:6);assert.equal(trial.reset,rawReviewAllowed?2:1);assert.equal(read.confirmed,null);
+    assert.equal(Boolean(read.rawLineReview),rawReviewAllowed);
     assert.equal(summarizeDetectedCodeRead(read,'269',new Set([168])).number,null);
     assert.ok(!JSON.stringify(read).includes('private image'));
   }

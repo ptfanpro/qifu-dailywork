@@ -16,15 +16,17 @@ export function validDetectedCodeReview(read) {
   if(['observations','independent','readings'].some(key=>read?.[key]!==undefined
     &&(!Array.isArray(read[key])||read[key].some(o=>!o||typeof o!=='object'))))return false;
   const extra=(read?.independent||[]).filter(o=>o.preprocessing!=null);
-  if(extra.some(o=>!['red-channel-96-v1','gray-96-word-v1'].includes(o.preprocessing)))return false;
+  if(extra.some(o=>!['red-channel-96-v1','gray-96-word-v1','red-96-raw-line-v1'].includes(o.preprocessing)))return false;
   return validSupplementalReview(read,'review','red-channel-96-v1')
-    &&validSupplementalReview(read,'segmentationReview','gray-96-word-v1');
+    &&validSupplementalReview(read,'segmentationReview','gray-96-word-v1')
+    &&validSupplementalReview(read,'rawLineReview','red-96-raw-line-v1');
 }
 function validSupplementalReview(read,key,recipe) {
   const extra=(read?.independent||[]).filter(o=>o.preprocessing===recipe);
   const review=read?.[key];
   if(review===undefined)return extra.length===0;
   if(key==='segmentationReview'&&(!read.review?.completed||review?.restoreCompleted!==true))return false;
+  if(key==='rawLineReview'&&(!read.segmentationReview?.completed||review?.restoreCompleted!==true))return false;
   if(!review||review.recipe!==recipe||review.maxRegions!==4||review.completed!==true
     ||!Number.isInteger(review.attemptedRegions)||review.attemptedRegions<1||review.attemptedRegions>4
     ||!Array.isArray(review.readings)||review.readings.length!==review.attemptedRegions*2)return false;
@@ -55,7 +57,7 @@ export async function readDetectedCodes(detector,appRoot,source,prefix,{worker=n
   const eligible=regions.map((region,index)=>({region,index,
     crops:[.45,.75].map(padding=>({padding,crop:horizontalBodyCrop(region,original.info,padding)}))}))
     .filter(item=>item.crops.every(view=>view.crop));
-  let incompleteTailObserved=false,errors=0,review=null,segmentationReview=null;
+  let incompleteTailObserved=false,errors=0,review=null,segmentationReview=null,rawLineReview=null;
   const record=(result,engine,region,index,padding,crop,errorCode=null,supplemental=null)=>{
     const parsed=parseCompletePrintedCodes(result?.text||'',String(prefix));
     const confidence=Number.isFinite(result?.confidence)?result.confidence:0;
@@ -152,11 +154,43 @@ export async function readDetectedCodes(detector,appRoot,source,prefix,{worker=n
     segmentationReview.completed=segmentationReview.attemptedRegions===reviewIndexes.length&&errors===0;
     coverage.completed&&=segmentationReview.completed;
   }
+  // The fixed raw-line mode can recover a complete code when both earlier
+  // segmentation modes remain blank/weak. Same engine, same original crops,
+  // same thresholds; never erase an earlier contrary/partial observation.
+  // Already-confirmed reads and failed/incomplete reviews stay on their path.
+  if(worker&&typeof worker.setParameters==='function'&&segmentationReview?.completed&&unique()
+    &&supported(observations,.65)&&!supported(independent,30)) {
+    rawLineReview={recipe:'red-96-raw-line-v1',maxRegions:4,attemptedRegions:0,
+      completed:false,restoreCompleted:false,readings:[]};
+    try {
+      for(const {region,index,crops} of eligible.filter(item=>reviewIndexes.includes(item.index))) {
+        rawLineReview.attemptedRegions++;
+        for(const {padding,crop} of crops) {
+          try {
+            const bytes=await sharp(original.data,{raw:original.info}).extract(crop).png().toBuffer();
+            const result=await worker.recognize(await detectedCodeContrastImage(bytes),{tessedit_pageseg_mode:'13'});
+            record(result.data,'tesseract',region,index,padding,crop,null,rawLineReview);
+          } catch {record(null,'tesseract',region,index,padding,crop,'raw-line-reader-unavailable',rawLineReview);}
+        }
+      }
+    } finally {
+      try {
+        await worker.setParameters({tessedit_pageseg_mode:'7'});
+        rawLineReview.restoreCompleted=true;
+      } catch {
+        try {await worker.terminate();} catch {}
+        throw Error('detected-code-settings-restore-failed');
+      }
+    }
+    rawLineReview.completed=rawLineReview.attemptedRegions===reviewIndexes.length&&errors===0;
+    coverage.completed&&=rawLineReview.completed;
+  }
   const corroborated=unique()&&supported(observations,.65)&&(!worker||supported(independent,30));
   // Legacy `confirmed` is a diagnostic candidate only, never a product plan.
   return {regions:regions.length,observations,independent,readings,coverage,errors,incompleteTailObserved,
     ...(review?{review}:{}),
     ...(segmentationReview?{segmentationReview}:{}),
+    ...(rawLineReview?{rawLineReview}:{}),
     sourceDimensions:{width:original.info.width,height:original.info.height},engines:worker?2:1,
     confirmed:corroborated?code.number:null,bindingVerified:false,seconds:(Date.now()-started)/1000};
 }
