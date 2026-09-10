@@ -70,6 +70,8 @@ import './experiments/body-field-evidence-regression.mjs';
 import './audit-paths-regression.mjs';
 import './pdf-line-normalization-regression.mjs';
 import './pdf-index-integration.mjs';
+import './pdf-print-code-evidence-regression.mjs';
+import './pdf-print-code-index-regression.mjs';
 
 const require = createRequire(import.meta.url);
 const { PDFDocument } = require('pdf-lib');

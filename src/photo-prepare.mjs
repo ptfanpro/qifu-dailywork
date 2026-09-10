@@ -12,6 +12,7 @@ import {decodeOcrSource,extractOcrCrop,writeImageFile} from './ocr-image.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
 import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
+import {createPdfPrintCodeEvidence,appendPdfPrintCodeObservation} from './pdf-print-code-evidence.mjs';
 import {readDetectedCodes,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
 import {pdfReviewBlockReason,recordPdfClaimReview,createPhotoReviewExclusions,reviewExcludedPhotoNames,assertPhotoReviewIsolation} from './photo-review-isolation.mjs';
 export {parseCompletePrintedCodes} from './printed-code-parser.mjs';
@@ -2778,6 +2779,7 @@ export function parseLooseWindowsCodeCandidates(text, expectedPrefix, expectedNu
 
 export function readWindowsOcrTails(appRoot, files, workDir) {
   const values = new Map();
+  values.codeOutcomes=new Map();
   values.ocrDiagnostics={status:'unavailable',inputCount:files.length,errorCount:0,emptyTextCount:0};
   if (process.platform !== 'win32' || !appRoot || !files.length) return values;
   const script = path.join(appRoot, 'ui', 'Read-WindowsOcr.ps1');
@@ -2824,6 +2826,8 @@ export function readWindowsOcrTails(appRoot, files, workDir) {
         const item = JSON.parse(line);
         const original=item.path&&originalByReaderPath.get(path.resolve(item.path).toLowerCase());
         const normalizedText=normalizeOcr(item.text);
+        if(original)values.codeOutcomes.set(original,item.status==='error'
+          ?{status:'error',errorCode:'ocr-failed'}:{status:'ok',text:String(item.text??'')});
         if(item.status==='error')values.ocrDiagnostics.errorCount++;
         else if(!normalizedText)values.ocrDiagnostics.emptyTextCount++;
         if(original&&normalizedText) values.set(original,{
@@ -2869,6 +2873,12 @@ export async function normalizePdfCodeLine(source) {
 }
 
 export function appendWindowsPdfCodeEvidence(page,observation,expectedPrefix,layout='windows-ocr-top-right',allowedNumbers=null) {
+  if(page.printCodeEvidence)appendPdfPrintCodeObservation(page.printCodeEvidence,{
+    engine:'windows-ocr',layout,cropSha256:page.windowsFallbackSha256,
+    status:observation?.status||'ok',errorCode:observation?.errorCode,
+    text:observation?.text||'',confidence:null,
+  });
+  if(observation?.status==='error')return false;
   const candidates=parseLocalOcrCodeCandidates(observation?.text||'',expectedPrefix).filter(item=>item.prefixDistance===0);
   const numbers=[...new Set(candidates.map(item=>item.number))];
   if(numbers.length!==1||(allowedNumbers&&!allowedNumbers.has(numbers[0])))return false;
@@ -2889,19 +2899,23 @@ export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, a
   const pages = [];
   const descriptors = [];
   for (const file of pdfFiles) {
-    const document = await pdfjs.getDocument({ data: new Uint8Array(fs.readFileSync(file)), disableWorker: true,
+    const pdfBytes=fs.readFileSync(file);
+    const pdfSha256=crypto.createHash('sha256').update(pdfBytes).digest('hex');
+    const document = await pdfjs.getDocument({ data: new Uint8Array(pdfBytes), disableWorker: true,
       standardFontDataUrl,useSystemFonts:false }).promise;
     const firstPage = await document.getPage(1);
     const firstViewport = firstPage.getViewport({ scale: 1 });
-    descriptors.push({ file, document, portrait: firstViewport.height > firstViewport.width });
+    descriptors.push({ file, document, pdfSha256, portrait: firstViewport.height > firstViewport.width });
   }
-  for (const { file, document } of sortPdfDescriptorsByBusinessOrder(descriptors)) {
+  for (const { file, document, pdfSha256 } of sortPdfDescriptorsByBusinessOrder(descriptors)) {
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
       const rendered = await renderPdfPage(pdfjs, page);
       const portrait = rendered.height > rendered.width;
       const observations = [];
+      const printCodeEvidence=createPdfPrintCodeEvidence({pdfSha256,pageNumber});
       let windowsFallbackFile = null;
+      let windowsFallbackSha256 = null;
       for (const layout of PDF_CODE_LAYOUTS[portrait ? 'portrait' : 'landscape']) {
         const diagnostic = path.join(cropDir, `${crypto.randomUUID()}-${layout.name}.png`);
         let crop = sharp(rendered.buffer)
@@ -2912,10 +2926,25 @@ export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, a
           .sharpen({ sigma: 1 });
         if (layout.threshold) crop = crop.threshold(layout.threshold);
         await writeImageFile(crop.png(),diagnostic);
-        if (layout.name === (portrait ? 'portrait-wide' : 'landscape-wide')) windowsFallbackFile = diagnostic;
-        if (layout.sparse) await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
-        const result = await worker.recognize(diagnostic);
-        if (layout.sparse) await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
+        const cropSha256=crypto.createHash('sha256').update(fs.readFileSync(diagnostic)).digest('hex');
+        if (layout.name === (portrait ? 'portrait-wide' : 'landscape-wide')) {
+          windowsFallbackFile = diagnostic;windowsFallbackSha256=cropSha256;
+        }
+        let result;
+        try {
+          if (layout.sparse) await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
+          result = await worker.recognize(diagnostic);
+        } catch(error) {
+          appendPdfPrintCodeObservation(printCodeEvidence,{engine:'tesseract',layout:layout.name,cropSha256,
+            status:'error',errorCode:'ocr-failed'});
+          fs.writeFileSync(path.join(workDir,'pdf-code-evidence.partial.json'),JSON.stringify({schemaVersion:1,
+            complete:false,pages:[...pages.map(item=>item.printCodeEvidence),printCodeEvidence]},null,2));
+          throw error;
+        } finally {
+          if (layout.sparse) await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
+        }
+        appendPdfPrintCodeObservation(printCodeEvidence,{engine:'tesseract',layout:layout.name,cropSha256,
+          text:result.data.text,confidence:result.data.confidence??null,confidenceScale:100});
         const candidates = parseOcrCandidates(result.data.text, expectedPrefix);
         for (const candidate of candidates) {
           observations.push({
@@ -2937,14 +2966,27 @@ export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, a
         }
         // Printed PDF codes deserve the same independent local recognizer as
         // photographs. Restrict it to code-line crops (not the wide title/date
-        // blocks), and retain its raw full-prefix observations before any
-        // sequence repair or expected-number filtering.
-        if (appRoot && !layout.sparse && verifyLocalOcrAssets(appRoot).available) {
-          try {
+        // blocks). The independent ledger retains ALL full-prefix readings
+        // before confidence / expected-prefix filtering and top-N ranking.
+        if (!layout.sparse) {
+          const assets=appRoot?verifyLocalOcrAssets(appRoot):{available:false};
+          if(assets.available) {
             const lineInputs=[['original',diagnostic]];
-            try {lineInputs.push(['trimmed',await normalizePdfCodeLine(diagnostic)]);} catch { /* Keep the untrimmed path. */ }
+            try {lineInputs.push(['trimmed',await normalizePdfCodeLine(diagnostic)]);} catch {
+              appendPdfPrintCodeObservation(printCodeEvidence,{engine:'paddle',layout:`paddle-${layout.name}-trimmed`,
+                sourceCropSha256:cropSha256,status:'skipped',errorCode:'crop-normalization-failed'});
+            }
             for(const [variant,input] of lineInputs) {
-              const portable = await recognizeLocalTextLine(appRoot, input);
+              const literalIdentity={engine:'paddle',layout:`paddle-${layout.name}-${variant}`,
+                cropSha256:variant==='original'?cropSha256:crypto.createHash('sha256').update(input).digest('hex'),
+                sourceCropSha256:cropSha256,modelSha256:assets.modelSha256};
+              let portable;
+              try {portable=await recognizeLocalTextLine(appRoot,input);} catch {
+                appendPdfPrintCodeObservation(printCodeEvidence,{...literalIdentity,status:'error',errorCode:'ocr-failed'});
+                continue;
+              }
+              appendPdfPrintCodeObservation(printCodeEvidence,{...literalIdentity,text:portable.text,
+                confidence:portable.confidence??null,confidenceScale:1});
               if (portable.confidence >= .65) {
                 for (const candidate of parseOcrCandidates(portable.text,expectedPrefix).filter(item=>item.prefixDistance<=.1)) {
                   observations.push({...candidate,confidence:portable.confidence*100,
@@ -2952,7 +2994,8 @@ export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, a
                 }
               }
             }
-          } catch { /* Retain other independent evidence; never invent a PDF tail. */ }
+          } else appendPdfPrintCodeObservation(printCodeEvidence,{engine:'paddle',layout:`paddle-${layout.name}-original`,
+            sourceCropSha256:cropSha256,status:'skipped',errorCode:'ocr-unavailable'});
         }
       }
       observations.sort((a, b) =>
@@ -2972,7 +3015,9 @@ export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, a
         ocrText: exact?.ocrText || '',
         ocrLayout: exact?.layout || null,
         ocrObservations: observations.slice(0, 8),
+        printCodeEvidence,
         windowsFallbackFile,
+        windowsFallbackSha256,
         // 仅在本次内存中的照片规划期间使用；返回执行计划前会删除，绝不写入
         // NAS 或运行日志。
         _localShapeFingerprint: await localShapeFingerprint(sharp(rendered.buffer)),
@@ -2987,28 +3032,31 @@ export async function indexPdfCodes(worker, pdfFiles, expectedPrefix, workDir, a
   if (ambiguousPages.length) {
     const windowsOcr = readWindowsOcrTails(appRoot, ambiguousPages.map((page) => page.windowsFallbackFile).filter(Boolean), workDir);
     for (const page of ambiguousPages) {
-      const observation = windowsOcr.get(path.resolve(page.windowsFallbackFile || ''));
-      if (!observation) continue;
+      const observation = windowsOcr.codeOutcomes.get(path.resolve(page.windowsFallbackFile || ''))
+        ||{status:'error',errorCode:windowsOcr.ocrDiagnostics.status==='unavailable'?'ocr-unavailable':'no-result'};
       const closeCandidates = [...new Set(page.ocrObservations.filter((item) => item.prefixDistance === 0).map((item) => item.number))];
       appendWindowsPdfCodeEvidence(page,observation,expectedPrefix,'windows-ocr-ambiguous-code-confirmation',new Set(closeCandidates));
     }
   }
   inferSequentialPdfCodes(pages);
   if (pages.some((page) => !Number.isInteger(page.number))) {
-    const windowsOcr = readWindowsOcrTails(appRoot, pages.filter((page)=>!Number.isInteger(page.number)).map((page) => page.windowsFallbackFile).filter(Boolean), workDir);
-    if (windowsOcr.size) {
-      for (const page of pages) {
-        const observation = windowsOcr.get(path.resolve(page.windowsFallbackFile || ''));
-        if (!observation) continue;
+    const unresolvedPages=pages.filter((page)=>!Number.isInteger(page.number));
+    const windowsOcr = readWindowsOcrTails(appRoot, unresolvedPages.map((page) => page.windowsFallbackFile).filter(Boolean), workDir);
+    let windowsUpdated=false;
+      for (const page of unresolvedPages) {
+        const observation = windowsOcr.codeOutcomes.get(path.resolve(page.windowsFallbackFile || ''))
+          ||{status:'error',errorCode:windowsOcr.ocrDiagnostics.status==='unavailable'?'ocr-unavailable':'no-result'};
         if(!appendWindowsPdfCodeEvidence(page,observation,expectedPrefix))continue;
+        windowsUpdated=true;
         page.number = null;
         delete page.codeEvidence;
         delete page.sequenceScore;
       }
-      inferSequentialPdfCodes(pages);
-    }
+    if(windowsUpdated)inferSequentialPdfCodes(pages);
   }
-  for (const page of pages) delete page.windowsFallbackFile;
+  for (const page of pages) {
+    delete page.windowsFallbackFile;delete page.windowsFallbackSha256;
+  }
   return pages;
 }
 
