@@ -29,8 +29,9 @@ try {
   assert.equal(item.number,17);assert.equal(photoCodeAuditBlockReason(item),null);
   assert.equal(JSON.stringify(item.codeAuditHistory),history);
   assert.equal((await recheckReliablePhotoClaimsWithPdf([item],args.pdfPages)).confirmed,1,'complete plan recheck must accept the newly validated proof');
-  for(const kind of ['pdf-change','photo-change','truncated','incomplete-pages','prior-conflict']) {
+  for(const kind of ['pdf-change','photo-change','photo-changed-before-body','truncated','incomplete-pages','prior-conflict']) {
     const test=make();
+    if(kind==='photo-changed-before-body')fs.writeFileSync(file,'changed before body starts');
     if(kind==='prior-conflict')test.item.pdfRecheck={status:'rejected',reason:'prior'};
     if(kind==='incomplete-pages')test.args.loadPages=async()=>test.data.pages.slice(0,1);
     test.args.createReader=async()=>({read:async()=>{
@@ -43,6 +44,23 @@ try {
     assert.equal(failure.adjudicated?.length||0,0,kind);
     assert.equal(test.item.number,null,kind);
     assert.equal(codeBodyResolution(test.item),null,kind);
+  }
+  for(const kind of ['pdf-bytes','photo-bytes','other-file-same-page','other-page-number','other-index-number','missing-other-page','serialized-label']) {
+    const test=make();
+    assert.equal((await reviewCurrentPdfBodies(test.args)).adjudicated.length,1);
+    if(kind==='pdf-bytes')fs.writeFileSync(pdf,'different PDF with the same page count');
+    if(kind==='photo-bytes')fs.writeFileSync(file,'different photo after body review');
+    if(kind==='other-file-same-page'){
+      const otherPdf=path.join(root,'other.pdf');fs.writeFileSync(otherPdf,'different physical PDF');
+      test.args.pdfPages=test.args.pdfPages.map(p=>({...p,pdf:otherPdf}));
+    }
+    if(kind==='other-page-number')test.args.pdfPages[0].pageNumber=2;
+    if(kind==='other-index-number')test.args.pdfPages[1].number=19;
+    if(kind==='missing-other-page')test.args.pdfPages.pop();
+    const checked=kind==='serialized-label'?JSON.parse(JSON.stringify(test.item)):test.item;
+    const recheck=await recheckReliablePhotoClaimsWithPdf([checked],test.args.pdfPages);
+    assert.equal(recheck.confirmed,0,`post-body source/index substitution: ${kind}`);
+    assert.equal(checked.reliable,false,kind);
   }
 } finally {fs.rmSync(root,{recursive:true,force:true});}
 console.log('Code/body actual collector integration PASS: unresolved candidates, source race, partial corpus and prior conflicts');

@@ -3,6 +3,8 @@
 // Raw contradictory observations are never deleted. A credible opposite code
 // remains a veto even when the page content appears to support one candidate.
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import {validDetectedCodeReview} from './detected-code-reader.mjs';
 import {createBodyClaimAssessor} from './body-content-review.mjs';
 const sha=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -21,6 +23,27 @@ const itemSeal=item=>sha({read:item.detectedCodeRead,history:item.codeAuditHisto
 export function codeBodyResolution(item) {
   const saved=authorizations.get(item);
   return saved&&item?.evidence?.method===codeBodyMethod&&saved.seal===itemSeal(item)?saved.proof:null;
+}
+
+// Recheck the entire physical corpus and its number-to-page mapping, not just
+// a page ordinal (page 1 can occur in every PDF). Caller metadata is not a
+// substitute for reading the current source bytes. A renamed byte-identical
+// PDF is acceptable here; the separate business-date/plan gates still apply.
+export function codeBodySourceBlockReason(item,pdfPages) {
+  const proof=codeBodyResolution(item);
+  if(!proof)return 'code-body-resolution-not-current';
+  try {
+    const fileHash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    if(fileHash(item.file)!==proof.photoSha256)return 'code-body-photo-source-changed';
+    const hashes=new Map();
+    const index=pdfPages.map(p=>{
+      const file=path.resolve(p.pdf||p.file);
+      if(!hashes.has(file))hashes.set(file,fileHash(file));
+      return {pdfSha256:hashes.get(file),pageNumber:p.pageNumber,number:p.number};
+    });
+    if(sha(index)!==proof.indexSha256)return 'code-body-pdf-source-or-index-changed';
+    return null;
+  } catch {return 'code-body-source-unavailable';}
 }
 
 export function codeBodyCandidateForItem(item,index) {

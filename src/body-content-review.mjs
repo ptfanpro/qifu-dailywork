@@ -106,6 +106,12 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
   const pendingViews=new Map();
   let sourcesVerified=false;
   const verifySources=()=>{
+    // Code and body must describe the SAME original bytes, not merely a file
+    // that stayed unchanged during this particular body-reading operation.
+    for(const {item,candidate} of candidates) {
+      if(originals[claims.indexOf(item)].photoSha256!==candidate.photoSha256)
+        throw Error('Photo changed between code and body review');
+    }
     for(const pdf of pdfFiles) {
       const saved=pdfIndexBinding.files.filter(p=>p.name===path.basename(pdf));
       if(saved.length!==1||hash(fs.readFileSync(pdf))!==saved[0].sha256)throw Error('PDF source changed during body review');

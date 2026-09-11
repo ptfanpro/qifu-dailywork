@@ -11,7 +11,7 @@ import { getMachineLocalStateRoot } from './runtime-paths.mjs';
 import {decodeOcrSource,extractOcrCrop,writeImageFile} from './ocr-image.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
 import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
-import {codeBodyResolution,codeBodyMethod} from './code-body-adjudication.mjs';
+import {codeBodyResolution,codeBodyMethod,codeBodySourceBlockReason} from './code-body-adjudication.mjs';
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 import {createPdfPrintCodeEvidence,appendPdfPrintCodeObservation} from './pdf-print-code-evidence.mjs';
 import {readDetectedCodesWithScaleReview,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
@@ -2683,9 +2683,8 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       item.evidence.pdfRecheck={method:'orientation-color-and-global-pdf-bijection',status:'confirmed'};
     } else if (method===codeBodyMethod && codeBodyResolution(item)) {
       const proof=codeBodyResolution(item);
-      const page=claimedPages[0];
-      if(page.pageNumber!==proof.target.pageNumber)reason='code-body-page-identity-changed';
-      else item.evidence.pdfRecheck={method:codeBodyMethod,status:'confirmed',pdfSha256:proof.target.pdfSha256,pageNumber:proof.target.pageNumber};
+      reason=codeBodySourceBlockReason(item,pdfPages);
+      if(!reason)item.evidence.pdfRecheck={method:codeBodyMethod,status:'confirmed',pdfSha256:proof.target.pdfSha256,pageNumber:proof.target.pageNumber};
     } else if (visibleConsensus) {
       item.evidence.pdfRecheck={method:strictVisibleCode
         ? 'strict-visible-code-box-and-pdf-index'
