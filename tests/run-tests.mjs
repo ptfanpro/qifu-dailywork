@@ -37,6 +37,7 @@ import './detected-code-review-regression.mjs';
 import './detected-code-word-review-regression.mjs';
 import './detected-code-raw-line-regression.mjs';
 import './detected-code-scale-review-regression.mjs';
+import './semantic-role-reader-regression.mjs';
 import './replay-comparison-regression.mjs';
 import './photo-review-isolation-regression.mjs';
 import './release-gates-regression.mjs';
