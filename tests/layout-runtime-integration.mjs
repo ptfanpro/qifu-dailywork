@@ -11,6 +11,9 @@ import {stageLayoutRuntime} from '../tools/stage-layout-runtime.mjs';
 import {smokeLayoutRuntime,matchPrintedLayouts,isFreshLayoutObservation} from '../src/layout-runtime.mjs';
 import {verifyRuntimeTree} from '../src/layout-runtime-assets.mjs';
 import {LAYOUT_RUNTIME_MANIFEST_SHA256} from '../src/layout-runtime-lock.mjs';
+import {collectPositionedLayouts,positionedLayoutEvidence} from '../src/positioned-layout-collector.mjs';
+import {visualBodyViewNames} from '../src/pdf-visual-body-evidence.mjs';
+import crypto from 'node:crypto';
 const sharp=createRequire(import.meta.url)('sharp');
 const source=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 const bundle=process.argv[2];if(!bundle||!path.isAbsolute(bundle))throw Error('Explicit reviewed runtime bundle required');
@@ -19,7 +22,7 @@ let app=path.join(run,'application');fs.mkdirSync(app);fs.mkdirSync(path.join(ap
 fs.writeFileSync(path.join(app,'package.json'),JSON.stringify({name:'prayer-local-runner-v9',version:'9.6.8-rc.2'}));
 for(const file of ['layout_runtime_worker.py','printed_layout_geometry.py','layout-runtime-lock.mjs','layout-runtime.mjs','layout-runtime-assets.mjs'])
  fs.copyFileSync(path.join(source,'src',file),path.join(app,'src',file));
-const started=performance.now(),counts={smoke:0,geometry:0,rejected:0};
+const started=performance.now(),counts={smoke:0,geometry:0,positionedGeometry:0,rejected:0};
 console.log('Staging pinned layout runtime into a temporary app snapshot');
 const staged=stageLayoutRuntime(bundle,app);assert.equal(staged.created,true);
 assert.equal(stageLayoutRuntime(bundle,app).created,false);
@@ -50,6 +53,18 @@ const photo=await sharp(photoPixels,{raw:{width:800,height:600,channels:1}}).png
 const result=await matchPrintedLayouts(app,{pages:[{id:'a'.repeat(64)+':1',bytes:page}],photos:[{id:'b'.repeat(64),bytes:photo}]});
 assert.equal(result.results[0].pages[0].evidence.candidate,true);assert.equal(isFreshLayoutObservation(result),true);counts.geometry++;
 assert.equal(result.mayAssignNumber,false);assert.equal(result.results[0].pages[0].evidence.bindingVerified,false);
+const blankViews=(width,height)=>visualBodyViewNames.map(view=>({view,text:'',errors:0,truncated:false,lineCount:0,regions:0,
+ positioned:{schemaVersion:1,dimensions:{width,height},fields:[]}}));
+const photoHash=crypto.createHash('sha256').update(photo).digest('hex');
+const positioned=await collectPositionedLayouts({appRoot:app,pages:[{id:'a'.repeat(64)+':1',source:page,views:blankViews(600,400)}],
+ photos:[{id:photoHash,source:photo,views:blankViews(800,600)}]});
+assert.equal(positioned.comparisons,1);assert.equal(positioned.geometryCandidates,1);assert.equal(positioned.mayAssignNumber,false);
+assert.equal(positionedLayoutEvidence(positioned).results[0].pages.length,1);
+positionedLayoutEvidence(positioned).results.length=0;
+assert.equal(positionedLayoutEvidence(positioned).results.length,1,'returned evidence does not mutate retained observation');
+assert.equal(positionedLayoutEvidence(structuredClone(positioned)),null,'JSON/clone is not live evidence');
+positioned.photos[0].sourceSha256='f'.repeat(64);
+assert.equal(positionedLayoutEvidence(positioned),null,'changed report revokes retained observation');counts.positionedGeometry++;
 for(const relative of ['runtime/layout-python-v1/python312._pth','runtime/layout-python-v1/python.exe','src/layout_runtime_worker.py']){
  const file=path.join(app,relative),bytes=fs.readFileSync(file);
  try{fs.appendFileSync(file,'changed');await assert.rejects(smokeLayoutRuntime(app),/integrity|size/i);counts.rejected++;}

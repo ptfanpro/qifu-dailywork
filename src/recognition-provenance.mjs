@@ -11,7 +11,7 @@ export function recognitionSourceFingerprint(appRoot) {
     'src/scene-semantic-reader.mjs','src/scene-semantic-pixels.mjs','src/scene-semantic-policy.mjs','src/scene-semantic-service.mjs',
     'src/english-ocr-model.mjs','src/code-body-adjudication.mjs','src/body-positioned-observation.mjs',
     'src/layout-runtime.mjs','src/layout-runtime-assets.mjs','src/layout-runtime-lock.mjs',
-    'src/layout_runtime_worker.py','src/printed_layout_geometry.py'];
+    'src/layout_runtime_worker.py','src/printed_layout_geometry.py','src/positioned-layout-collector.mjs'];
   return hash(JSON.stringify(files.map(file=>[file,hash(fs.readFileSync(path.join(appRoot,file)))])));
 }
 export function createPdfIndexBinding(businessDate,pdfFiles,recognizerFingerprint) {

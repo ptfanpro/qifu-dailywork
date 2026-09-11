@@ -2,8 +2,17 @@ import assert from 'node:assert/strict';
 import {adjudicateCodeBody,codeBodyResolution,retainCodeBodyResolution} from '../src/code-body-adjudication.mjs';
 import {photoCodeAuditBlockReason} from '../src/photo-prepare.mjs';
 import {visualBodyViewNames,buildVisualBodyPages} from '../src/pdf-visual-body-evidence.mjs';
+import {horizontalBodyCrop,verticalBodyCrop} from '../src/vertical-body-regions.mjs';
 const hash='a'.repeat(64),pdfHash='b'.repeat(64);
-const views=(text,second=text)=>visualBodyViewNames.map((view,i)=>({view,text:i<2?[text,second][i]:'',errors:0,truncated:false}));
+// Synthetic reader contract only. The geometry collector separately checks
+// these dimensions against real image bytes; these fixtures do not prove OCR.
+const views=(text,second=text)=>visualBodyViewNames.map((view,i)=>{
+  const value=i<2?[text,second][i]:'',dimensions={width:200,height:100};
+  const region={left:.1,top:.2,width:.7,height:.1,score:.99};
+  return {view,text:value,errors:0,truncated:false,lineCount:value?1:0,regions:i<2?1:0,
+    positioned:{schemaVersion:1,dimensions,fields:value?[{regionIndex:0,region,text:value,confidence:.99,
+      crop:(i<2?horizontalBodyCrop:verticalBodyCrop)(region,dimensions,i%2===0?.35:.65)}]:[]}};
+});
 const fields=['松风清境','晨光普照','阖家平安'];
 const other=['海月澄明','竹影清幽','阖家平安'];
 const pages=buildVisualBodyPages([fields,other].map((fieldTexts,i)=>({pdfSha256:pdfHash,pageNumber:i+1,fieldTexts})),

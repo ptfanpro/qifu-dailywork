@@ -20,7 +20,10 @@ try {
       pdfPages:[1,2].map((pageNumber,i)=>({pdf,pageNumber,number:17+i,_localShapeFingerprint:[1]})),
       pdfIndexBinding:{digest:sha('set'),files:[{name:path.basename(pdf),sha256:pdfHash}]},
       claims:[],unresolvedClaims:[item],loadPages:async()=>data.pages,
-      createReader:async()=>({read:async()=>data.views,release:async()=>{}})}};
+      createReader:async()=>({read:async(_bytes,options)=>{
+        assert.equal(options.includePositions,true,'unresolved candidate must preserve positions');
+        return data.views;
+      },release:async()=>{}})}};
   };
   const {item,args}=make(),history=JSON.stringify(item.codeAuditHistory);
   const result=await reviewCurrentPdfBodies(args);
@@ -29,7 +32,8 @@ try {
   assert.equal(item.number,17);assert.equal(photoCodeAuditBlockReason(item),null);
   assert.equal(JSON.stringify(item.codeAuditHistory),history);
   assert.equal((await recheckReliablePhotoClaimsWithPdf([item],args.pdfPages)).confirmed,1,'complete plan recheck must accept the newly validated proof');
-  for(const kind of ['pdf-change','photo-change','photo-changed-before-body','truncated','incomplete-pages','prior-conflict']) {
+  for(const kind of ['pdf-change','photo-change','photo-changed-before-body','truncated','incomplete-pages','prior-conflict',
+    'pdf-change-on-release','photo-change-on-release']) {
     const test=make();
     if(kind==='photo-changed-before-body')fs.writeFileSync(file,'changed before body starts');
     if(kind==='prior-conflict')test.item.pdfRecheck={status:'rejected',reason:'prior'};
@@ -39,12 +43,20 @@ try {
       if(kind==='photo-change')fs.writeFileSync(file,'changed photo');
       if(kind==='truncated')return test.data.views.map(v=>({...v,truncated:true}));
       return test.data.views;
-    },release:async()=>{}});
+    },release:async()=>{
+      if(kind==='pdf-change-on-release')fs.writeFileSync(pdf,'changed after body read');
+      if(kind==='photo-change-on-release')fs.writeFileSync(file,'changed after body read');
+    }});
     const failure=await reviewCurrentPdfBodies(test.args);
     assert.equal(failure.adjudicated?.length||0,0,kind);
     assert.equal(test.item.number,null,kind);
     assert.equal(codeBodyResolution(test.item),null,kind);
   }
+  const short=make();short.data.views=views('阖家平安');
+  const missingGeometry=await reviewCurrentPdfBodies(short.args);
+  assert.equal(missingGeometry.adjudicated.length,0,'missing geometry cannot turn a shared field into identity');
+  assert.equal(missingGeometry.positionedLayoutReview.status,'positioned-layout-unavailable');
+  assert.equal(short.item.number,null);assert.ok(photoCodeAuditBlockReason(short.item));
   for(const kind of ['pdf-bytes','photo-bytes','other-file-same-page','other-page-number','other-index-number','missing-other-page','serialized-label']) {
     const test=make();
     assert.equal((await reviewCurrentPdfBodies(test.args)).adjudicated.length,1);
