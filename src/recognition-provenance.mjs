@@ -13,7 +13,26 @@ export function recognitionSourceFingerprint(appRoot) {
     'src/server-code-reader.mjs','src/prefix-code-policy.mjs',
     'src/layout-runtime.mjs','src/layout-runtime-assets.mjs','src/layout-runtime-lock.mjs',
     'src/layout_runtime_worker.py','src/printed_layout_geometry.py','src/positioned-layout-collector.mjs','src/positioned-body-evidence.mjs'];
-  return hash(JSON.stringify(files.map(file=>[file,hash(fs.readFileSync(path.join(appRoot,file)))])));
+  // Retain mandatory core-file checks, but do not treat this historical list
+  // as exhaustive. A newly imported policy used to be invisible to the cache
+  // fingerprint until someone remembered to edit the list by hand.
+  const required=files.map(file=>[file,hash(fs.readFileSync(path.join(appRoot,file)))]);
+  const sourceFiles=[];
+  const visit=relative=>{
+    const folder=path.join(appRoot,relative);
+    if(fs.lstatSync(folder).isSymbolicLink())throw Error('Source fingerprint cannot follow linked directories');
+    for(const entry of fs.readdirSync(folder,{withFileTypes:true})){
+      const name=`${relative}/${entry.name}`;
+      if(entry.isSymbolicLink())throw Error('Source fingerprint cannot follow linked entries');
+      if(entry.isDirectory())visit(name);
+      else if(entry.isFile()&&/\.(?:mjs|cjs|js|py|json|ps1)$/i.test(entry.name))sourceFiles.push(name);
+    }
+  };
+  visit('src');
+  const entries=new Map(required);
+  for(const file of sourceFiles)entries.set(file,hash(fs.readFileSync(path.join(appRoot,file))));
+  return hash(JSON.stringify({schemaVersion:2,scope:'all-source-code-and-core-runtime',
+    files:[...entries].sort(([a],[b])=>a<b?-1:a>b?1:0)}));
 }
 export function createPdfIndexBinding(businessDate,pdfFiles,recognizerFingerprint) {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)||!recognizerFingerprint)throw Error('PDF index identity is incomplete');

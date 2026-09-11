@@ -12,6 +12,7 @@ import {positionedBodySupport} from './positioned-body-evidence.mjs';
 import {codeModelReviewEvidence,prefixCodeReviewEvidence} from './code-model-review.mjs';
 import {validPositionedBodyViews} from './body-positioned-observation.mjs';
 import {visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
+import {printedDatePrefixSeed,printedDateSupport} from './printed-date-prefix-evidence.mjs';
 const sha=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const id=p=>`${p.pdfSha256}:${p.pageNumber}`;
 const hash=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
@@ -182,7 +183,9 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alterna
   const reads=[read,...(read.nativeScaleReview?[read.nativeScaleReview.read]:[])];
   const all=reads.flatMap(r=>[...r.observations,...r.independent]),strong=all.filter(credible);
   const prefix=prefixCodeReviewEvidence(prefixCodeReview,alternateCodeReview,read,photoSha256);
-  const alternate=alternateCandidate(read,photoSha256,expectedPrefix,all,alternateCodeReview)||prefix;
+  const dateSeed=printedDatePrefixSeed(read,codeModelReviewEvidence(alternateCodeReview,read,photoSha256),expectedPrefix);
+  const alternate=alternateCandidate(read,photoSha256,expectedPrefix,all,alternateCodeReview)||prefix
+    ||(dateSeed?{...dateSeed,modelReviewSha256:sha(alternateCodeReview)}:null);
   if(!alternate&&new Set(strong.map(o=>o.fullCode)).size!==1)return unresolved('credible-code-conflict-or-absence');
   const code=alternate||strong[0];
   if(code.prefix!==expectedPrefix)return unresolved('credible-prefix-conflict');
@@ -197,6 +200,8 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alterna
     target:structuredClone(targets[0]),photoSha256,codeReadSha256:sha(read),indexSha256:sha(index),
     ...(alternate?{modelReviewSha256:alternate.modelReviewSha256,codeSupport:alternate.codeSupport}:{}),
     ...(alternate?.prefixReviewSha256?{prefixReviewSha256:alternate.prefixReviewSha256,codePolicy:alternate.codePolicy}:{}),
+    ...(alternate?.requiresPrintedDate?{requiresPrintedDate:true,fullCodeObserved:false,
+      codePolicy:alternate.codePolicy,observedFullCodes:alternate.observedFullCodes}:{}),
     weakAlternatives:all.filter(o=>o.fullCode!==code.fullCode).length,bindingVerified:false};
 }
 
@@ -237,10 +242,12 @@ export function adjudicateCodeBody(input) {
     if(!Array.isArray(pages)||pages.length!==index.length||new Set(pages.map(id)).size!==pages.length
       ||pages.some(p=>!index.some(q=>id(p)===id(q))))return unresolved('body-corpus-incomplete');
     const assessment=createBodyClaimAssessor(pages)(views,candidate.target);
+    const dateSupport=candidate.requiresPrintedDate?printedDateSupport(input,candidate.target):null;
+    if(candidate.requiresPrintedDate&&!dateSupport)return unresolved('printed-business-date-not-corroborated');
     // A positioned composite can resolve a short/shared-name ambiguity only
     // WITH the original strong full code. Contrary body/code evidence remains
     // a veto; the earlier independent long-field rule remains unchanged.
-    if(!candidate.prefixReviewSha256&&input.positionedLayoutReview&&['observed-body-consistent','no-specific-body-evidence'].includes(assessment.status)){
+    if(!candidate.prefixReviewSha256&&!candidate.requiresPrintedDate&&input.positionedLayoutReview&&['observed-body-consistent','no-specific-body-evidence'].includes(assessment.status)){
       const support=positionedBodySupport(input,candidate.target);
       if(support)return {...candidate,status:'resolved',policy:support.policy,
         bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),positionedSupport:support,assessment,
@@ -258,10 +265,11 @@ export function adjudicateCodeBody(input) {
       // Shared names, template phrases and one-view snippets cannot qualify.
       if(common.length>=2)support.push({views:fields.readings.slice(offset,offset+2).map(r=>r.view),fieldHashes:common});
     }
-    const shortSupport=support.length||candidate.prefixReviewSha256?[]:shortFieldConjunction(views,fields,candidate.target);
+    const shortSupport=support.length||candidate.prefixReviewSha256||candidate.requiresPrintedDate?[]:shortFieldConjunction(views,fields,candidate.target);
     if(!support.length&&!shortSupport.length)return unresolved('insufficient-paired-whole-field-evidence');
     return {...candidate,status:'resolved',policy:support.length?'observed-code-plus-paired-current-body-v1':'observed-code-plus-three-disjoint-short-fields-v1',
       bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),support:support.length?support:shortSupport,assessment,
+      ...(dateSupport?{printedDateSupport:dateSupport}:{}),
       // Page correspondence only, NOT a statement that online order sets or
       // upload counts have been verified. Those gates remain separate.
       pageCorrespondenceVerified:true,bindingVerified:false};

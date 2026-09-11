@@ -88,8 +88,14 @@ two-server-view path remains unchanged.
   the targeted check. `ready` remains false. Old filename/reference agreement
   is not independent ground-truth accuracy or online business acceptance.
 
-The June 13 complete-day rerun at the candidate fingerprint remains unfinished.
-Its launch does not mean it passed. The broader unobserved-code and
+- June 13 complete-day rerun at the same candidate fingerprint finished:
+  48 photos, 45 physical PDF pages, 18 assigned / 30 unresolved, 1883.826 seconds;
+  65 fresh body reads and zero body-cache hits. Against ee54b02dc9c0: two added,
+  zero lost or changed assignments; all 48 raw detector audits unchanged.
+  Both report/source/copy/plan bindings were independently rechecked.
+  `ready` remains false. This is not full-day or annual business acceptance.
+
+The broader unobserved-code and
 body-review eligibility gaps remain open; this repair does not solve every
 residual photo. No production uploads, date-default changes, login changes,
 launcher changes, deployment, release tag or main-branch merge occurred.
