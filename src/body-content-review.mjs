@@ -21,7 +21,15 @@ export function assessBodyClaim(views,pages,claim) {
     const evidence=rankBodyTextEvidence(views.find(v=>v.view===name).text,pages);
     return {view:name,observedGrams:evidence.observedGrams,ranked:evidence.ranked};
   });
-  const candidates=results.map(r=>r.ranked.filter(p=>p.uniqueMatchedGrams>0));
+  const candidates=results.map(r=>r.ranked.filter(p=>p.corroboratedUniqueMatchedGrams>0));
+  // Keep uncorroborated contrary reads visible without turning a single PDF
+  // OCR error into an alleged different order. A real extracted/paired field
+  // still vetoes, even when the claimed page has a much higher score.
+  const uncorroboratedForeignEvidence=results.flatMap(r=>r.ranked
+    .filter(p=>id(p)!==id(claim)&&p.uniqueMatchedGrams>p.corroboratedUniqueMatchedGrams)
+    .map(p=>({view:r.view,pdfSha256:p.pdfSha256,pageNumber:p.pageNumber,
+      uniqueMatchedGrams:p.uniqueMatchedGrams,corroboratedUniqueMatchedGrams:p.corroboratedUniqueMatchedGrams,
+      evidenceSha256:p.uniqueEvidenceSha256})));
   const fieldEvidence=compareBodyFieldEvidence(views,pages);
   const fieldCandidates=fieldEvidence.readings.map(r=>r.ranked.filter(p=>p.specificExactFields>0));
   // Even a non-leading foreign candidate is contrary content, not a vote
@@ -31,7 +39,7 @@ export function assessBodyClaim(views,pages,claim) {
   const pairedForeign=[0,2].some(i=>foreign[i].some(key=>foreign[i+1].includes(key)));
   const status=pairedForeign?'conflicting-body':foreign.some(ps=>ps.length)?'ambiguous-body'
     :candidates.some(ps=>ps.length)||fieldCandidates.some(ps=>ps.length)?'observed-body-consistent':'no-specific-body-evidence';
-  return {status,bindingVerified:false,results,fieldEvidence};
+  return {status,bindingVerified:false,results,fieldEvidence,uncorroboratedForeignEvidence};
 }
 
 export function bodyReviewBlockReason(item) {
