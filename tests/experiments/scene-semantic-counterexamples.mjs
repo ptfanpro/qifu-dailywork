@@ -1,10 +1,10 @@
-// Known-failing safety gate, not a passing recognition benchmark.
+// Historical-failure safety gate, not a passing recognition benchmark.
 // Anonymous global metrics from independently reviewed whole-image examples.
 // No photos, paths, hashes, dates, expected page numbers or customer text.
 // Run explicitly before release: nonzero means these old shortcuts remain unsafe.
 // Safe abstention is allowed; it does not count as correct automatic recognition.
 import {pathToFileURL} from 'node:url';
-import {isLikelyScene,classifySceneVisualScore} from '../../src/photo-prepare.mjs';
+import {isLikelyScene,classifySceneVisualScore,diagnoseLegacySceneMetrics} from '../../src/photo-prepare.mjs';
 
 export const counterexamples = [
   {
@@ -38,11 +38,14 @@ export function evaluateCounterexamples() {
   const rows=counterexamples.map(item=>{
     const likelyScene=isLikelyScene(item);
     const category=likelyScene?classifySceneVisualScore(item.sceneMetrics):null;
-    return {id:item.id,likelyScene,category,
+    const legacy=diagnoseLegacySceneMetrics(item);
+    return {id:item.id,likelyScene,category,legacyDiagnostic:legacy,
+      legacyUnsafeHint:item.role==='paper'?legacy.likelyScene:legacy.category==='scene-lamp',
       unsafeHeuristicDecision:item.role==='paper'?likelyScene:category==='scene-lamp'};
   });
   return {status:'heuristic-safety-counterexamples-not-order-binding',
     cases:rows.length,failures:rows.filter(row=>row.unsafeHeuristicDecision).length,rows,
+    legacyUnsafeHints:rows.filter(row=>row.legacyUnsafeHint).length,
     note:'Global metrics are not independent semantic proof. Zero failures would establish only safe handling of these counterexamples, not restored recognition or release acceptance.'};
 }
 

@@ -3227,25 +3227,33 @@ export function hasDirectVisibleCodeEvidence(item) {
   return false;
 }
 
-export function isLikelyScene(item) {
+function hasScenePaperVeto(item) {
   // Failure to disambiguate a previously proposed printed code does not turn
   // the photographed paper into a scene, even if candles fill its background.
-  if(pdfReviewBlockReason(item)||item?.codeAuditHistory?.length || item?.bodyReviewHistory?.length)return false;
+  if(pdfReviewBlockReason(item)||item?.codeAuditHistory?.length || item?.bodyReviewHistory?.length)return true;
   if(item?.detectedCodeRead && (item.detectedCodeRead.errors || !item.detectedCodeRead.coverage?.completed
     || item.detectedCodeRead.observations?.length || item.detectedCodeRead.independent?.length
-    || item.detectedCodeRead.incompleteTailObserved))return false;
-  if(item?.portableCodeRead && !canUseSceneAfterPortableRead(item.portableCodeRead))return false;
+    || item.detectedCodeRead.incompleteTailObserved))return true;
+  if(item?.portableCodeRead && !canUseSceneAfterPortableRead(item.portableCodeRead))return true;
   // Role evidence is ordered, not blended: a full visible business code that
   // was independently read in adjacent/strict code crops is conclusive paper
   // evidence.  Global colour and brightness heuristics may never overrule it.
-  if (hasDirectVisibleCodeEvidence(item)) return false;
-  // Every live recognition result carries this field, including unavailable
-  // reads. Legacy metric-only objects remain diagnostic fixtures; they cannot
-  // enter live scene allocation without a source-bound semantic observation.
-  if(Object.hasOwn(item,'semanticRoleRead')) {
-    const role=semanticRole(item.semanticRoleRead,item.sourceSha256);
-    return role==='lamp'||role==='water';
-  }
+  return hasDirectVisibleCodeEvidence(item);
+}
+
+export function isLikelyScene(item) {
+  if(!item || hasScenePaperVeto(item))return false;
+  // Absence and explicit unavailability have the same meaning. Dropping the
+  // semantic field (old cache, partial caller, diagnostic object) must never
+  // revive metric-only scene decisions and thereby skip paper recognition.
+  const role=semanticRole(item.semanticRoleRead,item.sourceSha256);
+  return role==='lamp'||role==='water';
+}
+
+// Historical measurements only. This private boolean is deliberately not a
+// production entry gate; expose it solely in a non-authorizing diagnostic.
+function legacyMetricSceneHint(item) {
+  if(!item || hasScenePaperVeto(item))return false;
   const metrics = item.visualMetrics || {};
   const geometry = item.paperGeometry || {};
   const scene = item.sceneMetrics || {};
@@ -3406,6 +3414,13 @@ export function isLikelyScene(item) {
 
 // 只返回匿名视觉结构指标，供真实照片回归测试使用；不运行 OCR，也不读取
 // 姓名、地址或祈愿正文。
+export function diagnoseLegacySceneMetrics(item) {
+  const likelyScene=legacyMetricSceneHint(item);
+  return Object.freeze({method:'legacy-global-metrics-diagnostic-only',likelyScene,
+    category:likelyScene?classifySceneVisualScore(item?.sceneMetrics||{}):null,
+    mayAssign:false,maySkipCodeRecognition:false,mayAuthorizeUpload:false});
+}
+
 export async function diagnosePhotoStructure(file) {
   const paperEvidence = await detectPaperEvidence(file);
   const visualMetrics = await imageVisualMetrics(file);
@@ -3414,7 +3429,7 @@ export async function diagnosePhotoStructure(file) {
     paperGeometry: paperEvidence.geometry,
     visualMetrics,
     sceneMetrics,
-    likelyScene: isLikelyScene({ paperGeometry: paperEvidence.geometry, visualMetrics, sceneMetrics }),
+    ...diagnoseLegacySceneMetrics({ paperGeometry: paperEvidence.geometry, visualMetrics, sceneMetrics }),
   };
 }
 

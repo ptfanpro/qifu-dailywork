@@ -1,3 +1,5 @@
+import {diagnoseLegacySceneMetrics} from '../src/photo-prepare.mjs';
+import './scene-evidence-only-regression.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -1328,22 +1330,32 @@ const occupiedDuplicateSequence=[579,580,581,582,583].map((number,index)=>({
 }));
 inferPhotoGapsAroundExistingNumbers(occupiedDuplicateSequence,new Set([579,580,581,582,583]),new Set([569]));
 assert.equal(occupiedDuplicateSequence[1].number,580);
-assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,score:0.045,width:0.844,top:0.842,height:0.079,boxArea:0.067},visualMetrics:{uniformity:0.288,upperEdgeDensity:0.175,edgeDensity:0.227}}),true);
-assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,score:0.0812,width:1,top:0.875,height:0.125,boxArea:0.125},visualMetrics:{uniformity:0.294,upperEdgeDensity:0.177,edgeDensity:0.229}}),true);
+// Historical metric snapshots remain tested as DIAGNOSTICS, not recognition.
+// Every such input must now abstain at the real production entry gate.
+const legacySceneHint=item=>{
+  assert.equal(isLikelyScene(item),false,'metrics cannot skip numbering');
+  const diagnostic=diagnoseLegacySceneMetrics(item);
+  assert.equal(diagnostic.mayAssign,false);
+  assert.equal(diagnostic.maySkipCodeRecognition,false);
+  assert.equal(diagnostic.mayAuthorizeUpload,false);
+  return diagnostic.likelyScene;
+};
+assert.equal(legacySceneHint({paperGeometry:{usablePaper:false,score:0.045,width:0.844,top:0.842,height:0.079,boxArea:0.067},visualMetrics:{uniformity:0.288,upperEdgeDensity:0.175,edgeDensity:0.227}}),true);
+assert.equal(legacySceneHint({paperGeometry:{usablePaper:false,score:0.0812,width:1,top:0.875,height:0.125,boxArea:0.125},visualMetrics:{uniformity:0.294,upperEdgeDensity:0.177,edgeDensity:0.229}}),true);
 // 2026-08-25 真实故障的脱敏结构回归：近景灯阵被金色灯架连通块误判为
 // 大张黄纸。该照片没有矩形纸张，且全画面极低边缘密度、高均匀度，应归为场景图。
-assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.3311979,width:0.809375,top:0.42917,height:0.57083,fill:0.71685,boxArea:0.4620},visualMetrics:{uniformity:0.67035,upperEdgeDensity:0.01207,edgeDensity:0.03483}}),true);
-assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:true,width:0.72,top:0.20,height:0.60,boxArea:0.43},visualMetrics:{uniformity:0.30,upperEdgeDensity:0.17,edgeDensity:0.22}}),false);
+assert.equal(legacySceneHint({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.3311979,width:0.809375,top:0.42917,height:0.57083,fill:0.71685,boxArea:0.4620},visualMetrics:{uniformity:0.67035,upperEdgeDensity:0.01207,edgeDensity:0.03483}}),true);
+assert.equal(legacySceneHint({paperGeometry:{usablePaper:true,rectangularPaper:true,width:0.72,top:0.20,height:0.60,boxArea:0.43},visualMetrics:{uniformity:0.30,upperEdgeDensity:0.17,edgeDensity:0.22}}),false);
 // 2026-08-25 供水全景：金色台阶会形成一个横跨整幅图的巨大“黄纸”色块，
 // 但它没有矩形纸张边界，必须进入场景图而不是福单 OCR。
-assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.4971875,left:0,top:0.3,width:1,height:0.7,right:1,bottom:1,fill:0.710267857,boxArea:0.7},visualMetrics:{edgeDensity:0.176145833,upperEdgeDensity:0.164973958,uniformity:0.4201041667}}),true);
+assert.equal(legacySceneHint({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.4971875,left:0,top:0.3,width:1,height:0.7,right:1,bottom:1,fill:0.710267857,boxArea:0.7},visualMetrics:{edgeDensity:0.176145833,upperEdgeDensity:0.164973958,uniformity:0.4201041667}}),true);
 // 2026-08-26 的供水场景含远处红纸，旧版把下半幅连通色块误作福单主体。
-assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.223867,left:0.146875,top:0.541667,width:0.853125,height:0.458333,right:1,bottom:1,fill:0.572527,boxArea:0.391016},visualMetrics:{edgeDensity:0.228633,upperEdgeDensity:0.189141,uniformity:0.323086}}),true);
+assert.equal(legacySceneHint({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.223867,left:0.146875,top:0.541667,width:0.853125,height:0.458333,right:1,bottom:1,fill:0.572527,boxArea:0.391016},visualMetrics:{edgeDensity:0.228633,upperEdgeDensity:0.189141,uniformity:0.323086}}),true);
 // 同批第二张供灯图上半部细节略多，但色块很小、无可用纸张且整体仍是
 // 高均匀度低边缘灯阵，必须与另一张供灯图一起进入场景分类。
-assert.equal(isLikelyScene({paperGeometry:{usablePaper:false,rectangularPaper:false,score:0.054023,left:0.121875,top:0.366667,width:0.23125,height:0.3875,right:0.353125,bottom:0.754167,fill:0.602877,boxArea:0.089609},visualMetrics:{edgeDensity:0.102904,upperEdgeDensity:0.085456,uniformity:0.542747}}),true);
+assert.equal(legacySceneHint({paperGeometry:{usablePaper:false,rectangularPaper:false,score:0.054023,left:0.121875,top:0.366667,width:0.23125,height:0.3875,right:0.353125,bottom:0.754167,fill:0.602877,boxArea:0.089609},visualMetrics:{edgeDensity:0.102904,upperEdgeDensity:0.085456,uniformity:0.542747}}),true);
 // 同批近景福单即使纸张与右边缘相连、矩形标记失败，也不能被新场景规则误伤。
-assert.equal(isLikelyScene({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.520964,left:0.171875,top:0.15,width:0.828125,height:0.704167,right:1,bottom:0.854167,fill:0.893379,boxArea:0.583138},visualMetrics:{edgeDensity:0.114453,upperEdgeDensity:0.089102,uniformity:0.512318}}),false);
+assert.equal(legacySceneHint({paperGeometry:{usablePaper:true,rectangularPaper:false,score:0.520964,left:0.171875,top:0.15,width:0.828125,height:0.704167,right:1,bottom:0.854167,fill:0.893379,boxArea:0.583138},visualMetrics:{edgeDensity:0.114453,upperEdgeDensity:0.089102,uniformity:0.512318}}),false);
 // 2026-08-27 真实批次的匿名视觉回归：两张供灯及一张供水必须仍是场景；
 // 清晰红/黄福单即使纸色连通域接到底边，也不能再被提前当作场景跳过 OCR。
 const august27Scenes=[
@@ -1351,7 +1363,7 @@ const august27Scenes=[
   {paperGeometry:{usablePaper:false,rectangularPaper:false,score:.047318,width:.334375,top:.366667,height:.279167,fill:.506905,boxArea:.093346},visualMetrics:{edgeDensity:.075898,upperEdgeDensity:.068906,uniformity:.568646},sceneMetrics:{darkRatio:.76599}},
   {paperGeometry:{usablePaper:false,rectangularPaper:false,score:.26112,width:1,top:.625,height:.375,fill:.696319,boxArea:.375,bottom:1},visualMetrics:{edgeDensity:.233516,upperEdgeDensity:.191771,uniformity:.314271},sceneMetrics:{darkRatio:.141979}},
 ];
-assert.ok(august27Scenes.every((item)=>isLikelyScene(item)));
+assert.ok(august27Scenes.every((item)=>legacySceneHint(item)));
 // 2026-08-28 两张未分类场景的匿名指标：暗场灯阵被金色台阶误成“可用纸张”，
 // 白天供水台阶的黄色连通域填充率只比旧阈值低 0.08%。两者都应在 OCR 前
 // 进入场景分类，同时不能放宽到下方的真实福单集合。
@@ -1362,8 +1374,8 @@ const august28Scenes=[
 // The first altar's colour component is also compatible with a candle-lit
 // sheet. Dark/warm metrics alone cannot authorize skipping its code readers.
 // Keep the known scene label as a reference, not proof of the heuristic.
-assert.equal(isLikelyScene(august28Scenes[0]),false);
-assert.equal(isLikelyScene(august28Scenes[1]),true);
+assert.equal(legacySceneHint(august28Scenes[0]),false);
+assert.equal(legacySceneHint(august28Scenes[1]),true);
 const august27Papers=[
   {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.227461,width:.834375,top:.504167,height:.495833,fill:.549806,boxArea:.413711,bottom:1},visualMetrics:{edgeDensity:.202188,upperEdgeDensity:.137773,uniformity:.424102},sceneMetrics:{darkRatio:.411875}},
   {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.223685,width:.89375,top:.5125,height:.4875,fill:.513388,boxArea:.435703,bottom:1},visualMetrics:{edgeDensity:.201172,upperEdgeDensity:.14069,uniformity:.408021},sceneMetrics:{darkRatio:.411406}},
@@ -1374,16 +1386,16 @@ const august27Papers=[
   {paperGeometry:{usablePaper:false,rectangularPaper:false,score:.193086,width:1,top:.55,height:.45,fill:.42908,boxArea:.45,bottom:1},visualMetrics:{edgeDensity:.226107,upperEdgeDensity:.143294,uniformity:.430495},sceneMetrics:{darkRatio:.329167}},
   {paperGeometry:{usablePaper:true,rectangularPaper:false,score:.167214,width:.76875,top:.529167,height:.470833,fill:.461976,boxArea:.361953,bottom:1},visualMetrics:{edgeDensity:.232982,upperEdgeDensity:.150599,uniformity:.419948},sceneMetrics:{darkRatio:.384063}},
 ];
-assert.ok(august27Papers.every((item)=>!isLikelyScene(item)));
+assert.ok(august27Papers.every((item)=>!legacySceneHint(item)));
 // 2026-08-29 的两张夜间灯阵被金色台阶误识别成宽“可用纸张”。低文字边缘、
 // 暖色高光和暗场三项同时成立时应先按场景处理；同批黄纸福单的文字边缘
 // 明显更高，不能被这条规则吞掉。
-assert.equal(isLikelyScene({
+assert.equal(legacySceneHint({
   paperGeometry:{rectangularPaper:false,usablePaper:true,width:.897,height:.633,boxArea:.568},
   visualMetrics:{edgeDensity:.068,upperEdgeDensity:.023,uniformity:.577},
   sceneMetrics:{luminance:91.8,warmBrightRatio:.155,darkRatio:.405},
 }),true);
-assert.equal(isLikelyScene({
+assert.equal(legacySceneHint({
   paperGeometry:{rectangularPaper:false,usablePaper:true,width:.85,height:.45,boxArea:.38},
   visualMetrics:{edgeDensity:.15,upperEdgeDensity:.08,uniformity:.45},
   sceneMetrics:{luminance:79.8,warmBrightRatio:.16,darkRatio:.48},
@@ -1394,7 +1406,7 @@ const august30LampScenes=[
   {paperGeometry:{rectangularPaper:false,usablePaper:false,width:1,height:.692,boxArea:.692,fill:.214},visualMetrics:{edgeDensity:.146,upperEdgeDensity:.070,uniformity:.438},sceneMetrics:{luminance:78.2,warmBrightRatio:.113,darkRatio:.524}},
   {paperGeometry:{rectangularPaper:false,usablePaper:true,width:.956,height:.567,boxArea:.542,fill:.350},visualMetrics:{edgeDensity:.123,upperEdgeDensity:.038,uniformity:.487},sceneMetrics:{luminance:70.5,warmBrightRatio:.111,darkRatio:.575}},
 ];
-assert.ok(august30LampScenes.every((item)=>isLikelyScene(item)));
+assert.ok(august30LampScenes.every((item)=>legacySceneHint(item)));
 // 2026-09-01 真实故障的匿名结构回归：两张远景灯阵隔着玻璃拍摄，火焰
 // 高光面积很小，墙面红色灯牌又被误成可用纸张。它们必须在 PDF 指纹前
 // 归为场景，不能再制造已经占用编号的假冲突。
@@ -1402,22 +1414,22 @@ const september1DistantLampScenes=[
   {paperGeometry:{left:.134375,top:.4375,width:.4125,height:.541667,right:.546875,bottom:.979167,score:.101406,fill:.453846,boxArea:.223438,rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.089818,upperEdgeDensity:.052995,uniformity:.532474},sceneMetrics:{luminance:56.575,warmBrightRatio:.024948,darkRatio:.693646}},
   {paperGeometry:{left:.153125,top:.379167,width:.75625,height:.45,right:.909375,bottom:.829167,score:.126927,fill:.372972,boxArea:.340313,rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.092461,upperEdgeDensity:.058477,uniformity:.504583},sceneMetrics:{luminance:53.755,warmBrightRatio:.036615,darkRatio:.698438}},
 ];
-assert.ok(september1DistantLampScenes.every((item)=>isLikelyScene(item)));
+assert.ok(september1DistantLampScenes.every((item)=>legacySceneHint(item)));
 // 边缘条件分别保护暗色福单、无暖色火焰的夜景和普通低曝光照片，防止
 // 为两张实拍场景放宽成单纯的“图片很暗”。
-assert.equal(isLikelyScene({paperGeometry:{rectangularPaper:true,usablePaper:true},visualMetrics:{edgeDensity:.09,upperEdgeDensity:.05,uniformity:.53},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.03}}),false);
-assert.equal(isLikelyScene({paperGeometry:{rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.09,upperEdgeDensity:.05,uniformity:.53},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.01}}),false);
-assert.equal(isLikelyScene({paperGeometry:{rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.14,upperEdgeDensity:.10,uniformity:.40},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.03}}),false);
+assert.equal(legacySceneHint({paperGeometry:{rectangularPaper:true,usablePaper:true},visualMetrics:{edgeDensity:.09,upperEdgeDensity:.05,uniformity:.53},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.03}}),false);
+assert.equal(legacySceneHint({paperGeometry:{rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.09,upperEdgeDensity:.05,uniformity:.53},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.01}}),false);
+assert.equal(legacySceneHint({paperGeometry:{rectangularPaper:false,usablePaper:true},visualMetrics:{edgeDensity:.14,upperEdgeDensity:.10,uniformity:.40},sceneMetrics:{luminance:56,darkRatio:.70,warmBrightRatio:.03}}),false);
 // 2026-09-02 fourth scene, anonymized: the side-angle lamp image has slightly
 // more flame edges than the distant-glass pair but no usable sheet and an even
 // more uniform dark background. It must be reported as the third lamp scene,
 // not as an unreadable blessing photo. The three controls prevent a dim paper,
 // a flame-free night image, or a detailed low-light image from entering it.
 const september2ExtraLampScene={paperGeometry:{left:.25625,top:.170833,width:.53125,height:.475,right:.7875,bottom:.645833,score:.07625,fill:.302167,boxArea:.252344,rectangularPaper:false,usablePaper:false},visualMetrics:{edgeDensity:.077344,upperEdgeDensity:.073542,uniformity:.63832},sceneMetrics:{luminance:54.0144,warmBrightRatio:.03401,darkRatio:.681198}};
-assert.equal(isLikelyScene(september2ExtraLampScene),true);
-assert.equal(isLikelyScene({...september2ExtraLampScene,paperGeometry:{...september2ExtraLampScene.paperGeometry,usablePaper:true}}),false);
-assert.equal(isLikelyScene({...september2ExtraLampScene,sceneMetrics:{...september2ExtraLampScene.sceneMetrics,warmBrightRatio:.015}}),false);
-assert.equal(isLikelyScene({...september2ExtraLampScene,visualMetrics:{...september2ExtraLampScene.visualMetrics,edgeDensity:.12,uniformity:.50}}),false);
+assert.equal(legacySceneHint(september2ExtraLampScene),true);
+assert.equal(legacySceneHint({...september2ExtraLampScene,paperGeometry:{...september2ExtraLampScene.paperGeometry,usablePaper:true}}),false);
+assert.equal(legacySceneHint({...september2ExtraLampScene,sceneMetrics:{...september2ExtraLampScene.sceneMetrics,warmBrightRatio:.015}}),false);
+assert.equal(legacySceneHint({...september2ExtraLampScene,visualMetrics:{...september2ExtraLampScene.visualMetrics,edgeDensity:.12,uniformity:.50}}),false);
 // 2026-09-03 real failure, anonymized: the central stepped water altar formed
 // a large bright page-coloured component. It is a scene when no code is read,
 // while a full adjacent-line code consensus is conclusive paper evidence and
@@ -1427,10 +1439,10 @@ const september3CentralWaterScene={
   visualMetrics:{edgeDensity:.16,upperEdgeDensity:.11,uniformity:.42},
   sceneMetrics:{luminance:125.09,warmBrightRatio:.03,darkRatio:.123},
 };
-assert.equal(isLikelyScene(september3CentralWaterScene),true);
+assert.equal(legacySceneHint(september3CentralWaterScene),true);
 const directCodeOverScene={...september3CentralWaterScene,reliable:true,number:37,evidence:{method:'paddleocr-onnx-adaptive-right-line-consensus',votes:2,prefixDistance:0,maxConfidence:90}};
 assert.equal(hasDirectVisibleCodeEvidence(directCodeOverScene),true);
-assert.equal(isLikelyScene(directCodeOverScene),false);
+assert.equal(legacySceneHint(directCodeOverScene),false);
 
 // 同批清晰福单的纸色连通域会把木架也包进去，旧版据此误选“竖版”裁框，
 // 并在 y=47.5% 处截到神像底座。新构图的编号实际位于约 y=50%~53%。
