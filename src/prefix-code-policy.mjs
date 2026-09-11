@@ -23,11 +23,23 @@ export function prefixReviewSeed(read,rows) {
 export function prefixReviewSupport(read,priorRows,rows) {
  const seed=prefixReviewSeed(read,priorRows);
  if(!seed||!Array.isArray(rows)||rows.length!==2)return null;
+ const originalWord=read.observations.find(o=>o.index===seed.index&&o.confidence>=.85)?.fullCode;
  for(const r of rows){
   const prior=priorRows.find(p=>p.index===r.index&&p.padding===r.padding);
   if(!prior||!sameCrop(prior.crop,r.crop)||prior.cropSha256!==r.cropSha256||r.confidence<.85
-   ||r.incompleteTailObserved||r.codes?.length!==1||r.codes[0].fullCode!==seed.fullCode)return null;
+   ||r.incompleteTailObserved||r.codes?.length!==1)return null;
  }
  if(new Set(rows.map(r=>r.padding)).size!==2)return null;
- return {...seed,codeSupport:structuredClone(rows),codePolicy:'stable-original-tail-plus-two-prefix-models-v1'};
+ const exact=rows.filter(r=>r.codes[0].fullCode===seed.fullCode).length;
+ if(exact===2)return {...seed,codeSupport:structuredClone(rows),codePolicy:'stable-original-tail-plus-two-prefix-models-v1'};
+ // A mixed server pair is still a PREFIX ambiguity, not a different order
+ // number, when it contains only the already-observed original word and the
+ // expected word. Require BOTH prior-model crops above the high-confidence
+ // floor (the legacy two-server-view path allows one weaker prior crop).
+ // This supplies only a body-review candidate. The caller still requires two
+ // distinct paired whole PDF fields; no geometry/short-field fallback, vote,
+ // filename, missing slot or prefix substitution can authorize this route.
+ if(exact!==1||priorRows.some(r=>r.confidence<.85)
+   ||rows.some(r=>![seed.fullCode,originalWord].includes(r.codes[0].fullCode)))return null;
+ return {...seed,codeSupport:structuredClone(rows),codePolicy:'stable-tail-cross-view-prefix-plus-body-v1'};
 }

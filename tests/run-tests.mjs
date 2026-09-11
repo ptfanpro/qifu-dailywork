@@ -60,6 +60,7 @@ import './body-short-field-guard-regression.mjs';
 import './code-body-adjudication-regression.mjs';
 import './code-model-review-regression.mjs';
 import './prefix-code-review-regression.mjs';
+import './cross-view-prefix-body-regression.mjs';
 import './code-body-collector-regression.mjs';
 import './code-body-restart-regression.mjs';
 import './body-pdf-corroboration-regression.mjs';
