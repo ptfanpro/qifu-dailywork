@@ -14,6 +14,7 @@ import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-revie
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 import {createPdfPrintCodeEvidence,appendPdfPrintCodeObservation} from './pdf-print-code-evidence.mjs';
 import {readDetectedCodes,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
+import {readDetectedObservation,detectedRuntimeFingerprint} from './detected-observation-cache.mjs';
 import {pdfReviewBlockReason,recordPdfClaimReview,createPhotoReviewExclusions,reviewExcludedPhotoNames,assertPhotoReviewIsolation} from './photo-review-isolation.mjs';
 export {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 
@@ -4096,9 +4097,17 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   const worker = await createOcrWorker(appRoot);
   let pdfPages;
   let detectedDetectorPromise=null;
+  const detectedRuntime=detectedRuntimeFingerprint(appRoot,path.join(getMachineLocalStateRoot(),'cache','ocr'));
+  let detectedCacheHits=0;
   const detectedCodeServices={read:async args=>{
-    detectedDetectorPromise ||= createTextDetector(appRoot,path.join(appRoot,'models/paddleocr-zh-v4/ch_PP-OCRv4_det_mobile.onnx'));
-    return readPhotoDetectedCode(args,await detectedDetectorPromise);
+    const result=await readDetectedObservation({cacheDir:path.join(workDir,'detected-observation-cache'),
+      source:fs.readFileSync(args.file),fingerprint:pdfIndexBinding.recognizerFingerprint,runtimeFingerprint:detectedRuntime,
+      prefix:args.expectedPrefix,maxRegions:100,read:async source=>{
+        detectedDetectorPromise ||= createTextDetector(appRoot,path.join(appRoot,'models/paddleocr-zh-v4/ch_PP-OCRv4_det_mobile.onnx'));
+        return readDetectedCodes(await detectedDetectorPromise,appRoot,source,args.expectedPrefix,{worker:args.worker,maxRegions:100});
+      }});
+    if(result.cacheHit)onProgress?.(`已复用 ${++detectedCacheHits} 张同源同模型的完整编号原始观察；编号和 PDF 归属仍重新校验。`);
+    return result.observation;
   }};
   const recognized = [];
   const numericCodeRepairs = [];

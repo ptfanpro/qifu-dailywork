@@ -60,6 +60,8 @@ import './experiments/detected-code-observation-regression.mjs';
 import './experiments/detection-cache-regression.mjs';
 import './experiments/tiled-text-regions-regression.mjs';
 import './experiments/code-window-context-regression.mjs';
+import './experiments/code-glyph-evidence-regression.mjs';
+import './detected-observation-cache-regression.mjs';
 import './experiments/body-text-evidence-regression.mjs';
 import './experiments/chinese-reader-regression.mjs';
 import './experiments/body-probe-summary-regression.mjs';

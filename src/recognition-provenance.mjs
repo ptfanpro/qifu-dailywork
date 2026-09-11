@@ -6,7 +6,7 @@ export function recognitionSourceFingerprint(appRoot) {
   const files=['src/photo-prepare.mjs','src/local-ocr.mjs','src/ocr-image.mjs','src/scene-structure.mjs','src/recognition-provenance.mjs','ui/Read-WindowsOcr.ps1',
     'src/body-content-review.mjs','src/chinese-body-reader.mjs','src/body-text-detector.mjs',
     'src/vertical-body-regions.mjs','src/body-text-evidence.mjs','src/pdf-visual-body-evidence.mjs','src/body-field-evidence.mjs',
-    'src/detected-code-reader.mjs','src/printed-code-parser.mjs','src/pdf-print-code-evidence.mjs','src/body-observation-cache.mjs',
+    'src/detected-code-reader.mjs','src/detected-observation-cache.mjs','src/printed-code-parser.mjs','src/pdf-print-code-evidence.mjs','src/body-observation-cache.mjs',
     'src/photo-review-isolation.mjs','src/photo-plan-gate.mjs','src/photos.mjs'];
   return hash(JSON.stringify(files.map(file=>[file,hash(fs.readFileSync(path.join(appRoot,file)))])));
 }
