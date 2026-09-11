@@ -63,6 +63,7 @@ import './experiments/fixed-context-regression.mjs';
 import './experiments/center-context-regression.mjs';
 import './experiments/text-layout-regression.mjs';
 import './experiments/siglip2-vision-tests.mjs';
+import './experiments/siglip2-patches-test.mjs';
 import './experiments/detected-code-observation-regression.mjs';
 import './experiments/detection-cache-regression.mjs';
 import './experiments/tiled-text-regions-regression.mjs';
