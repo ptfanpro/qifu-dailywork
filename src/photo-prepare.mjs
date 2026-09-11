@@ -11,7 +11,8 @@ import { getMachineLocalStateRoot } from './runtime-paths.mjs';
 import {decodeOcrSource,extractOcrCrop,writeImageFile} from './ocr-image.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
 import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
-import {codeBodyResolution,codeBodyMethod,codeBodySourceBlockReason} from './code-body-adjudication.mjs';
+import {codeBodyResolution,codeBodyMethod,codeBodySourceBlockReason,codeBodyModelReviewEligible} from './code-body-adjudication.mjs';
+import {collectCodeModelReviews} from './code-model-review.mjs';
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 import {createPdfPrintCodeEvidence,appendPdfPrintCodeObservation} from './pdf-print-code-evidence.mjs';
 import {readDetectedCodesWithScaleReview,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
@@ -4387,15 +4388,20 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     if(existing)existing.number=repair.to;
     else bodyClaims.push({file:repair.source,number:repair.to,reliable:true,evidence:repair.evidence});
   }
+  const modelReviewIndex=pdfPages.map(p=>({pdfSha256:pdfIndexBinding.files.find(f=>f.name===path.basename(p.pdf||p.file||''))?.sha256,
+    pageNumber:p.pageNumber,number:p.number}));
+  const modelReview=await collectCodeModelReviews({appRoot,onProgress,
+    items:recognized.filter(item=>codeBodyModelReviewEligible(item,modelReviewIndex))});
   const bodyClaimReview=await reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndexBinding,claims:bodyClaims,onProgress,
     cacheDir:path.join(workDir,'body-observation-cache'),unresolvedClaims:recognized.filter(item=>!item.reliable)});
+  bodyClaimReview.modelReview=modelReview;
   const adjudicated=bodyClaimReview.adjudicated||[];
   if(adjudicated.length) {
     bodyClaims.push(...adjudicated);
     const recheck=await recheckReliablePhotoClaimsWithPdf(adjudicated,pdfPages,onProgress);
     for(const key of ['attempted','confirmed','rejected','inconclusive'])pdfClaimRecheck[key]=(pdfClaimRecheck[key]||0)+(recheck[key]||0);
     pdfClaimRecheck.diagnostics.push(...recheck.diagnostics);
-    onProgress?.(`编号与正文联合复核：${recheck.confirmed} 张按原图完整编号和当前 PDF 正文确认；原始低置信度异读已保留，强冲突仍隔离。`);
+    onProgress?.(`编号与正文联合复核：${recheck.confirmed} 张按原图完整编号和当前 PDF 正文确认；原始异读已保留，未解决冲突仍隔离。`);
   }
   // Runtime-only item references/authorizations never become reusable cache
   // decisions. The persisted plan keeps their source-bound proof separately.

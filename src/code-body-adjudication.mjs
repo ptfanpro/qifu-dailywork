@@ -1,13 +1,15 @@
 // A positive join of an observed full code and current, physical PDF content.
 // Not a body-ranking resolver: no missing slots, filenames or assigned peers.
-// Raw contradictory observations are never deleted. A credible opposite code
-// remains a veto even when the page content appears to support one candidate.
+// Raw contradictory observations are never deleted. Same-region MODEL
+// disagreement needs a fresh alternate observation plus actual page content;
+// a PDF/body score alone cannot clear it. Independent opposite consensus vetoes.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {validDetectedCodeReview} from './detected-code-reader.mjs';
 import {createBodyClaimAssessor} from './body-content-review.mjs';
 import {positionedBodySupport} from './positioned-body-evidence.mjs';
+import {codeModelReviewEvidence} from './code-model-review.mjs';
 const sha=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const id=p=>`${p.pdfSha256}:${p.pageNumber}`;
 const hash=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
@@ -17,7 +19,7 @@ const credible=o=>o.confidence>=(o.engine==='paddle'?.65:30);
 const authorizations=new WeakMap();
 export const codeBodyMethod='code-and-current-pdf-body-adjudication';
 const itemSeal=item=>sha({read:item.detectedCodeRead,history:item.codeAuditHistory,
-  sourceSha256:item.sourceSha256,number:item.number,proof:item.codeBodyAdjudication});
+  sourceSha256:item.sourceSha256,number:item.number,proof:item.codeBodyAdjudication,alternate:item.alternateCodeReview});
 
 // A serialized label cannot waive an old audit. A fresh plan must recompute
 // the join, then gets a process-local authorization tied to immutable raw reads.
@@ -47,7 +49,7 @@ export function codeBodySourceBlockReason(item,pdfPages) {
   } catch {return 'code-body-source-unavailable';}
 }
 
-export function codeBodyCandidateForItem(item,index) {
+function freshItemBlock(item) {
   if(item?.reliable||item?.pdfRecheck||item?.pdfReviewHistory||item?.bodyReviewHistory||item?.portableCodeRead)
     return unresolved('prior-or-independent-review-present');
   const read=item?.detectedCodeRead,history=item?.codeAuditHistory;
@@ -62,7 +64,21 @@ export function codeBodyCandidateForItem(item,index) {
     confidence:o.confidence,index:o.index,padding:o.padding,crop});
   if(!Array.isArray(audit.observations)||sha(audit.observations.map(o=>normalize(o,o.cropBounds)))
     !==sha(raw.map(o=>normalize(o,o.crop))))return unresolved('audit-observations-changed');
-  const candidate=codeBodyCandidate({read,expectedPrefix:read.expectedPrefix,photoSha256:item.sourceSha256,index});
+  return null;
+}
+
+export function codeBodyModelReviewEligible(item,index){
+  if(freshItemBlock(item)||!validateRead(item.detectedCodeRead,item.sourceSha256)||item.detectedCodeRead.nativeScaleReview
+    ||Number.isInteger(item.observedOcrNumber))return false;
+  const read=item.detectedCodeRead,rows=[...read.observations,...read.independent];
+  return codeBodyCandidateForItem(item,index).status!=='candidate'&&rows.some(credible)
+    &&new Set(rows.map(o=>o.index)).size<=4;
+}
+
+export function codeBodyCandidateForItem(item,index) {
+  const block=freshItemBlock(item);if(block)return block;
+  const read=item.detectedCodeRead;
+  const candidate=codeBodyCandidate({read,expectedPrefix:read.expectedPrefix,photoSha256:item.sourceSha256,index,alternateCodeReview:item.alternateCodeReview});
   if(Number.isInteger(item.observedOcrNumber)&&item.observedOcrNumber!==candidate.number)return unresolved('prior-visible-code-conflict');
   return candidate;
 }
@@ -71,7 +87,7 @@ export function retainCodeBodyResolution(item,{pages,views,index,pdfSetDigest,po
   const candidate=codeBodyCandidateForItem(item,index);
   if(candidate.status!=='candidate'||!hash(pdfSetDigest))return candidate;
   const result=adjudicateCodeBody({read:item.detectedCodeRead,expectedPrefix:item.detectedCodeRead.expectedPrefix,
-    photoSha256:item.sourceSha256,pages,views,index,positionedLayoutReview});
+    photoSha256:item.sourceSha256,pages,views,index,positionedLayoutReview,alternateCodeReview:item.alternateCodeReview});
   if(result.status!=='resolved')return result;
   const proof={...result,pdfSetDigest};
   // Preserve the raw unresolved audit as evidence of WHY adjudication ran.
@@ -124,7 +140,37 @@ function validateRead(read,photoSha256) {
   return read.readings.every(r=>all.filter(o=>o.preprocessing===undefined&&key(o)===key(r)).length===r.codeCount);
 }
 
-export function codeBodyCandidate({read,expectedPrefix,photoSha256,index}) {
+function oneEdit(a,b){
+  if(a===b)return true;if(Math.abs(a.length-b.length)>1)return false;
+  let i=0,j=0,edits=0;
+  while(i<a.length&&j<b.length){if(a[i]===b[j]){i++;j++;continue;}if(++edits>1)return false;
+    if(a.length>=b.length)i++;if(b.length>=a.length)j++;}
+  return edits+(a.length-i)+(b.length-j)<=1;
+}
+
+function alternateCandidate(read,photoSha256,expectedPrefix,all,report){
+  const rows=codeModelReviewEvidence(report,read,photoSha256);
+  if(!rows||rows.some(r=>r.incompleteTailObserved))return null;
+  const observations=rows.flatMap(r=>r.codes.map(c=>({...c,confidence:r.confidence,index:r.index,padding:r.padding,crop:r.crop})));
+  const credibleNew=observations.filter(o=>o.confidence>=.65);
+  if(new Set(credibleNew.map(o=>o.fullCode)).size!==1)return null;
+  const code=credibleNew[0];if(!code||code.prefix!==expectedPrefix)return null;
+  const support=observations.filter(o=>o.fullCode===code.fullCode&&o.confidence>=.85);
+  const sameRegion=support.filter(o=>o.index===code.index);
+  if(!sameRegion.some(a=>sameRegion.some(b=>a.padding!==b.padding&&!sameCrop(a.crop,b.crop))))return null;
+  const strong=all.filter(credible);
+  if(!strong.some(o=>o.index===code.index&&o.fullCode===code.fullCode&&o.confidence>=(o.engine==='paddle'?.85:30)))return null;
+  if(strong.some(o=>o.index!==code.index||!oneEdit(o.fullCode,code.fullCode)))return null;
+  // Repeated agreement of BOTH original engines on an opposite complete word
+  // remains a veto. Two paddings or two models from one family are not votes
+  // that can outnumber an independently established opposite-code consensus.
+  for(const opposite of new Set(strong.filter(o=>o.fullCode!==code.fullCode).map(o=>o.fullCode))){
+    if(['paddle','tesseract'].every(engine=>new Set(strong.filter(o=>o.engine===engine&&o.fullCode===opposite).map(o=>o.padding)).size===2))return null;
+  }
+  return {...code,modelReviewSha256:sha(report),codeSupport:structuredClone(sameRegion)};
+}
+
+export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alternateCodeReview}) {
   if(!validateRead(read,photoSha256))return unresolved('code-read-incomplete-or-invalid');
   if(!/^\d{3,4}$/.test(expectedPrefix)||!Array.isArray(index)||!index.length
     ||index.some(p=>!hash(p.pdfSha256)||!Number.isInteger(p.pageNumber)||p.pageNumber<1
@@ -133,18 +179,20 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index}) {
     return unresolved('pdf-index-incomplete-or-duplicate');
   const reads=[read,...(read.nativeScaleReview?[read.nativeScaleReview.read]:[])];
   const all=reads.flatMap(r=>[...r.observations,...r.independent]),strong=all.filter(credible);
-  if(new Set(strong.map(o=>o.fullCode)).size!==1)return unresolved('credible-code-conflict-or-absence');
-  const code=strong[0];
+  const alternate=alternateCandidate(read,photoSha256,expectedPrefix,all,alternateCodeReview);
+  if(!alternate&&new Set(strong.map(o=>o.fullCode)).size!==1)return unresolved('credible-code-conflict-or-absence');
+  const code=alternate||strong[0];
   if(code.prefix!==expectedPrefix)return unresolved('credible-prefix-conflict');
   // V17's 0.85 high-confidence digit floor, applied to TWO original crops
   // from the SAME detector region. These are not called independent engines.
   const good=read.observations.filter(o=>o.fullCode===code.fullCode&&o.confidence>=.85);
-  if(!good.some(o=>good.some(p=>o.index===p.index&&o.padding!==p.padding&&!sameCrop(o.crop,p.crop))))
+  if(!alternate&&!good.some(o=>good.some(p=>o.index===p.index&&o.padding!==p.padding&&!sameCrop(o.crop,p.crop))))
     return unresolved('insufficient-high-confidence-code-views');
   const targets=index.filter(p=>p.number===code.number);
   if(targets.length!==1)return unresolved('observed-code-outside-pdf');
   return {schemaVersion:1,status:'candidate',number:code.number,fullCode:code.fullCode,
     target:structuredClone(targets[0]),photoSha256,codeReadSha256:sha(read),indexSha256:sha(index),
+    ...(alternate?{modelReviewSha256:alternate.modelReviewSha256,codeSupport:alternate.codeSupport}:{}),
     weakAlternatives:all.filter(o=>o.fullCode!==code.fullCode).length,bindingVerified:false};
 }
 

@@ -9,7 +9,7 @@ export function recognitionSourceFingerprint(appRoot) {
     'src/detected-code-reader.mjs','src/detected-observation-cache.mjs','src/printed-code-parser.mjs','src/pdf-print-code-evidence.mjs','src/body-observation-cache.mjs',
     'src/photo-review-isolation.mjs','src/photo-plan-gate.mjs','src/photos.mjs',
     'src/scene-semantic-reader.mjs','src/scene-semantic-pixels.mjs','src/scene-semantic-policy.mjs','src/scene-semantic-service.mjs',
-    'src/english-ocr-model.mjs','src/code-body-adjudication.mjs','src/body-positioned-observation.mjs',
+    'src/english-ocr-model.mjs','src/code-body-adjudication.mjs','src/code-model-review.mjs','src/body-positioned-observation.mjs',
     'src/layout-runtime.mjs','src/layout-runtime-assets.mjs','src/layout-runtime-lock.mjs',
     'src/layout_runtime_worker.py','src/printed_layout_geometry.py','src/positioned-layout-collector.mjs','src/positioned-body-evidence.mjs'];
   return hash(JSON.stringify(files.map(file=>[file,hash(fs.readFileSync(path.join(appRoot,file)))])));

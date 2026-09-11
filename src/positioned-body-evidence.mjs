@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import {validPositionedBodyViews} from './body-positioned-observation.mjs';
 import {visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
 import {positionedLayoutEvidence} from './positioned-layout-collector.mjs';
+import {codeModelReviewEvidence} from './code-model-review.mjs';
 const digest=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const textHash=value=>crypto.createHash('sha256').update(value).digest('hex');
 const id=p=>`${p.pdfSha256}:${p.pageNumber}`;
@@ -77,11 +78,13 @@ function pairs(page,photo,layout){
  return out;
 }
 
-function codeWithinProposal(read,fullCode,photo,layout){
+function codeWithinProposal(read,fullCode,photo,layout,alternateCodeReview){
  const geometry=layout?.evidence?.geometry,size=photo.views[0].positioned.dimensions;
  if(geometry?.accepted!==true||!['nominal-page','printed-content-envelope'].includes(geometry.scope)
   ||digest(size)!==digest(read.sourceDimensions))return false;
- const envelope=polygon(geometry.points),observations=read.observations.filter(o=>o.fullCode===fullCode&&o.confidence>=.85);
+ const fresh=codeModelReviewEvidence(alternateCodeReview,read,photo.id);
+ const observed=fresh?fresh.flatMap(r=>r.codes.map(c=>({...c,confidence:r.confidence,index:r.index,padding:r.padding,crop:r.crop}))):read.observations;
+ const envelope=polygon(geometry.points),observations=observed.filter(o=>o.fullCode===fullCode&&o.confidence>=.85);
  const supported=observations.filter(o=>{
   const c=o.crop,region={left:c.left/size.width,top:c.top/size.height,width:c.width/size.width,height:c.height/size.height};
   return rectangle(region,photo.shape).every(p=>inside(p,envelope));
@@ -117,7 +120,7 @@ export function comparePositionedFields(pages,photo,layouts){
 
 // Text sources and all physical page IDs must match the exact live collector
 // input, not a plausible JSON report or text borrowed from a different page.
-export function positionedBodySupport({pages,views,index,photoSha256,positionedLayoutReview,read,expectedPrefix},target){
+export function positionedBodySupport({pages,views,index,photoSha256,positionedLayoutReview,read,expectedPrefix,alternateCodeReview},target){
  const evidence=positionedLayoutEvidence(positionedLayoutReview);
  if(!evidence)return null;
  try{
@@ -134,7 +137,7 @@ export function positionedBodySupport({pages,views,index,photoSha256,positionedL
   }
   const compared=comparePositionedFields(evidence.pages,inputPhoto,layout.pages),candidates=compared.rows.filter(r=>r.uniqueComposite);
   if(candidates.length!==1||candidates[0].id!==id(target))return null;
-  if(!codeWithinProposal(read,`${expectedPrefix}-1-${target.number}`,inputPhoto,layout.pages.find(p=>p.id===id(target))))return null;
+  if(!codeWithinProposal(read,`${expectedPrefix}-1-${target.number}`,inputPhoto,layout.pages.find(p=>p.id===id(target)),alternateCodeReview))return null;
   return {policy:'observed-code-plus-positioned-current-body-v1',fields:candidates[0].fields,
    corpusSha256:digest(evidence.pages),photoViewsSha256:inputPhoto.viewsSha256,
    geometrySha256:digest(layout),requestHashes:[...positionedLayoutReview.requestHashes],

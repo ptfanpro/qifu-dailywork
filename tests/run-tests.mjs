@@ -58,6 +58,7 @@ import './positioned-layout-collector-regression.mjs';
 import './positioned-body-evidence-regression.mjs';
 import './body-short-field-guard-regression.mjs';
 import './code-body-adjudication-regression.mjs';
+import './code-model-review-regression.mjs';
 import './code-body-collector-regression.mjs';
 import './code-body-restart-regression.mjs';
 import './body-pdf-corroboration-regression.mjs';
