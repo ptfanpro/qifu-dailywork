@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { verifyPdf } from './pdf.mjs';
+import {createPinnedEnglishWorker} from './english-ocr-model.mjs';
 
 const require = createRequire(import.meta.url);
 const sharp = require('sharp');
@@ -152,16 +153,14 @@ export async function recognizeUnexpectedImages(files, date, workDir) {
   const langPath = path.join(appRoot, 'ocr-data');
   const model = path.join(langPath, 'eng.traineddata.gz');
   if (!fs.existsSync(model)) return files.map((file) => ({ file, status: 'ocr-model-missing', candidates: [] }));
-  let createWorker;
   let PSM;
   try {
-    ({ createWorker, PSM } = require('tesseract.js'));
+    ({ PSM } = require('tesseract.js'));
   } catch {
     return files.map((file) => ({ file, status: 'ocr-runtime-missing', candidates: [] }));
   }
   const cropDir = path.join(workDir, 'ocr-crops');
-  const worker = await createWorker('eng', 1, { langPath, gzip: true });
-  await worker.setParameters({
+  const worker = await createPinnedEnglishWorker(appRoot, {
     tessedit_pageseg_mode: PSM.SPARSE_TEXT,
     tessedit_char_whitelist: '0123456789-',
   });

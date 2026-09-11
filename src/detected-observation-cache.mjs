@@ -87,7 +87,7 @@ export async function readDetectedObservation({cacheDir,source,fingerprint,runti
 
 // Hash actual loaded code/model bytes once per plan, not just package labels.
 // An unsupported/missing runtime disables reuse rather than guessing identity.
-export function detectedRuntimeFingerprint(appRoot,workerCacheDir){
+export function detectedRuntimeFingerprint(appRoot){
   try{
     const entries=[],roots=[];let total=0;
     const file=(name,absolute)=>{
@@ -118,7 +118,9 @@ export function detectedRuntimeFingerprint(appRoot,workerCacheDir){
     for(const [label,root] of roots)tree(label,root);
     for(const name of ['models/paddleocr-zh-v4/ch_PP-OCRv4_det_mobile.onnx','models/paddleocr-en-v5/inference.onnx',
       'models/paddleocr-en-v5/ppocrv5_en_dict.txt','ocr-data/eng.traineddata.gz'])file(name,path.join(appRoot,name));
-    file('worker-cache/eng.traineddata',path.join(workerCacheDir,'eng.traineddata'));
+    // Workers now consume verified bundled bytes, never the machine cache.
+    // Include the loader policy in this runtime identity as well as the model.
+    file('model-loader',path.join(appRoot,'src/english-ocr-model.mjs'));
     entries.sort((a,b)=>a[0].localeCompare(b[0]));
     return sha(JSON.stringify({node:process.version,arch:process.arch,platform:process.platform,entries}));
   }catch{return null;}

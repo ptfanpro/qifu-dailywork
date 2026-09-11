@@ -15,6 +15,7 @@ import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 import {createPdfPrintCodeEvidence,appendPdfPrintCodeObservation} from './pdf-print-code-evidence.mjs';
 import {readDetectedCodesWithScaleReview,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
 import {readDetectedObservation,detectedRuntimeFingerprint} from './detected-observation-cache.mjs';
+import {createPinnedEnglishWorker} from './english-ocr-model.mjs';
 import {createSemanticSceneService} from './scene-semantic-service.mjs';
 import {semanticRole} from './scene-semantic-policy.mjs';
 import {pdfReviewBlockReason,recordPdfClaimReview,createPhotoReviewExclusions,reviewExcludedPhotoNames,assertPhotoReviewIsolation} from './photo-review-isolation.mjs';
@@ -22,7 +23,7 @@ export {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 
 const require = createRequire(import.meta.url);
 const sharp = require('sharp');
-const { createWorker, PSM } = require('tesseract.js');
+const { PSM } = require('tesseract.js');
 const { createCanvas } = require('@napi-rs/canvas');
 
 const IMAGE_RE = /\.(?:jpe?g|png)$/i;
@@ -1308,17 +1309,11 @@ export function isReliableOcrConsensus(best, second = null, minimumConfidence = 
 }
 
 export async function createOcrWorker(appRoot) {
-  const langPath = path.join(appRoot, 'ocr-data');
-  if (!fs.existsSync(path.join(langPath, 'eng.traineddata.gz'))) throw new Error('缺少本地 OCR 模型 eng.traineddata.gz。');
-  const cachePath = path.join(getMachineLocalStateRoot(), 'cache', 'ocr');
-  fs.mkdirSync(cachePath, { recursive: true });
-  const worker = await createWorker('eng', 1, { langPath, cachePath, gzip: true });
-  await worker.setParameters({
+  return createPinnedEnglishWorker(appRoot, {
     tessedit_pageseg_mode: PSM.SINGLE_LINE,
     tessedit_char_whitelist: '0123456789-',
     user_defined_dpi: '300',
   });
-  return worker;
 }
 
 export function summarizeDetectedCodeRead(read,expectedPrefix,expectedNumbers) {
@@ -4141,7 +4136,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   const worker = await createOcrWorker(appRoot);
   let pdfPages;
   let detectedDetectorPromise=null;
-  const detectedRuntime=detectedRuntimeFingerprint(appRoot,path.join(getMachineLocalStateRoot(),'cache','ocr'));
+  const detectedRuntime=detectedRuntimeFingerprint(appRoot);
   const semanticServices=createSemanticSceneService({appRoot,runtimeFingerprint:detectedRuntime});
   let detectedCacheHits=0;
   const detectedCodeServices={read:async args=>{

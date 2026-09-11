@@ -41,6 +41,7 @@ import './detected-code-scale-review-regression.mjs';
 import './semantic-role-reader-regression.mjs';
 import './semantic-scene-integration-regression.mjs';
 import './semantic-assets-regression.mjs';
+import './english-model-binding-regression.mjs';
 import './replay-comparison-regression.mjs';
 import './photo-review-isolation-regression.mjs';
 import './release-gates-regression.mjs';

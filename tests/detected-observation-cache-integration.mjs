@@ -5,7 +5,6 @@ import {createOcrWorker,summarizeDetectedCodeRead} from '../src/photo-prepare.mj
 import {readDetectedCodes,createTextDetector} from '../src/detected-code-reader.mjs';
 import {readDetectedObservation,detectedRuntimeFingerprint} from '../src/detected-observation-cache.mjs';
 import {recognitionSourceFingerprint} from '../src/recognition-provenance.mjs';
-import {getMachineLocalStateRoot} from '../src/runtime-paths.mjs';
 const require=createRequire(import.meta.url),{createCanvas}=require('@napi-rs/canvas');
 const appRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const cacheDir=fs.mkdtempSync(path.join(os.tmpdir(),'qifu-generated-observation-cache-'));
@@ -13,7 +12,7 @@ let worker,detector;
 try{
   worker=await createOcrWorker(appRoot);
   detector=await createTextDetector(appRoot,path.join(appRoot,'models/paddleocr-zh-v4/ch_PP-OCRv4_det_mobile.onnx'));
-  const runtimeFingerprint=detectedRuntimeFingerprint(appRoot,path.join(getMachineLocalStateRoot(),'cache','ocr'));
+  const runtimeFingerprint=detectedRuntimeFingerprint(appRoot);
   assert.match(runtimeFingerprint||'',/^[a-f0-9]{64}$/,'real runtime must enable cache, not silently skip');
   const canvas=createCanvas(640,240),ctx=canvas.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,640,240);
   ctx.fillStyle='black';ctx.font='40px Arial';ctx.fillText('269-1-168',100,130);const source=canvas.toBuffer('image/png');
