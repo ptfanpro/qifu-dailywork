@@ -96,3 +96,28 @@ remain an explicit failing release gate; this code does not remove that gate.
 Frozen annual, clean-PC and authorized online acceptance remain incomplete.
 No release tag, deployment, main-branch merge, launcher change, date-default
 change, login change or production business write is authorized by this report.
+
+## 2026-09-12: both frozen full-day runs completed
+
+The unchanged `99d0565` archive above completed June 13 in 1870.989 seconds
+(19/48 assignments, 29 unresolved, 69 fresh body reads, zero body-cache hits)
+and July 1 in 748.899 seconds (12/16 assignments, 4 unresolved, 23 fresh body
+reads, zero body-cache hits). These assignment totals include scene images.
+Both remain `ready=false`; diagnostic completion is not business completion.
+
+Independent comparisons with the previous `a25745c573b8...` complete-day plans
+verify all original/copy/report bindings: one assignment added in each day,
+zero lost, zero changed, and zero changes in retained original detected-code
+observations. The earlier two targeted recoveries therefore both survived
+fresh complete-day replay. The timing/audit window is closed and explicitly
+marked engineering-only, not a daily-business SLA measurement.
+
+There are still 33 unresolved images. Recorded gates comprise 14 detected
+prefix conflicts, 4 detected number conflicts, 4 unconfirmed detected codes,
+1 portable prefix conflict and 10 without those recorded audit reasons. Those
+ten must be inspected further, not automatically called missing photos or
+blank OCR. No filename or expected missing-slot rule was used to assign them.
+
+The later scene-entry isolation and its separately frozen code-gate results
+are documented in [SCENE-EVIDENCE-ONLY.md](SCENE-EVIDENCE-ONLY.md). They do not
+relabel this full-day run as a replay of a different source fingerprint.
