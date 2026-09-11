@@ -40,3 +40,37 @@ test('source identity, failed views, duplicate regions and invalid positions fai
  for(const mutate of [v=>v.pop(),v=>v[0].errors=1,v=>v[1].truncated=true,v=>v[0].fields[0].x=NaN,
    v=>v[0].fields.push({...v[0].fields[0]}),v=>v[0].fields[0].y=1.01]){const v=views([f('松柏青')]);mutate(v);assert.throws(()=>spatialBodyCorrespondences(corpus,v));}
 });
+
+test('complete mixed-script fields retain real field position without inventing substring coordinates',()=>{
+ const corpus=[page(1,[f('姓名：松柏青'),f('供灯：7盏',.4,.6)]),page(2,[f('姓名：海月明'),f('供灯：49盏')])];
+ const out=spatialBodyCorrespondences(corpus,views([f('姓名:松柏青',.3,.4),f('供灯:7盏',.5,.7)]));
+ assert.equal(out[0].pairs.length,2);assert.equal(out[1].pairs.length,0);
+ assert.deepEqual(out[0].pairs.map(p=>p.pdfPoint),[[.2,.3],[.4,.6]]);
+ assert.equal(spatialBodyCorrespondences(corpus,views([f('松柏青')]))[0].pairs.length,0,'not a guessed subfield location');
+});
+test('paired punctuation and quantity differences remain differences',()=>{
+ const corpus=[page(1,[f('姓名：松柏青'),f('供灯：7盏')])],v=views([f('姓名:松柏青'),f('供灯:7盏')]);
+ v[1].fields[0].text='姓名松柏青';v[1].fields[1].text='供灯:49盏';
+ assert.equal(spatialBodyCorrespondences(corpus,v)[0].pairs.length,0);
+ assert.equal(spatialBodyCorrespondences(corpus,views([f('姓名:\n松柏青'),f('供灯:\u20287盏')]))[0].pairs.length,0);
+});
+test('a field also contained elsewhere on the same page cannot invent a unique occurrence',()=>{
+ const corpus=[page(1,[f('松柏青'),f('姓名：松柏青',.6,.6)])];
+ assert.equal(spatialBodyCorrespondences(corpus,views([f('松柏青')]))[0].pairs.length,0);
+});
+test('a printed code cannot re-enter as independent body location evidence',()=>{
+ for(const text of ['编号:263-1-95','编号：263－1－95','263-1-95','编号：２６３－１－９５','编号:263_1_95','编号:263—1—95']){
+  assert.equal(spatialBodyCorrespondences([page(1,[f(text)])],views([f(text)]))[0].pairs.length,0);
+ }
+});
+
+test('an additional occurrence in either photo view prevents positional disambiguation',()=>{
+ const corpus=[page(1,[f('松柏青')])];
+ for(const which of [0,1]){
+  const v=views([f('松柏青')]);
+  v[which].fields.push({...f('姓名：松柏青',.5,.7),regionIndex:1});
+  assert.equal(spatialBodyCorrespondences(corpus,v)[0].pairs.length,0);
+ }
+ const repeated=page(1,[f('松柏青'),f('松柏青松柏青',.5,.7)]);
+ assert.equal(spatialBodyCorrespondences([repeated],views([f('松柏青')]))[0].pairs.length,0);
+});

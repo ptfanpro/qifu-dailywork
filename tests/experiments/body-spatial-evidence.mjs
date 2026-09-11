@@ -4,7 +4,23 @@
 import crypto from 'node:crypto';
 const sha=text=>crypto.createHash('sha256').update(text).digest('hex');
 const normalize=text=>text.normalize('NFKC').replace(/[^\S\r\n]/gu,'');
-const term=text=>typeof text==='string'&&/^\p{Script=Han}{2,40}$/u.test(normalize(text))?normalize(text):null;
+// Match the entire positioned field. Labels, punctuation and quantities are
+// meaningful text too; removing them would both lose evidence and manufacture
+// substring positions. NFKC is permitted, but never join separate lines.
+const term=text=>{
+  if(typeof text!=='string'||/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(text))return null;
+  const value=normalize(text),han=value.match(/\p{Script=Han}/gu)?.length||0;
+  if(value.length>120||han<2||han>40)return null;
+  // A printed full code is not independent body evidence for that same code.
+  const codeText=value.replace(/[—–_·•﹣－−]/gu,'-');
+  if(/\d+\s*-\s*\d+\s*-\s*\d+/u.test(codeText))return null;
+  return value;
+};
+const occurrences=(fields,text)=>fields.reduce((n,f)=>{
+  const value=normalize(f.text);let at=0;
+  while((at=value.indexOf(text,at))!==-1){n++;at+=text.length;}
+  return n;
+},0);
 const center=r=>[r.x,r.y];
 const validPosition=r=>r&&Number.isFinite(r.x)&&Number.isFinite(r.y)&&r.x>=0&&r.x<=1&&r.y>=0&&r.y<=1;
 const id=p=>p.pdfSha256+':'+p.pageNumber;
@@ -39,13 +55,13 @@ export function spatialBodyCorrespondences(pages,views){
   const paired=ordered[0].fields.filter(f=>{
     const next=second.get(f.regionIndex);return term(f.text)&&next&&term(f.text)===term(next.text)&&f.x===next.x&&f.y===next.y;
   });
-  const observed=paired.filter(f=>paired.filter(g=>term(f.text)===term(g.text)).length===1);
+  const observed=paired.filter(f=>ordered.every(v=>occurrences(v.fields,term(f.text))===1));
   // A substring on ANY other PDF field is ambiguous. Never turn concatenated
   // glyphs or duplicate occurrences into independent spatial support.
   return pages.map(page=>{
     const pairs=page.fields.flatMap(field=>{
       const text=term(field.text);if(!text)return [];
-      if(page.fields.filter(f=>term(f.text)===text).length!==1)return [];
+      if(occurrences(page.fields,text)!==1)return [];
       if(pages.some(p=>id(p)!==id(page)&&p.fields.some(f=>normalize(f.text).includes(text))))return [];
       const found=observed.filter(f=>term(f.text)===text);if(found.length!==1)return [];
       return [{fieldSha256:sha(text),pdfPoint:center(field),photoPoint:center(found[0]),regionIndex:found[0].regionIndex}];
