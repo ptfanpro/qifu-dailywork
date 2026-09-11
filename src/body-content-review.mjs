@@ -144,7 +144,7 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
             extracted.push({pdfSha256,pageNumber,fieldTexts});
             const source=canvas.toBuffer('image/png'),views=await readViews(source);
             readings.push({pdfSha256,pageNumber,views});
-            if(includePositions)positionedPdfInputs.push({id:`${pdfSha256}:${pageNumber}`,source,views});
+            if(includePositions)positionedPdfInputs.push({id:`${pdfSha256}:${pageNumber}`,source,views,fieldTexts});
             page.cleanup();
             onProgress?.(`正文归属检查：已读取 ${extracted.length} 页 PDF 可见内容；只作冲突保护，不按最高分改号。`);
           }
@@ -221,7 +221,7 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
       if(!sourcesVerified||!pendingViews.has(item))continue;
       // Only after all original photo/PDF bytes are rechecked; apparent
       // successes from an incomplete/changed corpus must never authorize work.
-      const result=retainCodeBodyResolution(item,{pages,views:pendingViews.get(item),index,pdfSetDigest:pdfIndexBinding.digest});
+      const result=retainCodeBodyResolution(item,{pages,views:pendingViews.get(item),index,pdfSetDigest:pdfIndexBinding.digest,positionedLayoutReview});
       if(result.status!=='resolved')continue;
       adjudicated.push(item);
     }

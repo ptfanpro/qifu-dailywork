@@ -23,10 +23,13 @@ export function layoutBatches(pages,photos){
  return batches;
 }
 
-export async function preparePositionedLayoutInput({id,source,views}){
+export async function preparePositionedLayoutInput({id,source,views,fieldTexts=[]}){
  if(!Buffer.isBuffer(source)||source.length>50_000_000||(!pageId.test(id||'')&&!photoId.test(id||'')))
   throw Error('Invalid positioned image identity');
  const bytes=Buffer.from(source),sourceSha256=hash(bytes),savedViews=structuredClone(views);
+ if(!Array.isArray(fieldTexts)||fieldTexts.length>10000||fieldTexts.some(t=>typeof t!=='string')||JSON.stringify(fieldTexts).length>1_000_000)
+  throw Error('Invalid positioned PDF field corpus');
+ const savedFields=[...fieldTexts];
  if(photoId.test(id)&&id!==sourceSha256)throw Error('Positioned photo identity changed');
  if(!validPositionedBodyViews(savedViews))throw Error('Incomplete positioned body observations');
  // Exactly the body's oriented sRGB coordinate system before reducing to the
@@ -39,7 +42,7 @@ export async function preparePositionedLayoutInput({id,source,views}){
  const rendered=await sharp(decoded.data,{raw:decoded.info}).greyscale()
   .resize({width:1800,height:1800,fit:'inside',withoutEnlargement:true}).png().toBuffer({resolveWithObject:true});
  if(Math.min(rendered.info.width,rendered.info.height)<32)throw Error('Positioned image is too small');
- return {id,sourceSha256,viewsSha256:digest(savedViews),views:savedViews,bytes:rendered.data,
+ return {id,sourceSha256,viewsSha256:digest(savedViews),views:savedViews,fieldTexts:savedFields,fieldTextsSha256:digest(savedFields),bytes:rendered.data,
   imageSha256:hash(rendered.data),shape:[rendered.info.height,rendered.info.width]};
 }
 
@@ -52,7 +55,7 @@ export async function collectPositionedLayouts({appRoot,pages,photos,onProgress=
  const snapshot=items=>items.map(p=>{
   if(!Buffer.isBuffer(p.source))throw Error('Missing positioned image bytes');
   bytes+=p.source.length;if(bytes>300_000_000)throw Error('Positioned image budget exceeded');
-  return {id:p.id,source:Buffer.from(p.source),views:structuredClone(p.views)};
+  return {id:p.id,source:Buffer.from(p.source),views:structuredClone(p.views),fieldTexts:structuredClone(p.fieldTexts??[])};
  });
  const originals={pages:snapshot(pages),photos:snapshot(photos)},started=Date.now();
  const prepared={pages:[],photos:[]};
@@ -83,7 +86,7 @@ export async function collectPositionedLayouts({appRoot,pages,photos,onProgress=
  for(const photo of byPhoto.values())if(digest(photo.pages.map(p=>p.id))!==digest(ids))
   throw Error('Incomplete or duplicated positioned PDF corpus');
  if(all.some(result=>!isFreshLayoutObservation(result)))throw Error('Changed positioned worker observation');
- const inputSummary=items=>items.map(({id,sourceSha256,viewsSha256,imageSha256,shape})=>({id,sourceSha256,viewsSha256,imageSha256,shape}));
+ const inputSummary=items=>items.map(({id,sourceSha256,viewsSha256,fieldTextsSha256,imageSha256,shape})=>({id,sourceSha256,viewsSha256,fieldTextsSha256,imageSha256,shape}));
  const report={schemaVersion:1,status:'positioned-layout-observation-not-binding',complete:true,
   pages:inputSummary(prepared.pages),photos:inputSummary(prepared.photos),
   pageCount:prepared.pages.length,photoCount:prepared.photos.length,comparisons:prepared.pages.length*prepared.photos.length,

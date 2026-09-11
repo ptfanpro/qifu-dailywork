@@ -55,6 +55,7 @@ import './positioned-body-cache-regression.mjs';
 import './layout-runtime-assets-regression.mjs';
 import './layout-runtime-protocol-regression.mjs';
 import './positioned-layout-collector-regression.mjs';
+import './positioned-body-evidence-regression.mjs';
 import './body-short-field-guard-regression.mjs';
 import './code-body-adjudication-regression.mjs';
 import './code-body-collector-regression.mjs';

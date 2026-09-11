@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {validDetectedCodeReview} from './detected-code-reader.mjs';
 import {createBodyClaimAssessor} from './body-content-review.mjs';
+import {positionedBodySupport} from './positioned-body-evidence.mjs';
 const sha=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const id=p=>`${p.pdfSha256}:${p.pageNumber}`;
 const hash=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
@@ -66,11 +67,11 @@ export function codeBodyCandidateForItem(item,index) {
   return candidate;
 }
 
-export function retainCodeBodyResolution(item,{pages,views,index,pdfSetDigest}) {
+export function retainCodeBodyResolution(item,{pages,views,index,pdfSetDigest,positionedLayoutReview}) {
   const candidate=codeBodyCandidateForItem(item,index);
   if(candidate.status!=='candidate'||!hash(pdfSetDigest))return candidate;
   const result=adjudicateCodeBody({read:item.detectedCodeRead,expectedPrefix:item.detectedCodeRead.expectedPrefix,
-    photoSha256:item.sourceSha256,pages,views,index});
+    photoSha256:item.sourceSha256,pages,views,index,positionedLayoutReview});
   if(result.status!=='resolved')return result;
   const proof={...result,pdfSetDigest};
   // Preserve the raw unresolved audit as evidence of WHY adjudication ran.
@@ -155,6 +156,15 @@ export function adjudicateCodeBody(input) {
     if(!Array.isArray(pages)||pages.length!==index.length||new Set(pages.map(id)).size!==pages.length
       ||pages.some(p=>!index.some(q=>id(p)===id(q))))return unresolved('body-corpus-incomplete');
     const assessment=createBodyClaimAssessor(pages)(views,candidate.target);
+    // A positioned composite can resolve a short/shared-name ambiguity only
+    // WITH the original strong full code. Contrary body/code evidence remains
+    // a veto; the earlier independent long-field rule remains unchanged.
+    if(input.positionedLayoutReview&&['observed-body-consistent','no-specific-body-evidence'].includes(assessment.status)){
+      const support=positionedBodySupport(input,candidate.target);
+      if(support)return {...candidate,status:'resolved',policy:support.policy,
+        bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),positionedSupport:support,assessment,
+        pageCorrespondenceVerified:true,bindingVerified:false};
+    }
     if(assessment.status!=='observed-body-consistent')return unresolved(`body-${assessment.status}`);
     const fields=assessment.fieldEvidence;
     if(fields.state!=='single-page-field-candidate')return unresolved('body-not-page-specific');
