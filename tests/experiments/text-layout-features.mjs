@@ -40,11 +40,12 @@ export function textLayoutDescriptor(regions,dimensions){
   roleVerified:false,bindingVerified:false,mayAuthorizeUpload:false};
 }
 
-export function joinTextLayoutViews(baseViews,layout){
+export function joinTextLayoutViews(baseViews,layout,{visualDimensions=512}={}){
+ if(![512,768].includes(visualDimensions))throw Error('Explicit supported encoder dimension required');
  if(!Array.isArray(baseViews)||baseViews.length!==2||new Set(baseViews.map(v=>v.view)).size!==2
   ||baseViews.some(v=>!VIEWS.includes(v.view)))throw Error('Both frozen visual views required');
  const spatial=unit(layout?.embedding,512);
  return VIEWS.map(view=>({view,embedding:unit([
-  ...unit(baseViews.find(v=>v.view===view).embedding,512),...spatial,
- ],1024)}));
+  ...unit(baseViews.find(v=>v.view===view).embedding,visualDimensions),...spatial,
+ ],visualDimensions+512)}));
 }

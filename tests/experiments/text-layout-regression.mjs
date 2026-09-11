@@ -7,6 +7,18 @@ const box=(left,top,width=.2,height=.02)=>({left,top,width,height,score:.9});
 const vector=n=>Array.from({length:512},(_,i)=>i===n?1:0);
 const views=()=>['center-crop','full-frame'].map((view,i)=>({view,embedding:vector(i)}));
 
+test('new visual encoder dimension is explicit and cannot silently enter the old CLIP contract',()=>{
+ const visual=views().map(v=>({...v,embedding:[...v.embedding,...Array(256).fill(0)]}));
+ const layout=textLayoutDescriptor([box(.3,.4)],dimensions);
+ assert.throws(()=>joinTextLayoutViews(visual,layout));
+ const joined=joinTextLayoutViews(visual,layout,{visualDimensions:768});
+ assert.equal(joined[0].embedding.length,1280);
+ assert.deepEqual(joined[0].embedding.slice(768),joined[1].embedding.slice(768));
+ assert(Math.abs(Math.hypot(...joined[0].embedding)-1)<1e-12);
+ for(const n of [0,1,512.5,Infinity,4096])assert.throws(()=>joinTextLayoutViews(visual,layout,{visualDimensions:n}));
+ assert.throws(()=>joinTextLayoutViews(views(),layout,{visualDimensions:768}));
+});
+
 test('layout is deterministic and order invariant; source dimensions, not dates or names, determine aspect',()=>{
  const a=[box(.2,.3),box(.5,.6),box(.2,.4)],before=structuredClone(a);
  const first=textLayoutDescriptor(a,dimensions);
