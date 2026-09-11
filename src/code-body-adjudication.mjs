@@ -10,6 +10,8 @@ import {validDetectedCodeReview} from './detected-code-reader.mjs';
 import {createBodyClaimAssessor} from './body-content-review.mjs';
 import {positionedBodySupport} from './positioned-body-evidence.mjs';
 import {codeModelReviewEvidence} from './code-model-review.mjs';
+import {validPositionedBodyViews} from './body-positioned-observation.mjs';
+import {visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
 const sha=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const id=p=>`${p.pdfSha256}:${p.pageNumber}`;
 const hash=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
@@ -196,6 +198,35 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alterna
     weakAlternatives:all.filter(o=>o.fullCode!==code.fullCode).length,bindingVerified:false};
 }
 
+function shortFieldConjunction(views,fields,target){
+  if(!validPositionedBodyViews(views))return [];
+  const ordered=visualBodyViewNames.map(name=>views.find(v=>v.view===name)),support=[];
+  const shortHash=text=>{
+    if(/[\r\n\u2028\u2029]/u.test(text))return null;
+    const value=text.normalize('NFKC').replace(/\s/gu,'');
+    return /^\p{Script=Han}{3}$/u.test(value)?crypto.createHash('sha256').update(value).digest('hex'):null;
+  };
+  const overlaps=(a,b)=>Math.min(a.left+a.width,b.left+b.width)>Math.max(a.left,b.left)
+    &&Math.min(a.top+a.height,b.top+b.height)>Math.max(a.top,b.top);
+  for(const offset of [0,2]){
+    const pair=fields.readings.slice(offset,offset+2).map(r=>r.ranked.find(p=>id(p)===id(target)));
+    const common=pair[0].corroboratedShortFieldHashes.filter(h=>pair[1].corroboratedShortFieldHashes.includes(h));
+    const stable=[];
+    for(const hash of common){
+      const observations=ordered.slice(offset,offset+2).map(v=>v.positioned.fields.filter(f=>shortHash(f.text)===hash));
+      if(observations.some(fs=>fs.length!==1)||observations[0][0].regionIndex!==observations[1][0].regionIndex)continue;
+      stable.push({hash,observations:observations.flat()});
+    }
+    // No pooling fragments, repeated detections, or overlapping padded crops.
+    // This adds a stricter multi-field route for short names; it does not
+    // lower the existing two-long-field or positioned-geometry thresholds.
+    if(stable.length<3||stable.some((a,i)=>stable.slice(i+1).some(b=>a.observations.some((f,j)=>overlaps(f.crop,b.observations[j].crop)))))continue;
+    support.push({views:ordered.slice(offset,offset+2).map(v=>v.view),fieldHashes:stable.map(f=>f.hash),
+      distinctFields:stable.length,independentlyExtractedAndVisible:true,disjointPhotoCrops:true});
+  }
+  return support;
+}
+
 export function adjudicateCodeBody(input) {
   const candidate=codeBodyCandidate(input);
   if(candidate.status!=='candidate')return candidate;
@@ -225,9 +256,10 @@ export function adjudicateCodeBody(input) {
       // Shared names, template phrases and one-view snippets cannot qualify.
       if(common.length>=2)support.push({views:fields.readings.slice(offset,offset+2).map(r=>r.view),fieldHashes:common});
     }
-    if(!support.length)return unresolved('insufficient-paired-whole-field-evidence');
-    return {...candidate,status:'resolved',policy:'observed-code-plus-paired-current-body-v1',
-      bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),support,assessment,
+    const shortSupport=support.length?[]:shortFieldConjunction(views,fields,candidate.target);
+    if(!support.length&&!shortSupport.length)return unresolved('insufficient-paired-whole-field-evidence');
+    return {...candidate,status:'resolved',policy:support.length?'observed-code-plus-paired-current-body-v1':'observed-code-plus-three-disjoint-short-fields-v1',
+      bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),support:support.length?support:shortSupport,assessment,
       // Page correspondence only, NOT a statement that online order sets or
       // upload counts have been verified. Those gates remain separate.
       pageCorrespondenceVerified:true,bindingVerified:false};

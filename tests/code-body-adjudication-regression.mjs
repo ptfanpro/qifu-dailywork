@@ -83,6 +83,54 @@ for(const secondEngineAgrees of [false,true]){
   assert.equal(correct.number,188);
 }
 const x=input(),before=JSON.stringify(x);adjudicateCodeBody(x);assert.equal(JSON.stringify(x),before,'no input or raw audit mutation');
+// Three distinct short fields are not one name repeated or three fragments
+// assembled from one OCR line. Synthetic text only; no customer fixtures.
+const shortNames=['松柏青','海月明','竹风远'];
+function shortViews(names=shortNames){
+  const dimensions={width:1000,height:800};
+  return visualBodyViewNames.map((view,i)=>{
+    const fields=i<2?names.map((text,j)=>{
+      const region={left:.1+(j%2)*.5,top:.2+Math.floor(j/2)*.25,width:.12,height:.025,score:.99};
+      return {text,regionIndex:j,region,confidence:.99,crop:horizontalBodyCrop(region,dimensions,i===0?.35:.65)};
+    }):[];
+    return {view,text:fields.map(f=>f.text).join('。'),errors:0,truncated:false,lineCount:fields.length,regions:fields.length,
+      positioned:{schemaVersion:1,dimensions,fields}};
+  });
+}
+function shortInput(){
+  const value=input(),terms=[shortNames,['清风堂','白云台','明镜阁']];
+  value.pages=buildVisualBodyPages(terms.map((fieldTexts,i)=>({pdfSha256:pdfHash,pageNumber:i+1,fieldTexts})),
+    terms.map((f,i)=>({pdfSha256:pdfHash,pageNumber:i+1,views:shortViews(f)})));
+  value.views=shortViews();return value;
+}
+const shortPositive=shortInput(),shortBefore=JSON.stringify(shortPositive);
+assert.equal(adjudicateCodeBody(shortPositive).status,'resolved','three disjoint paired fields, independently extracted and visibly read from one PDF, corroborate a strong full code');
+assert.equal(adjudicateCodeBody(shortPositive).policy,'observed-code-plus-three-disjoint-short-fields-v1');
+assert.equal(JSON.stringify(shortPositive),shortBefore);
+assert.doesNotMatch(JSON.stringify(adjudicateCodeBody(shortPositive)),/松柏青|海月明|竹风远/);
+const shortReject=(label,change)=>{const value=shortInput();change(value);assert.notEqual(adjudicateCodeBody(value).status,'resolved',label);};
+shortReject('two short fields are insufficient',x=>x.views=shortViews(shortNames.slice(0,2)));
+shortReject('three repetitions are one field',x=>x.views=shortViews([shortNames[0],shortNames[0],shortNames[0]]));
+shortReject('unpositioned text is insufficient',x=>x.views.forEach(v=>delete v.positioned));
+shortReject('whole multiline run cannot be assembled',x=>x.views=shortViews(['松柏\n青',...shortNames.slice(1)]));
+shortReject('different crops cannot pool third field',x=>{x.views[1]=shortViews([shortNames[0],shortNames[1],'青山在'])[1];});
+shortReject('changed crop is not observed evidence',x=>{x.views[0].positioned.fields[0].crop.left++;});
+shortReject('same detector area cannot supply three distinct fields',x=>{
+  for(const v of x.views.slice(0,2))for(const f of v.positioned.fields){f.region={...v.positioned.fields[0].region};f.crop={...v.positioned.fields[0].crop};}
+});
+shortReject('overlapping padded crops do not prove separate fields',x=>{
+  for(const [i,v] of x.views.slice(0,2).entries())for(const [j,f] of v.positioned.fields.entries()){
+    f.region.left=.1+j*.12;f.region.top=.2;f.crop=horizontalBodyCrop(f.region,v.positioned.dimensions,i===0?.35:.65);
+  }
+});
+shortReject('missing independently extracted field',x=>{x.pages[0].fieldTexts.pop();});
+shortReject('missing paired visible PDF field',x=>{x.pages[0].visibleFieldViews[1].text=shortNames.slice(0,2).join('。');x.pages[0].supplementalText[1]=x.pages[0].visibleFieldViews[1].text;});
+shortReject('same field inside another page blocks uniqueness',x=>{x.pages[1].fieldTexts.push('敬祝'+shortNames[0]);});
+shortReject('another page with identical body remains ambiguous',x=>{x.pages[1]={...structuredClone(x.pages[0]),pageNumber:2};});
+shortReject('wrong code cannot borrow these fields',x=>{x.index[0].number=18;x.index[1].number=17;});
+shortReject('credible independent code conflict still vetoes',x=>{x.read.independent[0].confidence=90;x.read.readings[2].confidence=90;});
+shortReject('failed view still vetoes',x=>{x.views[3].errors=1;});
+console.log('Three-short-field conjunction: 1 positive and 15 rejection checks PASS');
 assert.doesNotMatch(JSON.stringify(run()),/松风|晨光|海月|竹影/,'receipts contain hashes/counts, not private body fields');
 function freshItem(x){return {number:null,reliable:false,sourceSha256:hash,detectedCodeRead:{...x.read,expectedPrefix:'263'},
   codeAuditHistory:[{status:'unresolved',number:null,reason:'detected-code-number-conflict',

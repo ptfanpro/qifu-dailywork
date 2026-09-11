@@ -84,6 +84,11 @@ export function createBodyFieldComparator(pages) {
         // Preserve the identity of whole long fields across views. Counts
         // alone could pool unrelated fields seen in different crops.
         longSpecificFieldHashes: specific.filter(t => [...t].length >= 4).map(sha).sort(),
+        // A separate conjunction may use THREE complete short fields. Each
+        // must have both extraction and paired visible-PDF support, not just
+        // one OCR transcript or a field assembled from individual glyphs.
+        corroboratedShortFieldHashes: specific.filter(t => [...t].length === 3
+          && page.extractedTerms.includes(t) && page.visibleTerms.includes(t)).map(sha).sort(),
         observedAllExtractedDistinctFields: page.extractedTerms.length > 0 && extractedExact.length === page.extractedTerms.length,
         evidenceSha256: sha(specific.sort().join('\n'))};
     }).sort((a, b) => b.specificExactFields - a.specificExactFields || b.exactFields - a.exactFields
