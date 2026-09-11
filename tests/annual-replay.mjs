@@ -7,6 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {planPhotoPreparation,diagnosePhotoStructure,classifySceneVisualScore} from '../src/photo-prepare.mjs';
 import {recognitionSourceFingerprint} from '../src/recognition-provenance.mjs';
 import {requirePrivateAuditRoot} from './audit-paths.mjs';
+import {assertAuditOriginalsUnchanged,assertReusableAuditReport,sealAuditReport} from './audit-replay-cache.mjs';
 
 const [action,businessRoot,outputRoot,...filters]=process.argv.slice(2);
 if(!['inventory','structure','replay'].includes(action)||!businessRoot||!outputRoot) throw Error('inventory|structure|replay BUSINESS_ROOT PRIVATE_OUTPUT [YYYY-MM-DD...]');
@@ -47,13 +48,17 @@ if(action==='inventory') {
   console.log(JSON.stringify({stage:'inventory-complete',days:days.length,photos:days.reduce((n,d)=>n+d.photos.length,0),pdfs:days.reduce((n,d)=>n+d.pdfs.length,0),first:days[0]?.date,last:days.at(-1)?.date}));
 } else {
   const inventory=JSON.parse(fs.readFileSync(inventoryFile));
+  for(const date of filters)if(!inventory.days.some(day=>day.date===date))throw Error('Requested audit date is absent from inventory');
   const days=inventory.days.filter(d=>!filters.length||filters.includes(d.date));
   for(const day of days) {
     const dir=path.join(outputRoot,`${action}-${sourceHash.slice(0,12)}`,day.date);fs.mkdirSync(dir,{recursive:true});
     const reportFile=path.join(dir,'report.json');
+    assertAuditOriginalsUnchanged(day);
     if(fs.existsSync(reportFile)) {
       const previous=JSON.parse(fs.readFileSync(reportFile));
-      if(previous.sourceHash===sourceHash&&!previous.error)continue;
+      assertReusableAuditReport(previous,{day,action,appRoot,dir,sourceHash});
+      console.log(JSON.stringify({stage:'verified-cache-reuse',date:day.date,sourceHash}));
+      continue;
     }
     if(recognitionSourceFingerprint(appRoot)!==sourceHash)throw Error('Recognition snapshot changed; resume from a frozen snapshot');
     const started=Date.now();
@@ -70,10 +75,12 @@ if(action==='inventory') {
         decodeErrors:rows.filter(r=>r.error).length,sourceUnchanged:rows.every(r=>r.sourceUnchanged===true),
         referencePaperSceneDisagreements:rows.filter(r=>r.referenceLabel==='blessing'&&r.likelyScene).length,
         referenceSceneEntryMisses:rows.filter(r=>r.referenceLabel.startsWith('scene-')&&!r.likelyScene).length};
-      json(reportFile,{...summary,rows});console.log(JSON.stringify(summary));
+      if(summary.decodeErrors||!summary.sourceUnchanged){json(reportFile,{...summary,rows});process.exitCode=1;}
+      else json(reportFile,sealAuditReport({...summary,rows},{day,action,appRoot,dir}));
+      console.log(JSON.stringify(summary));
       continue;
     }
-    if(!day.photos.length||!day.pdfs.length) {json(reportFile,{sourceHash,date:day.date,status:'missing-source-material',photos:day.photos.length,pdfs:day.pdfs.length});continue;}
+    if(!day.photos.length||!day.pdfs.length) {json(reportFile,{sourceHash,date:day.date,status:'missing-source-material',photos:day.photos.length,pdfs:day.pdfs.length});process.exitCode=1;continue;}
     // Blind processed filenames, and do not manufacture capture-order evidence.
     // Different bytes get opaque names sorted by hash, not the old number.
     const folder=path.join(dir,'input'),photoDir=path.join(folder,'1');
@@ -96,7 +103,7 @@ if(action==='inventory') {
     } catch(error) {
       json(path.join(dir,'private-error.json'),{name:error.name,message:error.message,stack:error.stack});
       const failure={sourceHash,date:day.date,error:'photo-plan-failed',photos:mapping.length,seconds:Math.round((Date.now()-started)/1000)};
-      json(reportFile,failure);console.log(JSON.stringify(failure));continue;
+      json(reportFile,failure);console.log(JSON.stringify(failure));process.exitCode=1;continue;
     }
     if(recognitionSourceFingerprint(appRoot)!==sourceHash)throw Error('Recognition snapshot changed during replay; results are not acceptance evidence');
     json(path.join(dir,'private-plan.json'),plan);
@@ -112,6 +119,6 @@ if(action==='inventory') {
       manualEvidence:rows.filter(r=>/manual/.test(r.method||'')).length,ready:plan.ready,safeToApply:plan.safeToApply,missing:plan.missingExpected.length,
       issues:plan.issues.length,pending:plan.pendingIssues.length,seconds:Math.round((Date.now()-started)/1000),
       sourceUnchanged:[...day.photos,...day.pdfs].every(f=>sha(f.file)===f.sha256)};
-    json(reportFile,{...summary,rows});console.log(JSON.stringify(summary));
+    json(reportFile,sealAuditReport({...summary,rows},{day,action,appRoot,dir}));console.log(JSON.stringify(summary));
   }
 }
