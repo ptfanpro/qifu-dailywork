@@ -1,5 +1,6 @@
-// Field evidence only. Product use is veto-only: complete short fields and
-// apparent coverage never grant or repair a page/order binding.
+// Field observations, never a standalone page/order binding. The code/body
+// adjudicator separately requires a qualified observed code and positioned
+// independent whole fields; apparent field coverage alone is not identity.
 import crypto from 'node:crypto';
 import {visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
 const sha = text => crypto.createHash('sha256').update(text).digest('hex');
@@ -88,6 +89,11 @@ export function createBodyFieldComparator(pages) {
         // must have both extraction and paired visible-PDF support, not just
         // one OCR transcript or a field assembled from individual glyphs.
         corroboratedShortFieldHashes: specific.filter(t => [...t].length === 3
+          && page.extractedTerms.includes(t) && page.visibleTerms.includes(t)).map(sha).sort(),
+        // The same strict sources also support a mixture of long/short whole
+        // fields. Do NOT reuse longSpecificFieldHashes here: those may have
+        // extraction OR visible support, whereas this route requires BOTH.
+        corroboratedWholeFieldHashes: specific.filter(t => [...t].length >= 3
           && page.extractedTerms.includes(t) && page.visibleTerms.includes(t)).map(sha).sort(),
         observedAllExtractedDistinctFields: page.extractedTerms.length > 0 && extractedExact.length === page.extractedTerms.length,
         evidenceSha256: sha(specific.sort().join('\n'))};

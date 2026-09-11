@@ -88,6 +88,13 @@ await reject('independent opposing consensus',null,{mutate:x=>{
   x.read.independent=x.read.readings.filter(r=>r.engine==='tesseract').map(r=>({...r,fullCode:'283-1-17',prefix:'283',number:17,confidence:90}));
   for(const r of x.read.readings.filter(r=>r.engine==='tesseract'))Object.assign(r,{fullCode:'283-1-17',prefix:'283',number:17,confidence:90,codeCount:1});
  }});
+await reject('mixed-field conjunction cannot weaken the printed-date prefix route',x=>{
+ const terms=[[heading,'松柏清境','海月明','竹风远'],[heading,'清风堂','白云台','明镜阁']];
+ x.views=fieldViews(terms[0]);
+ x.pages=buildVisualBodyPages(terms.map((fieldTexts,i)=>({...x.index[i],fieldTexts})),
+  terms.map((t,i)=>({...x.index[i],views:fieldViews(t)})));
+ assert.equal(adjudicateCodeBody(x).reason,'insufficient-paired-whole-field-evidence');
+});
 const item=freshItem(positive);Object.assign(item,{sourceSha256:positive.photoSha256,alternateCodeReview:positive.alternateCodeReview});
 const history=JSON.stringify(item.codeAuditHistory);
 assert.equal(retainCodeBodyResolution(item,{...positive,pdfSetDigest:'d'.repeat(64)}).status,'resolved');

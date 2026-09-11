@@ -85,7 +85,7 @@ for(const secondEngineAgrees of [false,true]){
 const x=input(),before=JSON.stringify(x);adjudicateCodeBody(x);assert.equal(JSON.stringify(x),before,'no input or raw audit mutation');
 // Three distinct short fields are not one name repeated or three fragments
 // assembled from one OCR line. Synthetic text only; no customer fixtures.
-const shortNames=['松柏青','海月明','竹风远'];
+const shortNames=Object.freeze(['松柏青','海月明','竹风远']);
 function shortViews(names=shortNames){
   const dimensions={width:1000,height:800};
   return visualBodyViewNames.map((view,i)=>{
@@ -99,7 +99,7 @@ function shortViews(names=shortNames){
 }
 function shortInput(){
   const value=input(),terms=[shortNames,['清风堂','白云台','明镜阁']];
-  value.pages=buildVisualBodyPages(terms.map((fieldTexts,i)=>({pdfSha256:pdfHash,pageNumber:i+1,fieldTexts})),
+  value.pages=buildVisualBodyPages(terms.map((fieldTexts,i)=>({pdfSha256:pdfHash,pageNumber:i+1,fieldTexts:[...fieldTexts]})),
     terms.map((f,i)=>({pdfSha256:pdfHash,pageNumber:i+1,views:shortViews(f)})));
   value.views=shortViews();return value;
 }
@@ -108,7 +108,7 @@ assert.equal(adjudicateCodeBody(shortPositive).status,'resolved','three disjoint
 assert.equal(adjudicateCodeBody(shortPositive).policy,'observed-code-plus-three-disjoint-short-fields-v1');
 assert.equal(JSON.stringify(shortPositive),shortBefore);
 assert.doesNotMatch(JSON.stringify(adjudicateCodeBody(shortPositive)),/松柏青|海月明|竹风远/);
-const shortReject=(label,change)=>{const value=shortInput();change(value);assert.notEqual(adjudicateCodeBody(value).status,'resolved',label);};
+const shortReject=(label,change)=>{const value=shortInput();assert.equal(adjudicateCodeBody(value).status,'resolved',`${label}: clean independent positive baseline`);change(value);assert.notEqual(adjudicateCodeBody(value).status,'resolved',label);};
 shortReject('two short fields are insufficient',x=>x.views=shortViews(shortNames.slice(0,2)));
 shortReject('three repetitions are one field',x=>x.views=shortViews([shortNames[0],shortNames[0],shortNames[0]]));
 shortReject('unpositioned text is insufficient',x=>x.views.forEach(v=>delete v.positioned));
@@ -131,6 +131,51 @@ shortReject('wrong code cannot borrow these fields',x=>{x.index[0].number=18;x.i
 shortReject('credible independent code conflict still vetoes',x=>{x.read.independent[0].confidence=90;x.read.readings[2].confidence=90;});
 shortReject('failed view still vetoes',x=>{x.views[3].errors=1;});
 console.log('Three-short-field conjunction: 1 positive and 15 rejection checks PASS');
+// Regression: lengthening one independently corroborated whole field must not
+// remove a valid THREE-field conjunction. Keep the two-long-field route and
+// all original short-field rejection tests above unchanged.
+const mixedNames=Object.freeze(['松柏清境','海月明','竹风远']);
+function mixedInput(names=mixedNames){
+  const value=shortInput(),terms=[names,['清风堂','白云台','明镜阁']];
+  value.pages=buildVisualBodyPages(terms.map((fieldTexts,i)=>({pdfSha256:pdfHash,pageNumber:i+1,fieldTexts:[...fieldTexts]})),
+    terms.map((f,i)=>({pdfSha256:pdfHash,pageNumber:i+1,views:shortViews(f)})));
+  value.views=shortViews(names);return value;
+}
+for(const names of [mixedNames,['松柏清境晨光普照堂',...mixedNames.slice(1)]]){
+  const value=mixedInput(names),before=JSON.stringify(value),result=adjudicateCodeBody(value);
+  assert.equal(result.status,'resolved','one long plus two short whole fields retain the three-disjoint-field threshold');
+  assert.equal(result.policy,'observed-code-plus-three-disjoint-mixed-fields-v1');
+  assert.equal(result.number,17);assert.equal(result.bindingVerified,false);
+  assert.equal(result.support[0].distinctFields,3);assert.equal(result.support[0].independentlyExtractedAndVisible,true);
+  assert.equal(JSON.stringify(value),before);assert.doesNotMatch(JSON.stringify(result),/松柏清境|海月明|竹风远/);
+}
+const mixedReject=(label,change)=>{const value=mixedInput();assert.equal(adjudicateCodeBody(value).status,'resolved',`${label}: clean independent positive baseline`);change(value);assert.notEqual(adjudicateCodeBody(value).status,'resolved',label);};
+mixedReject('one long plus one short is insufficient',x=>x.views=shortViews(mixedNames.slice(0,2)));
+mixedReject('repeated fields do not meet three distinct fields',x=>x.views=shortViews([mixedNames[0],mixedNames[1],mixedNames[1]]));
+mixedReject('unpositioned mixed text cannot authorize',x=>x.views.forEach(v=>delete v.positioned));
+mixedReject('multiline long field cannot be assembled',x=>x.views=shortViews(['松柏\n清境',...mixedNames.slice(1)]));
+mixedReject('long field needs its own PDF extraction, not only PDF OCR',x=>x.pages[0].fieldTexts.shift());
+mixedReject('split PDF glyphs cannot become an extracted long field',x=>x.pages[0].fieldTexts.splice(0,1,...mixedNames[0]));
+mixedReject('long field needs paired visible PDF support',x=>{x.pages[0].visibleFieldViews[1].text=mixedNames.slice(1).join('。');x.pages[0].supplementalText[1]=x.pages[0].visibleFieldViews[1].text;});
+mixedReject('long field only in one photo view cannot be pooled',x=>{x.views[1]=shortViews(mixedNames.slice(1))[1];});
+mixedReject('long field inside a longer foreign field is not unique',x=>x.pages[1].fieldTexts.push('敬祝'+mixedNames[0]));
+mixedReject('short field still requires independent extraction',x=>x.pages[0].fieldTexts.pop());
+mixedReject('long photo line containing a target substring is not a whole field',x=>x.views=shortViews(['敬祝'+mixedNames[0],...mixedNames.slice(1)]));
+mixedReject('changed actual crop invalidates mixed proof',x=>x.views[0].positioned.fields[0].crop.left++);
+mixedReject('overlapping mixed crops do not prove separate fields',x=>{
+  for(const [i,v] of x.views.slice(0,2).entries())for(const [j,f] of v.positioned.fields.entries()){
+    f.region.left=.1+j*.12;f.region.top=.2;f.crop=horizontalBodyCrop(f.region,v.positioned.dimensions,i===0?.35:.65);
+  }
+});
+mixedReject('duplicate long detector occurrence cannot supply unique proof',x=>x.views=shortViews([mixedNames[0],...mixedNames]));
+mixedReject('credible independent wrong code remains a veto',x=>{x.read.independent[0].confidence=90;x.read.readings[2].confidence=90;});
+mixedReject('one low confidence original code crop is insufficient',x=>{x.read.observations[1].confidence=.84;x.read.readings[1].confidence=.84;});
+mixedReject('wrong number cannot borrow mixed body',x=>{x.index[0].number=18;x.index[1].number=17;});
+mixedReject('opposite body evidence remains a veto',x=>x.views=shortViews([...mixedNames,'清风堂']));
+mixedReject('duplicate bodies remain unresolved',x=>{x.pages[1]={...structuredClone(x.pages[0]),pageNumber:2};});
+mixedReject('changed original source hash remains invalid',x=>x.photoSha256='c'.repeat(64));
+mixedReject('failed body view is not missing evidence',x=>x.views[3].errors=1);
+console.log('Mixed whole-field conjunction: 2 positives and 21 rejection checks PASS');
 assert.doesNotMatch(JSON.stringify(run()),/松风|晨光|海月|竹影/,'receipts contain hashes/counts, not private body fields');
 function freshItem(x){return {number:null,reliable:false,sourceSha256:hash,detectedCodeRead:{...x.read,expectedPrefix:'263'},
   codeAuditHistory:[{status:'unresolved',number:null,reason:'detected-code-number-conflict',
@@ -151,5 +196,12 @@ for(const reason of ['independent-code-audit-conflicting','detected-code-reader-
 }
 const prior=freshItem(input());prior.pdfRecheck={status:'rejected'};
 assert.notEqual(retainCodeBodyResolution(prior,{...input(),pdfSetDigest:'d'.repeat(64)}).status,'resolved');
+const mixedClaimInput=mixedInput(),mixedClaim=freshItem(mixedClaimInput),mixedAudit=JSON.stringify(mixedClaim.codeAuditHistory);
+assert.equal(retainCodeBodyResolution(mixedClaim,{...mixedClaimInput,pdfSetDigest:'d'.repeat(64)}).status,'resolved');
+assert.equal(codeBodyResolution(mixedClaim).policy,'observed-code-plus-three-disjoint-mixed-fields-v1');
+assert.equal(JSON.stringify(mixedClaim.codeAuditHistory),mixedAudit);
+assert.equal(codeBodyResolution(structuredClone(mixedClaim)),null,'serialized mixed proof cannot authorize a new process');
+mixedClaim.codeBodyAdjudication.support[0].fieldHashes.pop();
+assert.equal(codeBodyResolution(mixedClaim),null,'altered field proof revokes the mixed authorization');
 console.log('Code/body adjudication regression PASS: positive join, safety and retained-audit gates');
 export {input as codeBodyTestInput,freshItem,views};

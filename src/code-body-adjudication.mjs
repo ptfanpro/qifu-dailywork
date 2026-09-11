@@ -205,19 +205,20 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alterna
     weakAlternatives:all.filter(o=>o.fullCode!==code.fullCode).length,bindingVerified:false};
 }
 
-function shortFieldConjunction(views,fields,target){
+function shortFieldConjunction(views,fields,target,{mixed=false}={}){
   if(!validPositionedBodyViews(views))return [];
   const ordered=visualBodyViewNames.map(name=>views.find(v=>v.view===name)),support=[];
   const shortHash=text=>{
     if(/[\r\n\u2028\u2029]/u.test(text))return null;
     const value=text.normalize('NFKC').replace(/\s/gu,'');
-    return /^\p{Script=Han}{3}$/u.test(value)?crypto.createHash('sha256').update(value).digest('hex'):null;
+    return (mixed?/^\p{Script=Han}{3,40}$/u:/^\p{Script=Han}{3}$/u).test(value)?crypto.createHash('sha256').update(value).digest('hex'):null;
   };
   const overlaps=(a,b)=>Math.min(a.left+a.width,b.left+b.width)>Math.max(a.left,b.left)
     &&Math.min(a.top+a.height,b.top+b.height)>Math.max(a.top,b.top);
   for(const offset of [0,2]){
     const pair=fields.readings.slice(offset,offset+2).map(r=>r.ranked.find(p=>id(p)===id(target)));
-    const common=pair[0].corroboratedShortFieldHashes.filter(h=>pair[1].corroboratedShortFieldHashes.includes(h));
+    const key=mixed?'corroboratedWholeFieldHashes':'corroboratedShortFieldHashes';
+    const common=pair[0][key].filter(h=>pair[1][key].includes(h));
     const stable=[];
     for(const hash of common){
       const observations=ordered.slice(offset,offset+2).map(v=>v.positioned.fields.filter(f=>shortHash(f.text)===hash));
@@ -225,9 +226,11 @@ function shortFieldConjunction(views,fields,target){
       stable.push({hash,observations:observations.flat()});
     }
     // No pooling fragments, repeated detections, or overlapping padded crops.
-    // This adds a stricter multi-field route for short names; it does not
-    // lower the existing two-long-field or positioned-geometry thresholds.
+    // A mixture retains the same THREE-field minimum, every source check and
+    // the disjointness requirement. Lengthening one field must not remove a
+    // valid conjunction. The original short-only route is tried first.
     if(stable.length<3||stable.some((a,i)=>stable.slice(i+1).some(b=>a.observations.some((f,j)=>overlaps(f.crop,b.observations[j].crop)))))continue;
+    if(mixed&&!stable.some(f=>!pair[0].corroboratedShortFieldHashes.includes(f.hash)))continue;
     support.push({views:ordered.slice(offset,offset+2).map(v=>v.view),fieldHashes:stable.map(f=>f.hash),
       distinctFields:stable.length,independentlyExtractedAndVisible:true,disjointPhotoCrops:true});
   }
@@ -266,9 +269,10 @@ export function adjudicateCodeBody(input) {
       if(common.length>=2)support.push({views:fields.readings.slice(offset,offset+2).map(r=>r.view),fieldHashes:common});
     }
     const shortSupport=support.length||candidate.prefixReviewSha256||candidate.requiresPrintedDate?[]:shortFieldConjunction(views,fields,candidate.target);
-    if(!support.length&&!shortSupport.length)return unresolved('insufficient-paired-whole-field-evidence');
-    return {...candidate,status:'resolved',policy:support.length?'observed-code-plus-paired-current-body-v1':'observed-code-plus-three-disjoint-short-fields-v1',
-      bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),support:support.length?support:shortSupport,assessment,
+    const mixedSupport=support.length||shortSupport.length||candidate.prefixReviewSha256||candidate.requiresPrintedDate?[]:shortFieldConjunction(views,fields,candidate.target,{mixed:true});
+    if(!support.length&&!shortSupport.length&&!mixedSupport.length)return unresolved('insufficient-paired-whole-field-evidence');
+    return {...candidate,status:'resolved',policy:support.length?'observed-code-plus-paired-current-body-v1':shortSupport.length?'observed-code-plus-three-disjoint-short-fields-v1':'observed-code-plus-three-disjoint-mixed-fields-v1',
+      bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),support:support.length?support:shortSupport.length?shortSupport:mixedSupport,assessment,
       ...(dateSupport?{printedDateSupport:dateSupport}:{}),
       // Page correspondence only, NOT a statement that online order sets or
       // upload counts have been verified. Those gates remain separate.
