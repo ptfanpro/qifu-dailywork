@@ -79,8 +79,17 @@ two-server-view path remains unchanged.
   assumption. Neither failure was counted as passing or suppressed. The full
   unmodified suite was rerun from the authoritative repository and passed.
 
-Full-day reruns at the candidate fingerprint remain separate unfinished
-gates. Their launch does not mean they passed. The broader unobserved-code and
+- July 1 complete-day rerun at the candidate fingerprint finished: 16 photos,
+  13 physical PDF pages, 11 assigned / 5 unresolved, 788.926 seconds; 22 fresh
+  body reads, zero body-cache hits. Both old and new report/source/copy/plan
+  bindings were independently rechecked. Against ccd8046cd325: one added,
+  zero lost or changed assignments, all 16 raw detector audits unchanged.
+  The new assignment is the independently inspected physical-page match from
+  the targeted check. `ready` remains false. Old filename/reference agreement
+  is not independent ground-truth accuracy or online business acceptance.
+
+The June 13 complete-day rerun at the candidate fingerprint remains unfinished.
+Its launch does not mean it passed. The broader unobserved-code and
 body-review eligibility gaps remain open; this repair does not solve every
 residual photo. No production uploads, date-default changes, login changes,
 launcher changes, deployment, release tag or main-branch merge occurred.
