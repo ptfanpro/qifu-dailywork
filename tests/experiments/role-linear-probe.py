@@ -13,20 +13,22 @@ RIDGE = 0.1
 MIN_GAP = 0.15
 
 
-def normalized_views(row):
+def normalized_views(row, dimensions=512):
+    if type(dimensions) is not int or not 1 <= dimensions <= 4096:
+        raise ValueError("Explicit bounded feature dimension required")
     views = row.get("views", [])
     if len(views) != 2 or set(v.get("view") for v in views) != set(VIEWS):
         raise ValueError("Incomplete feature views")
     arrays = []
     for name in VIEWS:
         a = np.asarray(next(v["embedding"] for v in views if v["view"] == name), dtype=np.float64)
-        if a.shape != (512,) or not np.isfinite(a).all() or np.linalg.norm(a) < 1e-8:
+        if a.shape != (dimensions,) or not np.isfinite(a).all() or np.linalg.norm(a) < 1e-8:
             raise ValueError("Invalid frozen embedding")
         arrays.append(a / np.linalg.norm(a))
     return arrays
 
 
-def fit(rows):
+def fit(rows, *, dimensions=512):
     if len(rows) < 4 or any(r.get("reviewed") is not True or r.get("role") not in ROLES for r in rows):
         raise ValueError("Manually reviewed training roles required")
     ids = [r["sha256"] for r in rows]
@@ -34,7 +36,7 @@ def fit(rows):
         raise ValueError("Duplicate or missing training identity")
     if set(r["role"] for r in rows) != set(ROLES):
         raise ValueError("All four roles required")
-    arrays = [normalized_views(r) for r in rows]
+    arrays = [normalized_views(r, dimensions) for r in rows]
     # Equal total influence per role. All constants fixed before evaluation.
     weights = np.array([len(rows) / (4 * sum(s["role"] == r["role"] for s in rows)) for r in rows])
     targets = np.array([[float(r["role"] == role) for role in ROLES] for r in rows])
@@ -47,13 +49,14 @@ def fit(rows):
         b = (targets - mean_y) * np.sqrt(weights[:, None])
         dual = np.linalg.solve(a @ a.T + RIDGE * np.eye(len(rows)), b)
         models.append((mean_x, mean_y, a.T @ dual))
-    return {"models": models, "trainingDates": set(r["date"] for r in rows), "trainingHashes": set(ids)}
+    return {"models": models, "dimensions": dimensions,
+            "trainingDates": set(r["date"] for r in rows), "trainingHashes": set(ids)}
 
 
 def predict(model, row, enforce_holdout=True):
     if enforce_holdout and (row["date"] in model["trainingDates"] or row["sha256"] in model["trainingHashes"]):
         raise ValueError("Training/evaluation identity leakage")
-    arrays = normalized_views(row)
+    arrays = normalized_views(row, model.get("dimensions", 512))
     results = []
     for a, (mean_x, mean_y, weights) in zip(arrays, model["models"]):
         scores = (a - mean_x) @ weights + mean_y

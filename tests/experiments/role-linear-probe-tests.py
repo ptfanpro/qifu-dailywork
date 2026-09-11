@@ -24,6 +24,27 @@ class RoleLinearTests(unittest.TestCase):
             self.assertEqual(p["candidate"], None if role == "mixed-scene" else role)
             self.assertFalse(p["bindingVerified"] or p["mayAuthorizeUpload"] or p["mayClearCodeConflict"])
 
+    def test_explicit_context_dimension_is_bound_to_model_not_guessed(self):
+        from copy import deepcopy
+        rows = deepcopy(self.rows)
+        for r in rows:
+            for v in r['views']:
+                v['embedding'] += [0.0] * 2048
+        with self.assertRaises(ValueError): m.fit(rows)
+        model = m.fit(rows, dimensions=2560)
+        self.assertEqual(model['dimensions'], 2560)
+        query = deepcopy(rows[0]); query['date'] = 'evaluation'; query['sha256'] = 'separate'
+        self.assertEqual(m.predict(model, query)['candidate'], 'paper')
+        with self.assertRaises(ValueError): m.predict(model, row('paper', 18, 'evaluation'))
+        for dimension in [0, -1, 4097, 512.5, True]:
+            with self.assertRaises(ValueError): m.fit(self.rows, dimensions=dimension)
+
+    def test_explicit_original_dimension_preserves_all_original_scores(self):
+        model = m.fit(self.rows, dimensions=512)
+        for k, role in enumerate(m.ROLES):
+            query = row(role, k+10, 'evaluation')
+            self.assertEqual(m.predict(model, query), m.predict(self.model, query))
+
     def test_date_or_content_overlap_rejected(self):
         for r in [row("paper", 15), row("paper", 0, "evaluation")]:
             with self.assertRaises(ValueError): m.predict(self.model, r)

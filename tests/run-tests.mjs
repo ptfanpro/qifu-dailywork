@@ -59,6 +59,8 @@ import './experiments/reference-role-reader-regression.mjs';
 import './experiments/balanced-reference-role-regression.mjs';
 import './experiments/flame-object-regression.mjs';
 import './experiments/pdf-image-candidates-regression.mjs';
+import './experiments/fixed-context-regression.mjs';
+import './experiments/center-context-regression.mjs';
 import './experiments/detected-code-observation-regression.mjs';
 import './experiments/detection-cache-regression.mjs';
 import './experiments/tiled-text-regions-regression.mjs';
