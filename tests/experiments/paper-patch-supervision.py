@@ -60,7 +60,9 @@ def unit_patches(values):
     return a/norms
 
 
-def fit_patch_probe(records):
+def fit_patch_probe(records, *, ridge=.1):
+    if type(ridge) not in (int,float) or not np.isfinite(ridge) or ridge <= 0:
+        raise ValueError('Positive finite regularization required')
     xs, ys, ws = [], [], []
     for record in records:
         x, y = np.asarray(record['features'],dtype=np.float64), np.asarray(record['labels'])
@@ -82,7 +84,7 @@ def fit_patch_probe(records):
         if not subset.any(): raise ValueError('Both classes required')
         w[subset]/=w[subset].sum()
     x=np.column_stack((x,np.ones(len(x))))
-    penalty=np.eye(x.shape[1])*.1; penalty[-1,-1]=0
+    penalty=np.eye(x.shape[1])*ridge; penalty[-1,-1]=0
     return np.linalg.solve(x.T@(w[:,None]*x)+penalty,x.T@(w*y))
 
 

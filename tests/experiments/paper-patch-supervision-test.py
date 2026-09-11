@@ -53,4 +53,11 @@ class GeometryTests(unittest.TestCase):
         self.assertGreater(np.r_[x[0],1]@a, np.r_[x[1],1]@a)
         with self.assertRaises(ValueError): m.fit_patch_probe([{'features':x,'labels':np.zeros(4)}])
 
+    def test_regularization_is_explicit_positive_and_default_is_preserved(self):
+        rows=[{'features':np.array([[1.,0],[0,1]]),'labels':np.array([1,0])}]
+        np.testing.assert_allclose(m.fit_patch_probe(rows),m.fit_patch_probe(rows,ridge=.1))
+        self.assertGreater(m.fit_patch_probe(rows,ridge=.001)[0],m.fit_patch_probe(rows)[0])
+        for invalid in (0,-1,True,float('nan'),float('inf'),'0.1'):
+            with self.assertRaises(ValueError): m.fit_patch_probe(rows,ridge=invalid)
+
 if __name__=='__main__': unittest.main()
