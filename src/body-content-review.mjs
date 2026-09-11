@@ -6,8 +6,8 @@ import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
 import {createChineseBodyReader} from './chinese-body-reader.mjs';
-import {rankBodyTextEvidence} from './body-text-evidence.mjs';
-import {compareBodyFieldEvidence} from './body-field-evidence.mjs';
+import {createBodyTextRanker} from './body-text-evidence.mjs';
+import {createBodyFieldComparator} from './body-field-evidence.mjs';
 import {buildVisualBodyPages,visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
 import {readBodyObservation} from './body-observation-cache.mjs';
 const require=createRequire(import.meta.url), hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
@@ -17,8 +17,18 @@ export function assessBodyClaim(views,pages,claim) {
   if(!claim || pages.filter(p=>id(p)===id(claim)).length!==1) throw Error('Invalid claimed PDF identity');
   if(!Array.isArray(views)||views.length!==4||visualBodyViewNames.some(n=>views.filter(v=>v.view===n).length!==1)) throw Error('Incomplete body views');
   if(views.some(v=>v.errors!==0||v.truncated!==false||typeof v.text!=='string')) return {status:'body-reader-unavailable',bindingVerified:false};
+  return createBodyClaimAssessor(pages)(views,claim);
+}
+
+export function createBodyClaimAssessor(pages) {
+  const rank=createBodyTextRanker(pages),compareFields=createBodyFieldComparator(pages);
+  const ids=new Set(pages.map(id));
+  return (views,claim) => {
+  if(!claim || !ids.has(id(claim))) throw Error('Invalid claimed PDF identity');
+  if(!Array.isArray(views)||views.length!==4||visualBodyViewNames.some(n=>views.filter(v=>v.view===n).length!==1)) throw Error('Incomplete body views');
+  if(views.some(v=>v.errors!==0||v.truncated!==false||typeof v.text!=='string')) return {status:'body-reader-unavailable',bindingVerified:false};
   const results=visualBodyViewNames.map(name=>{
-    const evidence=rankBodyTextEvidence(views.find(v=>v.view===name).text,pages);
+    const evidence=rank(views.find(v=>v.view===name).text);
     return {view:name,observedGrams:evidence.observedGrams,ranked:evidence.ranked};
   });
   const candidates=results.map(r=>r.ranked.filter(p=>p.corroboratedUniqueMatchedGrams>0));
@@ -30,7 +40,7 @@ export function assessBodyClaim(views,pages,claim) {
     .map(p=>({view:r.view,pdfSha256:p.pdfSha256,pageNumber:p.pageNumber,
       uniqueMatchedGrams:p.uniqueMatchedGrams,corroboratedUniqueMatchedGrams:p.corroboratedUniqueMatchedGrams,
       evidenceSha256:p.uniqueEvidenceSha256})));
-  const fieldEvidence=compareBodyFieldEvidence(views,pages);
+  const fieldEvidence=compareFields(views);
   const fieldCandidates=fieldEvidence.readings.map(r=>r.ranked.filter(p=>p.specificExactFields>0));
   // Even a non-leading foreign candidate is contrary content, not a vote
   // that a higher score may cancel. One-view evidence stays ambiguous.
@@ -40,6 +50,7 @@ export function assessBodyClaim(views,pages,claim) {
   const status=pairedForeign?'conflicting-body':foreign.some(ps=>ps.length)?'ambiguous-body'
     :candidates.some(ps=>ps.length)||fieldCandidates.some(ps=>ps.length)?'observed-body-consistent':'no-specific-body-evidence';
   return {status,bindingVerified:false,results,fieldEvidence,uncorroboratedForeignEvidence};
+  };
 }
 
 export function bodyReviewBlockReason(item) {
@@ -127,6 +138,7 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
     });
     if(expectedIds.some(x=>!x)||new Set(expectedIds).size!==expectedIds.length
       ||pages.length!==expectedIds.length||pages.some(p=>!expectedIds.includes(id(p)))||new Set(pages.map(id)).size!==pages.length)throw Error('Incomplete body/index page identity');
+    const assess=createBodyClaimAssessor(pages);
     for(let i=0;i<claims.length;i++) {
       const claim=claims[i];
       let assessment;
@@ -134,7 +146,7 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
         const positions=pdfPages.map((p,index)=>p.number===claim.number?index:-1).filter(n=>n>=0);
         if(positions.length!==1)throw Error('Claimed number is not unique');
         const target=pages.find(p=>id(p)===expectedIds[positions[0]]);
-        assessment=assessBodyClaim(await readViews(fs.readFileSync(claim.file)),pages,target);
+        assessment=assess(await readViews(fs.readFileSync(claim.file)),target);
       } catch {assessment={status:'body-reader-unavailable',bindingVerified:false};}
       results.push({...originals[i],...assessment});
       onProgress?.(`正文归属检查：${i+1}/${claims.length} 张完成。`);

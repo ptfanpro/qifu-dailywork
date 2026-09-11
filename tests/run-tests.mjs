@@ -46,6 +46,7 @@ import './body-content-guard-regression.mjs';
 import './body-observation-cache-regression.mjs';
 import './body-short-field-guard-regression.mjs';
 import './body-pdf-corroboration-regression.mjs';
+import './body-index-reuse-regression.mjs';
 import './photo-upload-body-gate-regression.mjs';
 import './photo-upload-input-regression.mjs';
 import './photo-upload-receipt-integration.mjs';

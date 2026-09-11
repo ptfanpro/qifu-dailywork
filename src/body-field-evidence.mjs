@@ -34,16 +34,17 @@ function pairedVisibleFields(page) {
 }
 
 export function compareBodyFieldEvidence(views, pages) {
+  return createBodyFieldComparator(pages)(views);
+}
+
+// Build only for the current verified PDF set. No global cache or mutable
+// caller-owned arrays are used while querying later photos in this batch.
+export function createBodyFieldComparator(pages) {
   if (!Array.isArray(pages) || !pages.length || pages.some(p => !/^[a-f0-9]{64}$/.test(p.pdfSha256 || '')
     || !Number.isInteger(p.pageNumber) || p.pageNumber < 1 || !Array.isArray(p.fieldTexts)
     || p.fieldTexts.some(t => typeof t !== 'string') || !Array.isArray(p.supplementalText)
     || p.supplementalText.some(t => typeof t !== 'string'))) throw Error('Invalid field corpus');
   if (new Set(pages.map(id)).size !== pages.length) throw Error('Duplicate field page identity');
-  if (!Array.isArray(views) || views.length !== visualBodyViewNames.length
-    || visualBodyViewNames.some(name => views.filter(v => v.view === name).length !== 1)) throw Error('Incomplete field views');
-  if (views.some(v => typeof v.text !== 'string' || v.errors !== 0 || v.truncated !== false)) {
-    throw Error('Failed or truncated field views');
-  }
   const corpus = pages.map(page => {
     // One PDF text item is one extraction boundary. Do not form a name by
     // joining adjacent fields, page fragments, or text/visual sources.
@@ -58,6 +59,12 @@ export function compareBodyFieldEvidence(views, pages) {
     // Equality of extracted fields is insufficient: also exclude terms inside
     // longer fields or visible template OCR on ANY other candidate page.
     frequency.set(term, corpus.filter(p => p.allVisibleRuns.some(text => text.includes(term))).length);
+  }
+  return views => {
+  if (!Array.isArray(views) || views.length !== visualBodyViewNames.length
+    || visualBodyViewNames.some(name => views.filter(v => v.view === name).length !== 1)) throw Error('Incomplete field views');
+  if (views.some(v => typeof v.text !== 'string' || v.errors !== 0 || v.truncated !== false)) {
+    throw Error('Failed or truncated field views');
   }
   const readings = visualBodyViewNames.map(name => {
     const view = views.find(v => v.view === name), observed = new Set(runs(view.text));
@@ -95,6 +102,7 @@ export function compareBodyFieldEvidence(views, pages) {
       else state = 'single-page-field-candidate';
     }
   }
-  return {status: 'diagnostic-only-not-binding', state, pages: pages.length, readings,
+  return {status: 'diagnostic-only-not-binding', state, pages: corpus.length, readings,
     note: 'Exact short fields and extracted-field coverage do not prove visual completeness, region alignment, multiplicity or order identity. No assignments.'};
+  };
 }

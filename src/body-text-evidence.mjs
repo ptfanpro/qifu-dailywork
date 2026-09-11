@@ -20,6 +20,12 @@ export function bodyTextGrams(text, size = 4) {
 }
 
 export function rankBodyTextEvidence(photoText, pages) {
+  return createBodyTextRanker(pages)(photoText);
+}
+
+// Per-batch immutable-in-practice snapshot, not a persisted decision cache.
+// The closure owns sets of strings/hashes and exposes only fresh query results.
+export function createBodyTextRanker(pages) {
   const ids = new Set();
   const records = pages.map(page => {
     if (!/^[a-f0-9]{64}$/.test(page.pdfSha256 || '') || !Number.isInteger(page.pageNumber) || page.pageNumber < 1) {
@@ -61,6 +67,7 @@ export function rankBodyTextEvidence(photoText, pages) {
   });
   const frequency = new Map();
   for (const page of records) for (const gram of page.grams) frequency.set(gram, (frequency.get(gram) || 0) + 1);
+  return photoText => {
   const observed = bodyTextGrams(photoText);
   const ranked = records.map(page => {
     const matched = [...page.grams].filter(gram => observed.has(gram));
@@ -74,7 +81,8 @@ export function rankBodyTextEvidence(photoText, pages) {
   }).sort((a, b) => b.uniqueMatchedGrams - a.uniqueMatchedGrams || b.matchedGrams - a.matchedGrams
     || a.pdfSha256.localeCompare(b.pdfSha256) || a.pageNumber - b.pageNumber);
   return {status: 'diagnostic-only-not-binding', observedGrams: observed.size,
-    textBearingPages: records.filter(page => page.grams.size > 0).length, totalPages: pages.length,
+    textBearingPages: records.filter(page => page.grams.size > 0).length, totalPages: records.length,
     topUniqueTieCount: ranked.filter(page => page.uniqueMatchedGrams === ranked[0]?.uniqueMatchedGrams).length,
     ranked};
+  };
 }
