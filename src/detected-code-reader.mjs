@@ -1,11 +1,32 @@
 // Content-located code observations. This layer never chooses a PDF or order.
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
 import {recognizeLocalTextLine} from './local-ocr.mjs';
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 import {horizontalBodyCrop} from './vertical-body-regions.mjs';
 export {componentRegions, createTextDetector} from './body-text-detector.mjs';
 const require=createRequire(import.meta.url),sharp=require('sharp');
+const rawKeys=['regions','observations','independent','readings','coverage','errors','incompleteTailObserved',
+  'sourceDimensions','engines','review','segmentationReview','rawLineReview','inputSha256'];
+const baseReadDigest=read=>crypto.createHash('sha256').update(JSON.stringify(
+  Object.fromEntries(rawKeys.filter(k=>read?.[k]!==undefined).map(k=>[k,read[k]])))).digest('hex');
+function completeCoverage(read) {
+  const c=read?.coverage;
+  return read?.engines===2&&read.errors===0&&!read.errorCode&&c?.completed===true
+    &&c.kind==='detected-horizontal-regions'&&Number.isInteger(read.regions)&&read.regions>0&&read.regions<1000
+    &&Number.isInteger(c.eligibleRegions)&&c.eligibleRegions>0&&c.eligibleRegions<=read.regions
+    &&c.processedRegions===c.eligibleRegions;
+}
+function canReadLargerScale(read,prefix) {
+  const rows=[...(read?.observations||[]),...(read?.independent||[])],d=read?.sourceDimensions;
+  const support=(items,threshold)=>new Set(items.filter(o=>o.confidence>=threshold).map(o=>o.padding)).size===2;
+  return Boolean(d&&Number.isInteger(d.width)&&d.width>0&&Number.isInteger(d.height)&&d.height>0
+    &&Math.max(d.width,d.height)>1536&&completeCoverage(read)&&!read.incompleteTailObserved
+    &&read.rawLineReview?.completed&&validDetectedCodeReview(read)
+    &&rows.length&&new Set(rows.map(o=>o.fullCode)).size===1&&rows.every(o=>o.prefix===String(prefix))
+    &&support(read.observations,.65)&&!support(read.independent,30));
+}
 // A fixed supplemental view for black print on coloured paper. This is the
 // SAME Tesseract engine, not a third vote. No crop/answer-dependent tuning.
 export async function detectedCodeContrastImage(bytes) {
@@ -17,6 +38,16 @@ export function validDetectedCodeReview(read) {
     &&(!Array.isArray(read[key])||read[key].some(o=>!o||typeof o!=='object'))))return false;
   const extra=(read?.independent||[]).filter(o=>o.preprocessing!=null);
   if(extra.some(o=>!['red-channel-96-v1','gray-96-word-v1','red-96-raw-line-v1'].includes(o.preprocessing)))return false;
+  if(read?.nativeScaleReview!==undefined) {
+    const review=read.nativeScaleReview,child=review?.read;
+    if(!review||review.recipe!=='whole-frame-2048-v1'||review.maxSide!==2048||review.completed!==true
+      ||!/^\d{3,4}$/.test(review.expectedPrefix)||review.baseReadSha256!==baseReadDigest(read)
+      ||!child||child.nativeScaleReview!==undefined||!completeCoverage(child)
+      ||!validDetectedCodeReview(child)||!/^[a-f0-9]{64}$/.test(read.inputSha256||'')
+      ||child.inputSha256!==read.inputSha256||!read.sourceDimensions
+      ||child.sourceDimensions?.width!==read.sourceDimensions.width
+      ||child.sourceDimensions?.height!==read.sourceDimensions.height)return false;
+  }
   return validSupplementalReview(read,'review','red-channel-96-v1')
     &&validSupplementalReview(read,'segmentationReview','gray-96-word-v1')
     &&validSupplementalReview(read,'rawLineReview','red-96-raw-line-v1');
@@ -192,5 +223,23 @@ export async function readDetectedCodes(detector,appRoot,source,prefix,{worker=n
     ...(segmentationReview?{segmentationReview}:{}),
     ...(rawLineReview?{rawLineReview}:{}),
     sourceDimensions:{width:original.info.width,height:original.info.height},engines:worker?2:1,
+    ...(Buffer.isBuffer(source)?{inputSha256:crypto.createHash('sha256').update(source).digest('hex')} : {}),
     confirmed:corroborated?code.number:null,bindingVerified:false,seconds:(Date.now()-started)/1000};
+}
+
+// One bounded additional WHOLE-frame read, not a crop chosen by a PDF answer.
+// Keep every original observation. A larger detector view is not a new engine;
+// consumers still require independent Paddle/Tesseract support and PDF/body
+// binding. Normal successes, conflicts, partial coverage and small inputs skip.
+export async function readDetectedCodesWithScaleReview(detector,appRoot,source,prefix,options={}) {
+  if(!Buffer.isBuffer(source))throw Error('Scale review requires explicit source bytes');
+  const base=await readDetectedCodes(detector,appRoot,source,prefix,options);
+  if(!canReadLargerScale(base,prefix))return base;
+  const review={recipe:'whole-frame-2048-v1',maxSide:2048,expectedPrefix:String(prefix),
+    baseReadSha256:baseReadDigest(base),completed:false,read:null};
+  try {
+    review.read=await readDetectedCodes({detect:bytes=>detector.detect(bytes,{maxSide:2048})},appRoot,source,prefix,options);
+    review.completed=completeCoverage(review.read);
+  }catch{review.errorCode='scale-reader-unavailable';}
+  return {...base,nativeScaleReview:review};
 }

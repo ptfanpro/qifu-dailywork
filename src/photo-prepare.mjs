@@ -13,7 +13,7 @@ import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBindi
 import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 import {createPdfPrintCodeEvidence,appendPdfPrintCodeObservation} from './pdf-print-code-evidence.mjs';
-import {readDetectedCodes,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
+import {readDetectedCodesWithScaleReview,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
 import {readDetectedObservation,detectedRuntimeFingerprint} from './detected-observation-cache.mjs';
 import {pdfReviewBlockReason,recordPdfClaimReview,createPhotoReviewExclusions,reviewExcludedPhotoNames,assertPhotoReviewIsolation} from './photo-review-isolation.mjs';
 export {parseCompletePrintedCodes} from './printed-code-parser.mjs';
@@ -1323,6 +1323,23 @@ export function summarizeDetectedCodeRead(read,expectedPrefix,expectedNumbers) {
   // Validate saved evidence before deriving observations: corrupt records must
   // be rejected, not crash a resume or get treated as a fresh successful read.
   if(!validDetectedCodeReview(read))return {number:null,reason:'detected-code-review-incomplete',observations:[],evidence:null};
+  if(read?.nativeScaleReview) {
+    const {nativeScaleReview,...base}=read;
+    const initial=summarizeDetectedCodeRead(base,expectedPrefix,expectedNumbers);
+    const extra=summarizeDetectedCodeRead(nativeScaleReview.read,expectedPrefix,expectedNumbers);
+    const observations=[...initial.observations,...extra.observations.map(o=>({...o,crop:`native-2048-${o.crop}`}))];
+    // This review can fill missing independent support only. It cannot erase
+    // an original conflict or import another namespace, even at low confidence.
+    let reason=null;
+    if(nativeScaleReview.expectedPrefix!==String(expectedPrefix))reason='detected-code-prefix-conflict';
+    else if(initial.reason!=='detected-code-unconfirmed')reason=initial.reason||'detected-code-scale-review-unexpected';
+    else if(hasCompleteCodePrefixConflict(observations))reason='detected-code-prefix-conflict';
+    else if(new Set(observations.map(o=>o.fullCode)).size>1)reason='detected-code-number-conflict';
+    else if(extra.reason)reason=extra.reason;
+    else if(!Number.isInteger(extra.number))reason='detected-code-unconfirmed';
+    return {number:reason?null:extra.number,reason,observations,evidence:reason?null:{...extra.evidence,
+      observations,votes:observations.length,locationMethod:'content-detected-whole-frame-scale-review',bindingVerified:false}};
+  }
   const raw=[...(read?.observations || []),...(read?.independent || [])];
   const observations=raw.map(o=>({...o,cropBounds:o.crop,crop:`detected-${o.index}-${o.padding}`,
     fullCodeValidated:true,expectedPrefix:String(expectedPrefix),prefixDistance:o.prefix===String(expectedPrefix)?0:null}));
@@ -1381,7 +1398,7 @@ async function readPhotoDetectedCode({appRoot,worker,file,expectedPrefix},detect
   let reader=detector;
   try {
     reader ||= await createTextDetector(appRoot,path.join(appRoot,'models/paddleocr-zh-v4/ch_PP-OCRv4_det_mobile.onnx'));
-    return await readDetectedCodes(reader,appRoot,fs.readFileSync(file),expectedPrefix,{worker,maxRegions:100});
+    return await readDetectedCodesWithScaleReview(reader,appRoot,fs.readFileSync(file),expectedPrefix,{worker,maxRegions:100});
   } catch {return {observations:[],independent:[],errors:1,errorCode:'detected-code-reader-unavailable',
     coverage:{completed:false},confirmed:null,bindingVerified:false};}
   finally {if(reader&&!detector)await reader.release();}
@@ -4104,7 +4121,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       source:fs.readFileSync(args.file),fingerprint:pdfIndexBinding.recognizerFingerprint,runtimeFingerprint:detectedRuntime,
       prefix:args.expectedPrefix,maxRegions:100,read:async source=>{
         detectedDetectorPromise ||= createTextDetector(appRoot,path.join(appRoot,'models/paddleocr-zh-v4/ch_PP-OCRv4_det_mobile.onnx'));
-        return readDetectedCodes(await detectedDetectorPromise,appRoot,source,args.expectedPrefix,{worker:args.worker,maxRegions:100});
+        return readDetectedCodesWithScaleReview(await detectedDetectorPromise,appRoot,source,args.expectedPrefix,{worker:args.worker,maxRegions:100});
       }});
     if(result.cacheHit)onProgress?.(`已复用 ${++detectedCacheHits} 张同源同模型的完整编号原始观察；编号和 PDF 归属仍重新校验。`);
     return result.observation;

@@ -6,13 +6,18 @@ import {validDetectedCodeReview} from './detected-code-reader.mjs';
 const require=createRequire(import.meta.url),sha=value=>crypto.createHash('sha256').update(value).digest('hex');
 const digest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 const keys=['regions','observations','independent','readings','coverage','errors','incompleteTailObserved',
-  'sourceDimensions','engines','review','segmentationReview','rawLineReview'];
-const rawOnly=read=>({...Object.fromEntries(keys.filter(k=>read?.[k]!==undefined).map(k=>[k,structuredClone(read[k])])),
-  confirmed:null,bindingVerified:false});
+  'sourceDimensions','engines','review','segmentationReview','rawLineReview','inputSha256','nativeScaleReview'];
+const rawOnly=read=>{
+  const result={...Object.fromEntries(keys.filter(k=>read?.[k]!==undefined).map(k=>[k,structuredClone(read[k])])),
+    confirmed:null,bindingVerified:false};
+  if(result.nativeScaleReview?.read)result.nativeScaleReview.read=rawOnly(result.nativeScaleReview.read);
+  return result;
+};
 const sameCrop=(a,b)=>['left','top','width','height'].every(k=>a?.[k]===b?.[k]);
 function complete(read,maxRegions){
   if(!read||read.bindingVerified!==false||read.engines!==2||read.errors!==0||read.errorCode||read.error
     ||!validDetectedCodeReview(read)||typeof read.incompleteTailObserved!=='boolean')return false;
+  if(read.nativeScaleReview&&!complete(read.nativeScaleReview.read,maxRegions))return false;
   const c=read.coverage,d=read.sourceDimensions;
   if(!d||![d.width,d.height].every(n=>Number.isInteger(n)&&n>0)
     ||!Number.isInteger(read.regions)||read.regions<0||read.regions>=1000
