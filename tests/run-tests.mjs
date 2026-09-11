@@ -85,6 +85,7 @@ import './experiments/chinese-reader-regression.mjs';
 import './experiments/body-probe-summary-regression.mjs';
 import './experiments/vertical-body-regions-regression.mjs';
 import './horizontal-body-regions-regression.mjs';
+import './positioned-body-reader-regression.mjs';
 import './paper-orientation-regression.mjs';
 import './experiments/pdf-visual-body-evidence-regression.mjs';
 import './experiments/pdf-visual-body-summary-regression.mjs';

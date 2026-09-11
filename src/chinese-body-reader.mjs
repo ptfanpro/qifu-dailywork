@@ -57,6 +57,37 @@ export function embeddedChineseDictionary(buffer) {
   return dictionary;
 }
 
+// Keep optional field locations tied to the exact detector region and crop.
+// Plain text remains the legacy default. Locations are observations, not proof
+// of a foreground paper, page identity or authorization to clear a code audit.
+export async function readDetectedBodyViews(original, regions, readLine,
+  {includeVertical = false, includePositions = false} = {}) {
+  const views = [];
+  for (const vertical of includeVertical ? [false, true] : [false]) for (const padding of [.35, .65]) {
+    const crops = regions.map((region, regionIndex) => ({region, regionIndex,
+      crop: (vertical ? verticalBodyCrop : horizontalBodyCrop)(region, original.info, padding)})).filter(v => v.crop);
+    const limit = vertical ? 80 : 300, lines = [], fields = []; let errors = 0;
+    for (const {region, regionIndex, crop} of crops.slice(0, limit)) {
+      try {
+        const {rotation, ...extract} = crop;
+        let image = sharp(original.data, {raw: original.info}).extract(extract);
+        if (rotation) image = image.rotate(rotation);
+        const reading = await readLine(await image.png().toBuffer());
+        if (reading.confidence >= .65) {
+          lines.push(reading.text);
+          if (includePositions) fields.push({regionIndex, region: {...region}, crop: {...crop},
+            text: reading.text, confidence: reading.confidence});
+        }
+      } catch { errors++; }
+    }
+    views.push({view: `chinese-${vertical ? 'vertical' : 'detected'}-${padding}`,
+      text: lines.join('。'), lineCount: lines.length, errors, regions: crops.length, truncated: crops.length > limit,
+      ...(includePositions ? {positioned: {schemaVersion: 1,
+        dimensions: {width: original.info.width, height: original.info.height}, fields}} : {})});
+  }
+  return views;
+}
+
 export async function createChineseBodyReader(appRoot, modelRoot) {
   const modelFile = path.join(modelRoot, 'ch_PP-OCRv4_rec_mobile.onnx');
   const bytes = fs.readFileSync(modelFile);
@@ -83,38 +114,9 @@ export async function createChineseBodyReader(appRoot, modelRoot) {
     return decodePaddleCtc(outputs[session.outputNames[0]], dictionary);
   }
   return {modelSha256: CHINESE_BODY_MODEL_SHA256, dictionaryLength: dictionary.length, readLine,
-    async read(source, {includeVertical = false} = {}) {
+    async read(source, options = {}) {
       const {regions, original} = await detector.detect(source);
-      const views = [];
-      for (const padding of [.35, .65]) {
-        const crops = regions.map(region => horizontalBodyCrop(region, original.info, padding)).filter(Boolean);
-        const lines = []; let errors = 0;
-        for (const extract of crops.slice(0, 300)) {
-          try {
-            const crop = await sharp(original.data, {raw: original.info}).extract(extract).png().toBuffer();
-            const reading = await readLine(crop);
-            if (reading.confidence >= .65) lines.push(reading.text);
-          } catch { errors++; }
-        }
-        views.push({view: `chinese-detected-${padding}`, text: lines.join('。'), lineCount: lines.length,
-          errors, regions: crops.length, truncated: crops.length > 300});
-      }
-      // Opt-in while held-out evaluation is in progress. These are additional
-      // views of ONE model, never independent engines or automatic bindings.
-      if (includeVertical) for (const padding of [.35, .65]) {
-        const crops = regions.map(r => verticalBodyCrop(r, original.info, padding)).filter(Boolean);
-        const lines = []; let errors = 0;
-        for (const {rotation, ...extract} of crops.slice(0, 80)) {
-          try {
-            const crop = await sharp(original.data, {raw: original.info}).extract(extract).rotate(rotation).png().toBuffer();
-            const reading = await readLine(crop);
-            if (reading.confidence >= .65) lines.push(reading.text);
-          } catch { errors++; }
-        }
-        views.push({view: `chinese-vertical-${padding}`, text: lines.join('。'), lineCount: lines.length,
-          errors, regions: crops.length, truncated: crops.length > 80});
-      }
-      return views;
+      return readDetectedBodyViews(original, regions, readLine, options);
     },
     async release() { try { await detector.release(); } finally { await session.release(); } },
   };
