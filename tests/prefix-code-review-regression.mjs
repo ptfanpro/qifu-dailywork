@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import {createRequire} from 'node:module';
+import {reviewCurrentPdfBodies} from '../src/body-content-review.mjs';
 import {codeBodyTestInput,views,freshItem} from './code-body-adjudication-regression.mjs';
 import * as reviewModule from '../src/code-model-review.mjs';
 import {CHINESE_BODY_MODEL_SHA256} from '../src/chinese-body-reader.mjs';
@@ -30,6 +34,37 @@ x.prefixCodeReview=await chain(x);
 assert.equal(adjudicateCodeBody(x).status,'resolved','stable original tail, two source-bound prefix reads and specific paired PDF body');
 assert.equal(adjudicateCodeBody(x).number,17);
 assert.equal(adjudicateCodeBody(x).codePolicy,'stable-original-tail-plus-two-prefix-models-v1');
+for(const priorReview of [undefined,null,{},structuredClone(x.alternateCodeReview)]) {
+ assert.equal(reviewModule.prefixCodeReviewEvidence(x.prefixCodeReview,priorReview,x.read,x.photoSha256),null,
+  'missing/stale prior must reject safely rather than abort the whole plan');
+}
+for(const read of [undefined,null])assert.equal(reviewModule.prefixCodeReviewEvidence(x.prefixCodeReview,x.alternateCodeReview,read,x.photoSha256),null);
+// Exercise the actual collector, not just the pure adjudicator. An already
+// sufficient source-bound prefix/body chain must not trigger expensive layout.
+const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'qifu-prefix-collector-'));
+try {
+ const file=path.join(scratch,'synthetic.png'),pdf=path.join(scratch,'synthetic.pdf');
+ fs.writeFileSync(file,source);fs.writeFileSync(pdf,'synthetic PDF bytes');
+ const current=input(),pdfSha256=sha(fs.readFileSync(pdf));
+ current.alternateCodeReview=await prior(current);current.prefixCodeReview=await chain(current);
+ current.pages.forEach(p=>p.pdfSha256=pdfSha256);
+ const item=freshItem(current);
+ Object.assign(item,{file,sourceSha256:current.photoSha256,alternateCodeReview:current.alternateCodeReview,prefixCodeReview:current.prefixCodeReview});
+ const messages=[];
+ const result=await reviewCurrentPdfBodies({appRoot:scratch,pdfFiles:[pdf],
+  pdfPages:[{pdf,pageNumber:1,number:17},{pdf,pageNumber:2,number:18}],
+  pdfIndexBinding:{digest:sha('set'),files:[{name:path.basename(pdf),sha256:pdfSha256}]},
+  claims:[],unresolvedClaims:[item],loadPages:async()=>current.pages,
+  createReader:async()=>({read:async()=>current.views,release:async()=>{}}),onProgress:m=>messages.push(m)});
+ assert.equal(result.adjudicated.length,1,'prefix evidence must reach final collector');
+ assert.equal(result.positionedLayoutReview.status,'not-needed','resolved prefix/body evidence was dropped during residual selection');
+ assert.equal(messages.some(m=>m.startsWith('位置版式')),false,'no unnecessary layout work after sufficient prefix/body evidence');
+} finally {
+ const resolved=fs.realpathSync(scratch),temp=fs.realpathSync(os.tmpdir());
+ assert.equal(path.dirname(resolved).toLowerCase(),temp.toLowerCase());
+ assert(path.basename(resolved).startsWith('qifu-prefix-collector-'));
+ fs.rmSync(resolved,{recursive:true,force:true});
+}
 const before=JSON.stringify(x);adjudicateCodeBody(x);assert.equal(JSON.stringify(x),before);
 for(const kind of ['wrong-tail','two-prefix-edits','original-opposite-consensus','multiple-regions','weak-original','prior-foreign','prior-low','prior-failed','prior-cloned','server-foreign','server-low','server-cloned','server-mutated','base-mutated','contrary-body','shared-body','duplicate-body','missing-pdf']){
  const y=input();

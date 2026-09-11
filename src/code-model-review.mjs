@@ -61,8 +61,9 @@ export async function observePrefixCodeReview({source,read,priorReview,reader}){
  return report;
 }
 export function prefixCodeReviewEvidence(report,priorReview,read,photoSha256){
+ if(!report||!priorReview||!read)return null;
  const saved=report&&prefixFresh.get(report),priorRows=codeModelReviewEvidence(priorReview,read,photoSha256);
- if(!saved||saved.seal!==digest(report)||report.photoSha256!==photoSha256||report.baseReadSha256!==digest(read)
+ if(!saved||!priorRows||saved.seal!==digest(report)||report.photoSha256!==photoSha256||report.baseReadSha256!==digest(read)
    ||report.priorReviewSha256!==digest(priorReview)||priorReview.modelSha256!==CHINESE_BODY_MODEL_SHA256)return null;
  const support=prefixReviewSupport(read,priorRows,saved.rows);
  return support?{...support,modelReviewSha256:digest(priorReview),prefixReviewSha256:digest(report)}:null;

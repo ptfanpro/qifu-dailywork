@@ -191,7 +191,8 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
       const assessment=results[claims.indexOf(item)];
       if(!['observed-body-consistent','no-specific-body-evidence'].includes(assessment?.status)||!pendingViews.has(item))return false;
       return adjudicateCodeBody({read:item.detectedCodeRead,expectedPrefix:item.detectedCodeRead.expectedPrefix,
-        photoSha256:item.sourceSha256,pages,views:pendingViews.get(item),index,alternateCodeReview:item.alternateCodeReview}).status!=='resolved';
+        photoSha256:item.sourceSha256,pages,views:pendingViews.get(item),index,
+        alternateCodeReview:item.alternateCodeReview,prefixCodeReview:item.prefixCodeReview}).status!=='resolved';
     });
     if(residual.length){
       try{
