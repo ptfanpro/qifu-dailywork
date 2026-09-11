@@ -78,7 +78,18 @@ this repair with fingerprint:
   an execution-policy override, without changing the system policy.
 - A positioned integration invocation with a relative app path was rejected,
   as was the source repository without a staged layout runtime. Those are not
-  passing integration runs. A properly staged candidate still needs that check.
+  passing integration runs. The subsequent properly staged Git archive passed:
+  24 assertions, one fresh joined result, eleven rejection cases and four
+  independent restarts, 7.613 seconds. This uses synthetic inputs, not an
+  actual-photo accuracy benchmark.
+
+An isolated archive of commit `99d0565` has now started fresh complete-day replays
+for June 13 and July 1. Its exact staged-byte fingerprint is
+`2e513f321516f5adb89508470ccd73974c03460edc811e65f3f2c0e29e6fb207`;
+the archive's normalized source line endings differ from the working tree used
+in the targeted diagnostic. Results are kept under the respective fingerprint,
+not relabeled or reused as though the two byte snapshots were identical.
+At launch neither full-day replay is complete; no success count is inferred.
 
 Fresh full-day acceptance is tracked separately. The three previously recorded global-metric scene counterexamples
 remain an explicit failing release gate; this code does not remove that gate.
