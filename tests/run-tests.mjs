@@ -17,6 +17,7 @@ import { decodePaddleCtc, recognizeLocalTextLine, verifyLocalOcrAssets } from '.
 import {createPhotoInputBinding} from '../src/recognition-provenance.mjs';
 import {runPhotoPdfCommitRegression} from './photo-pdf-commit-regression.mjs';
 import {runSceneCategoryCapacityRegression} from './scene-category-capacity-regression.mjs';
+import {policyObservation} from './fixtures/semantic-policy.mjs';
 import './weekend-regression.mjs';
 import './photo-online-regression.mjs';
 import './ocr-crop-regression.mjs';
@@ -38,6 +39,7 @@ import './detected-code-word-review-regression.mjs';
 import './detected-code-raw-line-regression.mjs';
 import './detected-code-scale-review-regression.mjs';
 import './semantic-role-reader-regression.mjs';
+import './semantic-scene-integration-regression.mjs';
 import './replay-comparison-regression.mjs';
 import './photo-review-isolation-regression.mjs';
 import './release-gates-regression.mjs';
@@ -1474,7 +1476,15 @@ const createLampScene=async(name,warmWidth)=>{
   return file;
 };
 const sameKindLampScenes=[await createLampScene('lamp-a.jpg',34),await createLampScene('lamp-b.jpg',42)];
-const sameKindSceneResult=await classifyScenes(sameKindLampScenes,new Set());
+// Allocation tests use explicit synthetic observations; colour blocks alone
+// are no longer accepted as real semantic proof. Original metric regressions
+// below remain diagnostic negative/compatibility controls.
+const scenePolicyFixtures=(files,role)=>({recognizedByFile:new Map(
+  createPhotoInputBinding(sameKindSceneRoot,files).files.map(({name,sha256})=>{
+    const file=path.join(sameKindSceneRoot,name);
+    return [file,{file,sourceSha256:sha256,semanticRoleRead:policyObservation(role,sha256)}];
+  }))});
+const sameKindSceneResult=await classifyScenes(sameKindLampScenes,new Set(),scenePolicyFixtures(sameKindLampScenes,'lamp'));
 assert.equal(sameKindSceneResult.issues.length,0);
 assert.deepEqual(sameKindSceneResult.assignments.map((item)=>[item.targetName,item.kind]),[['2.1.jpg','scene-lamp'],['2.2.jpg','scene-lamp']]);
 // 2026-08-26 单张场景补图回归：旧版在视觉分类前硬性要求至少两张，导致
@@ -1498,10 +1508,10 @@ for (const y of [.30,.57]) {
 }
 const singleWaterFile=path.join(sameKindSceneRoot,'single-water.jpg');
 await sharp(Buffer.from('<svg width="160" height="120" xmlns="http://www.w3.org/2000/svg"><rect width="160" height="120" fill="#d8c7a0"/><g fill="#d7a536"><circle cx="30" cy="70" r="12"/><circle cx="70" cy="70" r="12"/><circle cx="110" cy="70" r="12"/></g></svg>')).jpeg({quality:92}).toFile(singleWaterFile);
-const singleWaterResult=await classifyScenes([singleWaterFile],new Set());
+const singleWaterResult=await classifyScenes([singleWaterFile],new Set(),scenePolicyFixtures([singleWaterFile],'water'));
 assert.equal(singleWaterResult.issues.length,0);
 assert.deepEqual(singleWaterResult.assignments.map((item)=>[item.targetName,item.kind]),[['2.5.jpg','scene-water']]);
-const singleLampResult=await classifyScenes([sameKindLampScenes[0]],new Set());
+const singleLampResult=await classifyScenes([sameKindLampScenes[0]],new Set(),scenePolicyFixtures([sameKindLampScenes[0]],'lamp'));
 assert.equal(singleLampResult.issues.length,0);
 assert.deepEqual(singleLampResult.assignments.map((item)=>[item.targetName,item.kind]),[['2.1.jpg','scene-lamp']]);
 const ambiguousSceneFile=path.join(sameKindSceneRoot,'single-ambiguous.jpg');

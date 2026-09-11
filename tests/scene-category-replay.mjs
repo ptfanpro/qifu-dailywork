@@ -7,6 +7,7 @@ import {fileURLToPath, pathToFileURL} from 'node:url';
 import {requirePrivateAuditRoot} from './audit-paths.mjs';
 import {recognitionSourceFingerprint} from '../src/recognition-provenance.mjs';
 import {classifyScenes} from '../src/photo-prepare.mjs';
+import {createSemanticSceneService} from '../src/scene-semantic-service.mjs';
 
 const [privateRoot, baselineRoot, ...dates] = process.argv.slice(2);
 if (!privateRoot || !baselineRoot) throw Error('PRIVATE_OUTPUT BASELINE_SOURCE [YYYY-MM-DD ...]');
@@ -33,6 +34,7 @@ const checked = (photo, day) => {
     || sha(photo.file) !== photo.sha256) throw Error('Scene input identity changed');
 };
 const rows = [], started = Date.now();
+const semantic=createSemanticSceneService({appRoot:source});
 try {
   for (const day of selected) {
     const photos = day.photos.filter(photo => /^scene-(lamp|water)$/.test(photo.referenceLabel));
@@ -45,6 +47,12 @@ try {
       if (sha(blind) !== photo.sha256) throw Error('Scene copy identity changed');
       return {photo, blind};
     });
+    const recognizedByFile=new Map();
+    for(const {photo,blind} of mappings) {
+      const semanticRoleRead=await semantic.read(fs.readFileSync(blind));
+      if(semanticRoleRead.status==='unavailable')throw Error('Verified semantic release assets required for category replay');
+      recognizedByFile.set(blind,{file:blind,sourceSha256:photo.sha256,semanticRoleRead});
+    }
     const scenarios = [{mode: 'batch-empty', mappings, occupied: []}];
     for (const mapping of mappings) for (const [mode, occupied] of [
       ['single-empty', []], ['single-lamps-full', ['2.1.jpg', '2.2.jpg']], ['single-water-full', ['2.5.jpg', '2.6.jpg']],
@@ -53,7 +61,8 @@ try {
     for (const scenario of scenarios) {
       const result = {mode: scenario.mode, occupied: scenario.occupied, photoHashes: scenario.mappings.map(x => x.photo.sha256)};
       for (const [name, classifier] of [['baseline', old], ['candidate', classifyScenes]]) {
-        const value = await classifier(scenario.mappings.map(x => x.blind), new Set(scenario.occupied));
+        const value = await classifier(scenario.mappings.map(x => x.blind), new Set(scenario.occupied),
+          name==='candidate'?{recognizedByFile}:undefined);
         result[name] = {issues: value.issues.length, assignments: value.assignments.map(item => ({
           photoSha256: scenario.mappings.find(x => x.blind === item.source).photo.sha256,
           kind: item.kind, targetName: item.targetName, method: item.evidence?.method,
@@ -76,4 +85,4 @@ try {
 } catch (error) {
   fs.writeFileSync(path.join(output, 'failed.json'), JSON.stringify({status: 'failed-not-acceptance', errorType: error.name, completedDates: rows.length}));
   throw error;
-}
+}finally{await semantic.release();}

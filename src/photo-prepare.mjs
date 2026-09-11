@@ -15,6 +15,8 @@ import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 import {createPdfPrintCodeEvidence,appendPdfPrintCodeObservation} from './pdf-print-code-evidence.mjs';
 import {readDetectedCodesWithScaleReview,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
 import {readDetectedObservation,detectedRuntimeFingerprint} from './detected-observation-cache.mjs';
+import {createSemanticSceneService} from './scene-semantic-service.mjs';
+import {semanticRole} from './scene-semantic-policy.mjs';
 import {pdfReviewBlockReason,recordPdfClaimReview,createPhotoReviewExclusions,reviewExcludedPhotoNames,assertPhotoReviewIsolation} from './photo-review-isolation.mjs';
 export {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 
@@ -1405,9 +1407,13 @@ async function readPhotoDetectedCode({appRoot,worker,file,expectedPrefix},detect
 }
 
 export async function recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot = null,
-  {preferredNames=[],portableOcrServices,detectedCodeServices} = {}) {
+  {preferredNames=[],portableOcrServices,detectedCodeServices,semanticServices} = {}) {
   let portableCodeRead=null;
   let detectedCodeRead=null;
+  const sourceSha256=crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const ownedSemantic=!semanticServices&&appRoot?createSemanticSceneService({appRoot}):null;
+  const semanticReader=semanticServices||ownedSemantic;
+  let semanticRoleRead=null;
   const recognize=async()=>{
   // sharp().rotate().metadata() 仍返回原始像素宽高，不会把 EXIF 方向 6/8 的宽高
   // 自动互换；直接使用会把横向微信照片的比例框裁到完全错误的位置。
@@ -1436,7 +1442,8 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
   // read and allowed that one visual guess to remove a real sheet from the PDF
   // bijection.  Keep the scene evidence, but let the independent, tightly-cropped
   // code readers run before the role is committed.
-  const preliminaryScene = isLikelyScene({ paperGeometry: paperEvidence.geometry, visualMetrics, sceneMetrics });
+  const preliminaryScene = isLikelyScene({ paperGeometry: paperEvidence.geometry, visualMetrics, sceneMetrics,
+    sourceSha256,semanticRoleRead,detectedCodeRead });
   // 检出纸张后只围绕纸张右上角识别，避免佛像、灯焰和边框进入 OCR。
   // 纸张定位失败时才回退旧版固定构图，兼容历史照片。
   const layouts = prioritizedPhotoLayouts(paperEvidence.geometry, paperEvidence.layouts);
@@ -1843,8 +1850,14 @@ export async function recognizePreparedImage(worker, file, expectedPrefix, expec
     candidates: grouped.slice(0, 5),
   };
   };
-  return retainDetectedCodeRead(retainPortableCodeRead(await recognize(),portableCodeRead),
-    detectedCodeRead,expectedPrefix,expectedNumbers);
+  try {
+    // Roles and printed codes are independent. A scene model must not erase a
+    // complete/out-of-range/conflicting code returned by the readers below.
+    if(semanticReader)semanticRoleRead=await semanticReader.read(fs.readFileSync(file));
+    const result=retainDetectedCodeRead(retainPortableCodeRead(await recognize(),portableCodeRead),
+      detectedCodeRead,expectedPrefix,expectedNumbers);
+    return {...result,sourceSha256,semanticRoleRead};
+  }finally{await ownedSemantic?.release();}
 }
 
 export async function diagnosePhotoCode({ appRoot, file, expectedPrefix, expectedNumbers, cropDir }) {
@@ -2331,14 +2344,14 @@ function hasWindowsFullCodeEvidence(item) {
 // Existing names are comparison references, not OCR input. Preserve full-code
 // observations even when outside the current PDF set; never repair from tails.
 export async function auditExistingNumericPhotoCode({ appRoot, file, expectedPrefix, expectedNumbers, cropDir,
-  worker=null,detectedCodeServices,portableOcrServices }) {
+  worker=null,detectedCodeServices,portableOcrServices,semanticServices }) {
   fs.mkdirSync(cropDir, { recursive:true });
   const reader=worker || await createOcrWorker(appRoot);
   try {
     // Rechecks must benefit from the same fixes as new photos. Do not route
     // numeric filenames back through the old Windows-only fixed crops.
     return await recognizePreparedImage(reader,file,expectedPrefix,expectedNumbers,cropDir,appRoot,
-      {detectedCodeServices,portableOcrServices});
+      {detectedCodeServices,portableOcrServices,semanticServices});
   } finally {
     if(!worker)await reader.terminate();
   }
@@ -3220,6 +3233,13 @@ export function isLikelyScene(item) {
   // was independently read in adjacent/strict code crops is conclusive paper
   // evidence.  Global colour and brightness heuristics may never overrule it.
   if (hasDirectVisibleCodeEvidence(item)) return false;
+  // Every live recognition result carries this field, including unavailable
+  // reads. Legacy metric-only objects remain diagnostic fixtures; they cannot
+  // enter live scene allocation without a source-bound semantic observation.
+  if(Object.hasOwn(item,'semanticRoleRead')) {
+    const role=semanticRole(item.semanticRoleRead,item.sourceSha256);
+    return role==='lamp'||role==='water';
+  }
   const metrics = item.visualMetrics || {};
   const geometry = item.paperGeometry || {};
   const scene = item.sceneMetrics || {};
@@ -4071,16 +4091,24 @@ async function applyExactRemainingPortraitOrderEvidence(recognized, pdfPages) {
   }
 }
 
-export async function classifyScenes(files, occupiedNames) {
+export async function classifyScenes(files, occupiedNames, {recognizedByFile=new Map()}={}) {
   if (!files.length) return { assignments: [], issues: [] };
   const availableLamp = ['2.1.jpg', '2.2.jpg'].filter((name) => !occupiedNames.has(name));
   const availableWater = ['2.5.jpg', '2.6.jpg'].filter((name) => !occupiedNames.has(name));
   const scored = [];
-  for (const file of files) scored.push({ file, ...(await sceneVisualScore(file)) });
+  for (const file of files) {
+    const item=recognizedByFile.get(file);
+    let role=null;
+    try {
+      const sourceSha256=crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+      if(item?.sourceSha256===sourceSha256&&isLikelyScene(item))role=semanticRole(item.semanticRoleRead,sourceSha256);
+    }catch { /* unreadable or replaced original stays pending */ }
+    scored.push({file,role,semanticRoleRead:item?.semanticRoleRead});
+  }
   // 命名空位只是容量，不是视觉证据。先独立分类，再检查该类容量；已有
   // 两张供灯不能证明下一张一定是供水，相对亮度也不能覆盖单图未决。
-  const explicitWater = scored.filter((item) => classifySceneVisualScore(item) === 'scene-water');
-  const explicitLamp = scored.filter((item) => classifySceneVisualScore(item) === 'scene-lamp');
+  const explicitWater = scored.filter((item) => item.role === 'water');
+  const explicitLamp = scored.filter((item) => item.role === 'lamp');
   const assignments = [], issues = [];
   for (const [items, names, kind, label] of [
     [explicitWater, availableWater, 'scene-water', '供水'],
@@ -4093,8 +4121,7 @@ export async function classifyScenes(files, occupiedNames) {
     items.sort((a, b) => path.basename(a.file).localeCompare(path.basename(b.file), 'zh-CN', { numeric: true }));
     assignments.push(...items.map((item, index) => ({
       source: item.file, targetName: names[index], kind,
-      evidence: {method: 'scene-dark-warm-structure', luminance: item.luminance,
-        warmBrightRatio: item.warmBrightRatio, darkRatio: item.darkRatio},
+      evidence: {method: 'scene-semantic-two-views', semanticRoleRead:item.semanticRoleRead},
     })));
   }
   const unknownCount = scored.length - explicitWater.length - explicitLamp.length;
@@ -4115,6 +4142,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   let pdfPages;
   let detectedDetectorPromise=null;
   const detectedRuntime=detectedRuntimeFingerprint(appRoot,path.join(getMachineLocalStateRoot(),'cache','ocr'));
+  const semanticServices=createSemanticSceneService({appRoot,runtimeFingerprint:detectedRuntime});
   let detectedCacheHits=0;
   const detectedCodeServices={read:async args=>{
     const result=await readDetectedObservation({cacheDir:path.join(workDir,'detected-observation-cache'),
@@ -4165,7 +4193,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
         } else {
           current += 1;
           onProgress?.(`正在读取并识别新增原图 ${current}/${ocrImageCount}：${path.basename(file)}`);
-          const result = await recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot,{preferredNames,detectedCodeServices});
+          const result = await recognizePreparedImage(worker, file, expectedPrefix, expectedNumbers, cropDir, appRoot,{preferredNames,detectedCodeServices,semanticServices});
           // Reuse only where to look first, never a previous image's number.
           // Every new image still needs its own two-view code consensus.
           if(result.evidence?.successfulCropNames?.length) preferredNames=result.evidence.successfulCropNames;
@@ -4201,7 +4229,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
         numericAuditIndex += 1;
         onProgress?.(`正在重新核对现有数字照片 ${numericAuditIndex}/${numericAuditFiles.length}：${path.basename(file)}`);
         const observed = await auditExistingNumericPhotoCode({
-          appRoot,file,expectedPrefix,expectedNumbers,cropDir,worker,detectedCodeServices,
+          appRoot,file,expectedPrefix,expectedNumbers,cropDir,worker,detectedCodeServices,semanticServices,
         });
         existingNumericAuditItems.push({
           ...observed,
@@ -4224,7 +4252,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
         const existing = numericByNumber.get(item.number);
         if (!existing || checkedNumeric.has(existing)) continue;
         checkedNumeric.add(existing);
-        const existingResult = await recognizePreparedImage(worker, existing, expectedPrefix, expectedNumbers, cropDir, appRoot,{detectedCodeServices});
+        const existingResult = await recognizePreparedImage(worker, existing, expectedPrefix, expectedNumbers, cropDir, appRoot,{detectedCodeServices,semanticServices});
         if (!existingResult.reliable || existingResult.number === item.number
           || numericByNumber.has(existingResult.number) || !expectedNumbers.has(existingResult.number)) continue;
         numericCodeRepairs.push({
@@ -4262,7 +4290,10 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     }
   } finally {
     try {await worker.terminate();}
-    finally {await (await detectedDetectorPromise?.catch(()=>null))?.release();}
+    finally {
+      try {await (await detectedDetectorPromise?.catch(()=>null))?.release();}
+      finally {await semanticServices.release();}
+    }
     for (const temporaryDir of [cropDir, path.join(workDir, 'pdf-code-crops')]) {
       try { fs.rmSync(temporaryDir, { recursive:true, force:true }); } catch {}
     }
@@ -4455,7 +4486,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       && !isReviewExcluded(item.file)
       && !photoCodeAuditBlockReason(item)
       && item.pdfRecheck?.status !== 'inconclusive'
-      && (item.evidence?.method === 'scene-visual-fast-path' || isLikelyScene(item)))
+      && isLikelyScene(item))
     .map((item) => item.file);
   const recognizedByFile = new Map(recognized.map((item) => [item.file, item]));
   const portableIssueCounts=new Map();
@@ -4481,10 +4512,14 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     const strong = (recognizedByFile.get(file)?.candidates || []).filter((candidate) => candidate.prefixDistance <= 2);
     return new Set(strong.map((candidate) => candidate.number)).size > 1;
   });
-  const unreadableCodeCandidates = ambiguousCodeCandidates.filter((file) => !conflictingCodeCandidates.includes(file));
+  const unavailableSemanticCandidates=ambiguousCodeCandidates.filter(file=>
+    !conflictingCodeCandidates.includes(file)&&recognizedByFile.get(file)?.semanticRoleRead?.status==='unavailable');
+  const unreadableCodeCandidates = ambiguousCodeCandidates.filter((file) => !conflictingCodeCandidates.includes(file)
+    && !unavailableSemanticCandidates.includes(file));
   const unavailableAuditCount=recognized.filter(item=>photoCodeAuditBlockReason(item)==='independent-code-audit-unavailable').length;
   if(unavailableAuditCount)pendingIssues.push(`有 ${unavailableAuditCount} 张照片的独立编号复核不可用；失败前观察已保留，未按剩余编号继续赋号。`);
   if (conflictingCodeCandidates.length) pendingIssues.push(`有 ${conflictingCodeCandidates.length} 张福单照片存在多个强编号候选，已保留原图等待人工确认。`);
+  if (unavailableSemanticCandidates.length) pendingIssues.push(`有 ${unavailableSemanticCandidates.length} 张未决照片的本地场景模型不可用或校验失败；请检查完整软件模型包。这不代表照片不清晰，未按明暗或剩余位置猜测类别。`);
   if (unreadableCodeCandidates.length) pendingIssues.push(`有 ${unreadableCodeCandidates.length} 张福单照片尚未可靠读出编号，已保留原图等待人工补录。`);
 
   const missingExpected = [...expectedNumbers].filter((number) => !assignedNumbers.has(number));
@@ -4499,7 +4534,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   // 场景图的视觉类别与未决福单编号相互独立。即使有模糊福单，也应继续
   // 处理已明确归类的场景图和对应已上传订单。
   // 已验证批次只能占用自己的位置，不能替新来的图片证明视觉类别。
-  const sceneResult = await classifyScenes(sceneCandidates, occupiedNames);
+  const sceneResult = await classifyScenes(sceneCandidates, occupiedNames,{recognizedByFile});
   assignments.push(...sceneResult.assignments);
   pendingIssues.push(...sceneResult.issues);
 
@@ -4558,6 +4593,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     assignments,
     duplicateSources,
     sceneCandidateCount: sceneCandidates.length,
+    semanticRecognition: {...semanticServices.stats},
     ambiguousPhotoCount: ambiguousCodeCandidates.length,
     missingExpected: missingExpected.sort((a, b) => a - b),
     recognized,

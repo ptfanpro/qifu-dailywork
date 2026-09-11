@@ -4,11 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
+import crypto from 'node:crypto';
 import {classifyScenes} from '../src/photo-prepare.mjs';
+import {policyObservation} from './fixtures/semantic-policy.mjs';
 const sharp = createRequire(import.meta.url)('sharp');
 
-// Actual image scoring, generated fixtures only. Occupied names are capacity,
-// never evidence that a new or ambiguous photograph belongs to the other kind.
+// Generated image bytes plus explicit synthetic semantic observations test
+// allocation, NOT inference accuracy. Solid colour is not semantic evidence.
+// Occupied names are capacity, never evidence for the other category.
 export async function runSceneCategoryCapacityRegression() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qifu-scene-capacity-test-'));
   const fixture = async (name, body) => {
@@ -22,6 +25,11 @@ export async function runSceneCategoryCapacityRegression() {
     const water = await fixture('water.jpg', '<rect width="160" height="120" fill="#d8c7a0"/>');
     const unknown = await fixture('unknown.jpg', '<rect width="160" height="120" fill="#666666"/>');
     const unknownDark = await fixture('unknown-dark.jpg', '<rect width="160" height="120" fill="#222222"/>');
+    const recognizedByFile=new Map([...lamps,water,unknown,unknownDark].map(file=>{
+      const sourceSha256=crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+      const role=lamps.includes(file)?'lamp':file===water?'water':'mixed-scene';
+      return [file,{file,sourceSha256,semanticRoleRead:policyObservation(role,sourceSha256)}];
+    }));
     const bothLamps = new Set(['2.1.jpg', '2.2.jpg']);
     const bothWater = new Set(['2.5.jpg', '2.6.jpg']);
     const cases = [
@@ -35,7 +43,7 @@ export async function runSceneCategoryCapacityRegression() {
       {name: 'known water proceeds beside ambiguous darker image', files: [water, unknownDark], occupied: new Set(), expected: [[water, '2.5.jpg', 'scene-water']]},
     ];
     for (const test of cases) {
-      const result = await classifyScenes(test.files, test.occupied);
+      const result = await classifyScenes(test.files, test.occupied,{recognizedByFile});
       assert.deepEqual(result.assignments.map(x => [x.source, x.targetName, x.kind]), test.expected, test.name);
       assert.ok(result.issues.length > 0, `${test.name}: unresolved sources need explanation`);
     }
@@ -46,7 +54,7 @@ export async function runSceneCategoryCapacityRegression() {
       [[water], new Set(['2.5.jpg']), [['2.6.jpg', 'scene-water']]],
       [[lamps[1], lamps[0]], new Set(), [['2.1.jpg', 'scene-lamp'], ['2.2.jpg', 'scene-lamp']]],
     ]) {
-      const result = await classifyScenes(files, occupied);
+      const result = await classifyScenes(files, occupied,{recognizedByFile});
       assert.deepEqual(result.assignments.map(x => [x.targetName, x.kind]), expected);
       assert.equal(result.issues.length, 0);
     }

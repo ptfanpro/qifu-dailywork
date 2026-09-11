@@ -57,6 +57,9 @@ order-manifest.json
 
 # Local diagnostics and screenshots
 diagnostics/
+# Pre-release private semantic weights/encoder are staged separately, never
+# copied into source control with training or customer evidence.
+models/scene-semantic-v1/
 body-observation-cache/
 screenshots/
 *.png

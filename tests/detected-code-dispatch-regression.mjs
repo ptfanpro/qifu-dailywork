@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {createRequire} from 'node:module';
+import crypto from 'node:crypto';
+import {policyObservation} from './fixtures/semantic-policy.mjs';
 import {recognizePreparedImage, photoCodeAuditBlockReason,summarizeDetectedCodeRead,
   isLikelyScene,recheckReliablePhotoClaimsWithPdf,auditExistingNumericPhotoCode} from '../src/photo-prepare.mjs';
 const sharp=createRequire(import.meta.url)('sharp');
@@ -13,13 +15,14 @@ test('detected complete lines are read before unverified fixed strips can trunca
   try {
     const file=path.join(dir,'synthetic.png');
     fs.writeFileSync(file,await sharp({create:{width:1000,height:750,channels:3,background:'white'}}).png().toBuffer());
-    let detectedCalls=0,narrowCalls=0;
+    let detectedCalls=0,narrowCalls=0,semanticCalls=0;
     const observations=['paddle','tesseract'].flatMap(engine=>[.45,.75].map(padding=>({
       engine,prefix:'269',number:168,fullCode:'269-1-168',confidence:engine==='paddle'?.99:90,
       index:0,padding,crop:{left:500,top:300,width:180,height:25},physicalCodeExtent:'unverified',
     })));
     const result=await recognizePreparedImage({recognize:async()=>{throw Error('legacy reader must not run');}},
       file,'269',new Set([168]),dir,'synthetic-app',{
+        semanticServices:{read:async bytes=>{semanticCalls++;return policyObservation('water',crypto.createHash('sha256').update(bytes).digest('hex'));}},
         detectedCodeServices:{read:async()=>{detectedCalls++;return {
           regions:1,observations:observations.filter(o=>o.engine==='paddle'),
           independent:observations.filter(o=>o.engine==='tesseract'),errors:0,incompleteTailObserved:false,
@@ -32,6 +35,9 @@ test('detected complete lines are read before unverified fixed strips can trunca
         }},
       });
     assert.equal(detectedCalls,1);
+    assert.equal(semanticCalls,1,'the actual dispatcher collects semantic observations once');
+    assert.equal(result.semanticRoleRead.candidate,'water','even an incorrect scene model cannot erase a printed code');
+    assert.equal(isLikelyScene(result),false);
     assert.equal(narrowCalls,0,'a fixed strip is not needed after independent complete-line consensus');
     assert.equal(result.number,168);assert.equal(result.reliable,true);
     assert.equal(photoCodeAuditBlockReason(result),null);
@@ -98,6 +104,7 @@ test('rechecking an already numbered photo uses the same detector evidence as a 
     assert.equal(result.number,168,'169.jpg is only a filename claim');
     assert.equal(result.reliable,true);
     assert.equal(result.detectedCodeRead.observations.length,2);
+    assert.equal(result.semanticRoleRead.status,'unavailable','absent model remains explicit while independent code reading succeeds');
     assert.deepEqual(fs.readFileSync(file),original,'recheck does not rename or overwrite the photo');
   } finally {fs.rmSync(dir,{recursive:true,force:true});}
 });
