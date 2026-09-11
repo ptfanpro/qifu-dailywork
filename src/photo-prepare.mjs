@@ -11,6 +11,7 @@ import { getMachineLocalStateRoot } from './runtime-paths.mjs';
 import {decodeOcrSource,extractOcrCrop,writeImageFile} from './ocr-image.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
 import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
+import {codeBodyResolution,codeBodyMethod} from './code-body-adjudication.mjs';
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 import {createPdfPrintCodeEvidence,appendPdfPrintCodeObservation} from './pdf-print-code-evidence.mjs';
 import {readDetectedCodesWithScaleReview,createTextDetector,validDetectedCodeReview} from './detected-code-reader.mjs';
@@ -2399,6 +2400,11 @@ export function photoCodeAuditBlockReason(item) {
   if(pdfReason)return pdfReason;
   const bodyReason=bodyReviewBlockReason(item);
   if(bodyReason)return bodyReason;
+  if(item?.codeBodyAdjudication) {
+    if(!codeBodyResolution(item))return 'code-body-resolution-not-current';
+    const portableReason=portableCodeReadBlockReason(item);
+    return portableReason||null;
+  }
   const detectedReason=detectedCodeReadBlockReason(item);
   if(detectedReason)return detectedReason;
   const portableReason=portableCodeReadBlockReason(item);
@@ -2675,6 +2681,11 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       item.evidence.pdfRecheck={method:'preserved-manual-pdf-content-review',status:'confirmed'};
     } else if (verifiedPdfStructureBijection) {
       item.evidence.pdfRecheck={method:'orientation-color-and-global-pdf-bijection',status:'confirmed'};
+    } else if (method===codeBodyMethod && codeBodyResolution(item)) {
+      const proof=codeBodyResolution(item);
+      const page=claimedPages[0];
+      if(page.pageNumber!==proof.target.pageNumber)reason='code-body-page-identity-changed';
+      else item.evidence.pdfRecheck={method:codeBodyMethod,status:'confirmed',pdfSha256:proof.target.pdfSha256,pageNumber:proof.target.pageNumber};
     } else if (visibleConsensus) {
       item.evidence.pdfRecheck={method:strictVisibleCode
         ? 'strict-visible-code-box-and-pdf-index'
@@ -4378,7 +4389,18 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     else bodyClaims.push({file:repair.source,number:repair.to,reliable:true,evidence:repair.evidence});
   }
   const bodyClaimReview=await reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndexBinding,claims:bodyClaims,onProgress,
-    cacheDir:path.join(workDir,'body-observation-cache')});
+    cacheDir:path.join(workDir,'body-observation-cache'),unresolvedClaims:recognized.filter(item=>!item.reliable)});
+  const adjudicated=bodyClaimReview.adjudicated||[];
+  if(adjudicated.length) {
+    bodyClaims.push(...adjudicated);
+    const recheck=await recheckReliablePhotoClaimsWithPdf(adjudicated,pdfPages,onProgress);
+    for(const key of ['attempted','confirmed','rejected','inconclusive'])pdfClaimRecheck[key]=(pdfClaimRecheck[key]||0)+(recheck[key]||0);
+    pdfClaimRecheck.diagnostics.push(...recheck.diagnostics);
+    onProgress?.(`编号与正文联合复核：${recheck.confirmed} 张按原图完整编号和当前 PDF 正文确认；原始低置信度异读已保留，强冲突仍隔离。`);
+  }
+  // Runtime-only item references/authorizations never become reusable cache
+  // decisions. The persisted plan keeps their source-bound proof separately.
+  delete bodyClaimReview.adjudicated;
   const photoReviewExclusions=createPhotoReviewExclusions([...recognized,...existingNumericAuditItems,...bodyClaims],photoInputBinding,photoCodeAuditBlockReason);
   const reviewExcludedNames=reviewExcludedPhotoNames({photoReviewExclusions,photoInputBinding});
   const isReviewExcluded=file=>reviewExcludedNames.has(path.basename(file).toLowerCase());

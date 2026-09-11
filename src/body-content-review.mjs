@@ -10,6 +10,7 @@ import {createBodyTextRanker} from './body-text-evidence.mjs';
 import {createBodyFieldComparator} from './body-field-evidence.mjs';
 import {buildVisualBodyPages,visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
 import {readBodyObservation} from './body-observation-cache.mjs';
+import {codeBodyCandidateForItem,retainCodeBodyResolution} from './code-body-adjudication.mjs';
 const require=createRequire(import.meta.url), hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const id=p=>`${p.pdfSha256}:${p.pageNumber}`;
 
@@ -80,7 +81,14 @@ export function retainBodyReview(item,review) {
 }
 
 export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndexBinding,claims,onProgress=null,
-  createReader=createChineseBodyReader,loadPages=null,cacheDir=null}) {
+  createReader=createChineseBodyReader,loadPages=null,cacheDir=null,unresolvedClaims=[]}) {
+  const originalClaims=[...claims];
+  const index=pdfPages.map(p=>({pdfSha256:pdfIndexBinding.files.find(f=>f.name===path.basename(p.pdf||p.file||''))?.sha256,
+    pageNumber:p.pageNumber,number:p.number}));
+  const candidates=unresolvedClaims.map(item=>({item,candidate:codeBodyCandidateForItem(item,index)}))
+    .filter(row=>row.candidate.status==='candidate'&&!claims.includes(row.item));
+  const candidateMap=new Map(candidates.map(row=>[row.item,row.candidate]));
+  claims=[...claims,...candidates.map(row=>row.item)];
   if(!claims.length)return {status:'not-needed',attempted:0,blocked:0,results:[]};
   const started=Date.now(), results=[];
   let reader=null,pages=null;
@@ -92,9 +100,11 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
     if(result.cacheHit)cacheHits++;else freshReads++;
     return result.views;
   };
-  const base=claim=>({schemaVersion:1,claimedNumber:claim.number,photoSha256:hash(fs.readFileSync(claim.file)),
+  const base=claim=>({schemaVersion:1,claimedNumber:candidateMap.get(claim)?.number??claim.number,photoSha256:hash(fs.readFileSync(claim.file)),
     pdfSetDigest:pdfIndexBinding.digest,bindingVerified:false});
   const originals=claims.map(base);
+  const pendingViews=new Map();
+  let sourcesVerified=false;
   const verifySources=()=>{
     for(const pdf of pdfFiles) {
       const saved=pdfIndexBinding.files.filter(p=>p.name===path.basename(pdf));
@@ -143,22 +153,39 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
       const claim=claims[i];
       let assessment;
       try {
-        const positions=pdfPages.map((p,index)=>p.number===claim.number?index:-1).filter(n=>n>=0);
+        const number=candidateMap.get(claim)?.number??claim.number;
+        const positions=pdfPages.map((p,index)=>p.number===number?index:-1).filter(n=>n>=0);
         if(positions.length!==1)throw Error('Claimed number is not unique');
         const target=pages.find(p=>id(p)===expectedIds[positions[0]]);
-        assessment=assess(await readViews(fs.readFileSync(claim.file)),target);
+        const views=await readViews(fs.readFileSync(claim.file));
+        assessment=assess(views,target);
+        if(candidateMap.has(claim))pendingViews.set(claim,views);
       } catch {assessment={status:'body-reader-unavailable',bindingVerified:false};}
       results.push({...originals[i],...assessment});
       onProgress?.(`正文归属检查：${i+1}/${claims.length} 张完成。`);
     }
     verifySources();
+    sourcesVerified=true;
   } catch {
     // Missing models, partial PDF reads and source changes are failures, not
     // "no conflicting text". Discard apparent passes from an invalid corpus.
     results.splice(0,results.length,...originals.map(v=>({...v,status:'body-reader-unavailable'})));
   } finally {if(reader)try {await reader.release();}catch{}}
-  for(let i=0;i<claims.length;i++)retainBodyReview(claims[i],results[i]);
+  const adjudicated=[];
+  for(let i=0;i<claims.length;i++) {
+    const item=claims[i];
+    if(candidateMap.has(item)) {
+      if(!sourcesVerified||!pendingViews.has(item))continue;
+      // Only after all original photo/PDF bytes are rechecked; apparent
+      // successes from an incomplete/changed corpus must never authorize work.
+      const result=retainCodeBodyResolution(item,{pages,views:pendingViews.get(item),index,pdfSetDigest:pdfIndexBinding.digest});
+      if(result.status!=='resolved')continue;
+      adjudicated.push(item);
+    }
+    retainBodyReview(item,results[i]);
+  }
   onProgress?.(`正文读取统计：本机缓存复用 ${cacheHits} 项，实际识别 ${freshReads} 项；归属仍以本次 PDF 核对结果为准。`);
   return {status:'veto-only-not-order-binding',attempted:claims.length,
-    blocked:claims.filter(bodyReviewBlockReason).length,cacheHits,freshReads,seconds:(Date.now()-started)/1000,results};
+    blocked:[...originalClaims,...adjudicated].filter(bodyReviewBlockReason).length,
+    adjudicated,adjudicationAttempted:candidates.length,cacheHits,freshReads,seconds:(Date.now()-started)/1000,results};
 }

@@ -81,6 +81,9 @@ export function createBodyFieldComparator(pages) {
         specificExactFields: specific.length, shortSpecificFields: specific.filter(t => [...t].length <= 3).length,
         extractedSpecificExactFields: specific.filter(t => page.extractedTerms.includes(t)).length,
         visibleSpecificExactFields: specific.filter(t => page.visibleTerms.includes(t)).length,
+        // Preserve the identity of whole long fields across views. Counts
+        // alone could pool unrelated fields seen in different crops.
+        longSpecificFieldHashes: specific.filter(t => [...t].length >= 4).map(sha).sort(),
         observedAllExtractedDistinctFields: page.extractedTerms.length > 0 && extractedExact.length === page.extractedTerms.length,
         evidenceSha256: sha(specific.sort().join('\n'))};
     }).sort((a, b) => b.specificExactFields - a.specificExactFields || b.exactFields - a.exactFields

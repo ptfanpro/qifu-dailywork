@@ -9,7 +9,7 @@ export function recognitionSourceFingerprint(appRoot) {
     'src/detected-code-reader.mjs','src/detected-observation-cache.mjs','src/printed-code-parser.mjs','src/pdf-print-code-evidence.mjs','src/body-observation-cache.mjs',
     'src/photo-review-isolation.mjs','src/photo-plan-gate.mjs','src/photos.mjs',
     'src/scene-semantic-reader.mjs','src/scene-semantic-pixels.mjs','src/scene-semantic-policy.mjs','src/scene-semantic-service.mjs',
-    'src/english-ocr-model.mjs'];
+    'src/english-ocr-model.mjs','src/code-body-adjudication.mjs'];
   return hash(JSON.stringify(files.map(file=>[file,hash(fs.readFileSync(path.join(appRoot,file)))])));
 }
 export function createPdfIndexBinding(businessDate,pdfFiles,recognizerFingerprint) {

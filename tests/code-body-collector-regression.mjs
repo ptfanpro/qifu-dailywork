@@ -1,0 +1,48 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import assert from 'node:assert/strict';
+import {codeBodyTestInput,freshItem,views} from './code-body-adjudication-regression.mjs';
+import {reviewCurrentPdfBodies} from '../src/body-content-review.mjs';
+import {photoCodeAuditBlockReason,recheckReliablePhotoClaimsWithPdf} from '../src/photo-prepare.mjs';
+import {codeBodyResolution} from '../src/code-body-adjudication.mjs';
+const sha=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'qifu-code-body-collector-test-'));
+try {
+  const pdf=path.join(root,'synthetic.pdf'),file=path.join(root,'synthetic.jpg');
+  const make=()=>{
+    fs.writeFileSync(pdf,'synthetic PDF content');fs.writeFileSync(file,'synthetic photo content');
+    const data=codeBodyTestInput(),item=freshItem(data),pdfHash=sha(fs.readFileSync(pdf));
+    item.file=file;item.sourceSha256=item.detectedCodeRead.inputSha256=sha(fs.readFileSync(file));
+    data.pages.forEach(p=>p.pdfSha256=pdfHash);
+    return {item,data,args:{appRoot:root,pdfFiles:[pdf],
+      pdfPages:[1,2].map((pageNumber,i)=>({pdf,pageNumber,number:17+i,_localShapeFingerprint:[1]})),
+      pdfIndexBinding:{digest:sha('set'),files:[{name:path.basename(pdf),sha256:pdfHash}]},
+      claims:[],unresolvedClaims:[item],loadPages:async()=>data.pages,
+      createReader:async()=>({read:async()=>data.views,release:async()=>{}})}};
+  };
+  const {item,args}=make(),history=JSON.stringify(item.codeAuditHistory);
+  const result=await reviewCurrentPdfBodies(args);
+  assert.equal(result.adjudicated.length,1,'collector must review unresolved code candidates too');
+  assert.equal(result.adjudicated[0],item);
+  assert.equal(item.number,17);assert.equal(photoCodeAuditBlockReason(item),null);
+  assert.equal(JSON.stringify(item.codeAuditHistory),history);
+  assert.equal((await recheckReliablePhotoClaimsWithPdf([item],args.pdfPages)).confirmed,1,'complete plan recheck must accept the newly validated proof');
+  for(const kind of ['pdf-change','photo-change','truncated','incomplete-pages','prior-conflict']) {
+    const test=make();
+    if(kind==='prior-conflict')test.item.pdfRecheck={status:'rejected',reason:'prior'};
+    if(kind==='incomplete-pages')test.args.loadPages=async()=>test.data.pages.slice(0,1);
+    test.args.createReader=async()=>({read:async()=>{
+      if(kind==='pdf-change')fs.writeFileSync(pdf,'changed PDF');
+      if(kind==='photo-change')fs.writeFileSync(file,'changed photo');
+      if(kind==='truncated')return test.data.views.map(v=>({...v,truncated:true}));
+      return test.data.views;
+    },release:async()=>{}});
+    const failure=await reviewCurrentPdfBodies(test.args);
+    assert.equal(failure.adjudicated?.length||0,0,kind);
+    assert.equal(test.item.number,null,kind);
+    assert.equal(codeBodyResolution(test.item),null,kind);
+  }
+} finally {fs.rmSync(root,{recursive:true,force:true});}
+console.log('Code/body actual collector integration PASS: unresolved candidates, source race, partial corpus and prior conflicts');
