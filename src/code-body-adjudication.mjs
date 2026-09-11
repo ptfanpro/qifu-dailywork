@@ -9,7 +9,7 @@ import path from 'node:path';
 import {validDetectedCodeReview} from './detected-code-reader.mjs';
 import {createBodyClaimAssessor} from './body-content-review.mjs';
 import {positionedBodySupport} from './positioned-body-evidence.mjs';
-import {codeModelReviewEvidence} from './code-model-review.mjs';
+import {codeModelReviewEvidence,prefixCodeReviewEvidence} from './code-model-review.mjs';
 import {validPositionedBodyViews} from './body-positioned-observation.mjs';
 import {visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
 const sha=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -21,7 +21,7 @@ const credible=o=>o.confidence>=(o.engine==='paddle'?.65:30);
 const authorizations=new WeakMap();
 export const codeBodyMethod='code-and-current-pdf-body-adjudication';
 const itemSeal=item=>sha({read:item.detectedCodeRead,history:item.codeAuditHistory,
-  sourceSha256:item.sourceSha256,number:item.number,proof:item.codeBodyAdjudication,alternate:item.alternateCodeReview});
+  sourceSha256:item.sourceSha256,number:item.number,proof:item.codeBodyAdjudication,alternate:item.alternateCodeReview,prefix:item.prefixCodeReview});
 
 // A serialized label cannot waive an old audit. A fresh plan must recompute
 // the join, then gets a process-local authorization tied to immutable raw reads.
@@ -80,7 +80,7 @@ export function codeBodyModelReviewEligible(item,index){
 export function codeBodyCandidateForItem(item,index) {
   const block=freshItemBlock(item);if(block)return block;
   const read=item.detectedCodeRead;
-  const candidate=codeBodyCandidate({read,expectedPrefix:read.expectedPrefix,photoSha256:item.sourceSha256,index,alternateCodeReview:item.alternateCodeReview});
+  const candidate=codeBodyCandidate({read,expectedPrefix:read.expectedPrefix,photoSha256:item.sourceSha256,index,alternateCodeReview:item.alternateCodeReview,prefixCodeReview:item.prefixCodeReview});
   if(Number.isInteger(item.observedOcrNumber)&&item.observedOcrNumber!==candidate.number)return unresolved('prior-visible-code-conflict');
   return candidate;
 }
@@ -89,7 +89,7 @@ export function retainCodeBodyResolution(item,{pages,views,index,pdfSetDigest,po
   const candidate=codeBodyCandidateForItem(item,index);
   if(candidate.status!=='candidate'||!hash(pdfSetDigest))return candidate;
   const result=adjudicateCodeBody({read:item.detectedCodeRead,expectedPrefix:item.detectedCodeRead.expectedPrefix,
-    photoSha256:item.sourceSha256,pages,views,index,positionedLayoutReview,alternateCodeReview:item.alternateCodeReview});
+    photoSha256:item.sourceSha256,pages,views,index,positionedLayoutReview,alternateCodeReview:item.alternateCodeReview,prefixCodeReview:item.prefixCodeReview});
   if(result.status!=='resolved')return result;
   const proof={...result,pdfSetDigest};
   // Preserve the raw unresolved audit as evidence of WHY adjudication ran.
@@ -172,7 +172,7 @@ function alternateCandidate(read,photoSha256,expectedPrefix,all,report){
   return {...code,modelReviewSha256:sha(report),codeSupport:structuredClone(sameRegion)};
 }
 
-export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alternateCodeReview}) {
+export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alternateCodeReview,prefixCodeReview}) {
   if(!validateRead(read,photoSha256))return unresolved('code-read-incomplete-or-invalid');
   if(!/^\d{3,4}$/.test(expectedPrefix)||!Array.isArray(index)||!index.length
     ||index.some(p=>!hash(p.pdfSha256)||!Number.isInteger(p.pageNumber)||p.pageNumber<1
@@ -181,7 +181,8 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alterna
     return unresolved('pdf-index-incomplete-or-duplicate');
   const reads=[read,...(read.nativeScaleReview?[read.nativeScaleReview.read]:[])];
   const all=reads.flatMap(r=>[...r.observations,...r.independent]),strong=all.filter(credible);
-  const alternate=alternateCandidate(read,photoSha256,expectedPrefix,all,alternateCodeReview);
+  const prefix=prefixCodeReviewEvidence(prefixCodeReview,alternateCodeReview,read,photoSha256);
+  const alternate=alternateCandidate(read,photoSha256,expectedPrefix,all,alternateCodeReview)||prefix;
   if(!alternate&&new Set(strong.map(o=>o.fullCode)).size!==1)return unresolved('credible-code-conflict-or-absence');
   const code=alternate||strong[0];
   if(code.prefix!==expectedPrefix)return unresolved('credible-prefix-conflict');
@@ -195,6 +196,7 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alterna
   return {schemaVersion:1,status:'candidate',number:code.number,fullCode:code.fullCode,
     target:structuredClone(targets[0]),photoSha256,codeReadSha256:sha(read),indexSha256:sha(index),
     ...(alternate?{modelReviewSha256:alternate.modelReviewSha256,codeSupport:alternate.codeSupport}:{}),
+    ...(alternate?.prefixReviewSha256?{prefixReviewSha256:alternate.prefixReviewSha256,codePolicy:alternate.codePolicy}:{}),
     weakAlternatives:all.filter(o=>o.fullCode!==code.fullCode).length,bindingVerified:false};
 }
 
@@ -238,7 +240,7 @@ export function adjudicateCodeBody(input) {
     // A positioned composite can resolve a short/shared-name ambiguity only
     // WITH the original strong full code. Contrary body/code evidence remains
     // a veto; the earlier independent long-field rule remains unchanged.
-    if(input.positionedLayoutReview&&['observed-body-consistent','no-specific-body-evidence'].includes(assessment.status)){
+    if(!candidate.prefixReviewSha256&&input.positionedLayoutReview&&['observed-body-consistent','no-specific-body-evidence'].includes(assessment.status)){
       const support=positionedBodySupport(input,candidate.target);
       if(support)return {...candidate,status:'resolved',policy:support.policy,
         bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),positionedSupport:support,assessment,
@@ -256,7 +258,7 @@ export function adjudicateCodeBody(input) {
       // Shared names, template phrases and one-view snippets cannot qualify.
       if(common.length>=2)support.push({views:fields.readings.slice(offset,offset+2).map(r=>r.view),fieldHashes:common});
     }
-    const shortSupport=support.length?[]:shortFieldConjunction(views,fields,candidate.target);
+    const shortSupport=support.length||candidate.prefixReviewSha256?[]:shortFieldConjunction(views,fields,candidate.target);
     if(!support.length&&!shortSupport.length)return unresolved('insufficient-paired-whole-field-evidence');
     return {...candidate,status:'resolved',policy:support.length?'observed-code-plus-paired-current-body-v1':'observed-code-plus-three-disjoint-short-fields-v1',
       bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),support:support.length?support:shortSupport,assessment,

@@ -27,6 +27,8 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $runtime.Node (Join-Path $root 'tests\experiments\chinese-reader-smoke.mjs') (Join-Path $root 'models\paddleocr-zh-v4')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $runtime.Node (Join-Path $root 'tests\server-code-model-smoke.mjs')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $runtime.Node (Join-Path $root 'tests\experiments\detection-cache-integration.mjs')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $runtime.Node (Join-Path $root 'tests\detected-observation-cache-integration.mjs')

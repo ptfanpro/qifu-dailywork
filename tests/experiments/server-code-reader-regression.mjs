@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
-import {serverCodeImageValues,literalCodeObservations,verifyServerCodeModel} from './server-code-reader.mjs';
+import {literalCodeObservations} from './server-code-reader.mjs';
+import {serverCodeImageValues,verifyServerCodeModel} from '../../src/server-code-reader.mjs';
 const sharp=createRequire(import.meta.url)('sharp');
 test('server tensor keeps BGR, aspect ratio and zero padding without changing source',async()=>{
   const png=await sharp({create:{width:100,height:50,channels:3,background:'#ff0000'}}).png().toBuffer();

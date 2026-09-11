@@ -1,5 +1,11 @@
 # 大型本地行识别对照（仅试验）
 
+后续更新：不采用本文的全局模型替换。产品新增的仅是有原始稳定末号、
+V4 两份完整编号读数及当前 PDF 特有正文的“前缀单字符异读”路径；
+另保留 V5 两份原图读数和全部旧冲突。资产已按固定哈希随候选包提供，
+见 `models/paddleocr-zh-v5/README.md`。下文是首轮失败试验的历史记录，
+不是本次候选路径或全年验收结果。
+
 使用 PP-OCRv5 中文 server 行识别模型，与当前英文 mobile 行识别器读取完全相同的已有自动裁图。`server` 是模型规模名称：实际用本机 CPU，不调用服务器、不上传照片。固定来源为 [RapidAI v3.9.2 清单](https://github.com/RapidAI/RapidOCR/blob/v3.9.2/python/rapidocr/default_models.yaml)，模型 SHA-256 `e09385400eaaaef34ceff54aeb7c4f0f1fe014c27fa8b9905d4709b65746562a`；只存私有 TEMP，不加入产品依赖或 Git。
 
 预处理参照 [同版本行识别代码](https://github.com/RapidAI/RapidOCR/blob/v3.9.2/python/rapidocr/ch_ppocr_rec/main.py)：48 像素高，BGR、CHW、[-1,1]、右侧零填充，动态宽最少 320、上限 2048。使用 sharp linear 插值，不冒称与 OpenCV 逐像素一致。模型内嵌字典由已验证的 ONNX 元数据解析器提取；不复用英文 436 字表，不把模型得分当正确概率。
