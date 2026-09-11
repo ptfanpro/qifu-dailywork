@@ -69,3 +69,44 @@ Only after a source-bound adjudication rule has regression tests may a candidate
 enter the full plan, JPEG, restart, representative-day and frozen annual gates.
 Do not replace the production reader solely because this local score improves.
 Manual CAPTCHA, fixed launcher and default business dates remain unchanged.
+
+## Independent verification and rejected replacement
+
+The six changed photos were subsequently checked against their actual physical
+PDF pages, using both the visible print code and whole-page content. A pinned
+independent English reader made 48 reads across 12 original crops and four fixed
+recipes (2.341 seconds). This was a targeted diagnostic, not independent annual
+accuracy measurement. Original source hashes were unchanged.
+
+The empty-to-single case was **wrong**: contrast preprocessing produced suffix
+188, but the photo's actual physical page has suffix 186 and a different body
+from the real 188 page. The real 188 photo also demonstrates a different failure:
+the independent engine repeatedly returned the wrong month prefix at scores
+above the existing threshold. High confidence or a repeated single string is
+not sufficient evidence that a code is correct. The proposed blanket contrast
+replacement is rejected; it has not been installed in production.
+
+The unchanged frozen full planner was then run on all 21 June 10 photos and
+five PDFs / 18 physical pages. It completed in 390.909 seconds with 11 assignments
+and 10 unresolved photos: six prefix conflicts, three suffix conflicts, and one
+unconfirmed complete code. The body collector made 26 fresh reads and zero cache
+hits (18 PDF pages and eight photo claims). All ten unresolved code cases were
+excluded before positive body adjudication. All five manually page-verified
+changed June cases remained unassigned, including the unsafe contrast case.
+No original file changed, no online operation occurred, and the frozen source
+fingerprint stayed identical. This is a completed diagnostic run, **not a passed
+day or annual acceptance**; zero disagreements with old filenames is not proof
+that all assignments are independently correct.
+
+Regression assertions now cover a stable wrong suffix with two same-engine
+views and with two agreeing engines: contrary paired physical-page body evidence
+must still veto it, with raw observations unchanged. Positive controls with the
+matching page body continue to resolve. These use synthetic fields, not customer
+content, and test the adjudication boundary rather than reproducing real OCR
+pixels. The ordinary suite passed 235 tests plus its imported assertion modules.
+
+The next repair must address how unresolved raw-code ambiguity obtains additional
+source-bound evidence, without treating every high model score as a physical
+contradiction or clearing genuine opposite-page evidence. It must retain the
+unsafe stable-reading case above as a negative test. Recognition code and the
+software version are unchanged by this checkpoint; no release tag was created.

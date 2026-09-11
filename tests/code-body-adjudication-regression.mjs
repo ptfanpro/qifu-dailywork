@@ -59,6 +59,29 @@ reject('changed input bytes',x=>{x.photoSha256='c'.repeat(64);});
 reject('invalid crop',x=>{x.read.observations[0].crop.left=-1;});
 reject('forged number field',x=>{x.read.observations[0].number=18;});
 reject('a missing code cannot be filled from PDF contents',x=>{x.read.observations=[];x.read.independent=[];x.read.readings.forEach(o=>o.codeCount=0);});
+// Counterexample found during the June 10 contrast experiment: one photo
+// acquired a stable but wrong 188 reading, while its physical PDF/body was
+// page 186. Synthetic fields below retain no customer content. This checks
+// the adjudication boundary, not the OCR model's accuracy on the real photo.
+function stableWrongSuffix({secondEngineAgrees=false,matchingBody=false}={}){
+  const x=input();x.expectedPrefix='266';x.index[0].number=186;x.index[1].number=188;
+  x.read.observations=[.45,.75].map(p=>row('paddle',p,'266-1-188',.99));
+  x.read.independent=secondEngineAgrees?[.45,.75].map(p=>row('tesseract',p,'266-1-188',90)):[];
+  x.read.readings=[...x.read.observations,...[.45,.75].map(p=>row('tesseract',p,'266-1-188',secondEngineAgrees?90:0))]
+    .map(o=>({...o,errorCode:null,codeCount:o.engine==='paddle'||secondEngineAgrees?1:0,incompleteTailObserved:false}));
+  x.views=views((matchingBody?other:fields).join('\n'));
+  return x;
+}
+for(const secondEngineAgrees of [false,true]){
+  const wrong=stableWrongSuffix({secondEngineAgrees}),raw=JSON.stringify(wrong);
+  const result=adjudicateCodeBody(wrong);
+  assert.equal(result.status,'unresolved','stable wrong suffix must not outvote actual PDF body');
+  assert.equal(result.reason,'body-conflicting-body');
+  assert.equal(JSON.stringify(wrong),raw,'contrary page evidence and raw observations must remain intact');
+  const correct=adjudicateCodeBody(stableWrongSuffix({secondEngineAgrees,matchingBody:true}));
+  assert.equal(correct.status,'resolved','the same code with its own paired page body still passes');
+  assert.equal(correct.number,188);
+}
 const x=input(),before=JSON.stringify(x);adjudicateCodeBody(x);assert.equal(JSON.stringify(x),before,'no input or raw audit mutation');
 assert.doesNotMatch(JSON.stringify(run()),/松风|晨光|海月|竹影/,'receipts contain hashes/counts, not private body fields');
 function freshItem(x){return {number:null,reliable:false,sourceSha256:hash,detectedCodeRead:{...x.read,expectedPrefix:'263'},
