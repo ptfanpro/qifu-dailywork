@@ -51,6 +51,7 @@ import './experiments/server-code-reader-regression.mjs';
 import './foreground-paper-scene-regression.mjs';
 import './body-content-guard-regression.mjs';
 import './body-observation-cache-regression.mjs';
+import './positioned-body-cache-regression.mjs';
 import './body-short-field-guard-regression.mjs';
 import './code-body-adjudication-regression.mjs';
 import './code-body-collector-regression.mjs';
