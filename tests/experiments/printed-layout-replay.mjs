@@ -23,7 +23,11 @@ const days=dates.map(date=>{
   return found[0];
 });
 const files=['printed-layout-replay.mjs','printed-layout-worker.py','printed-layout-regions.py'];
-const sourceFiles=files.map(f=>[f,sha(fs.readFileSync(path.join(scriptDir,f)))]);
+// Freeze the actual implementation, not the compatibility import which would
+// resolve outside the snapshot and omit future geometry changes from its hash.
+const sourceFile=f=>f==='printed-layout-regions.py'
+  ?path.resolve(scriptDir,'../../src/printed_layout_geometry.py'):path.join(scriptDir,f);
+const sourceFiles=files.map(f=>[f,sha(fs.readFileSync(sourceFile(f)))]);
 const cvPackage=path.join(cvDependencies,'cv2'),cvBinary=fs.readdirSync(cvPackage).filter(f=>/^cv2.*\.pyd$/.test(f));
 if(cvBinary.length!==1)throw Error('Isolated OpenCV binary required');
 const runtimeFiles=[path.join(cvPackage,cvBinary[0]),require.resolve('sharp'),require.resolve('pdfjs-dist/package.json')]
@@ -31,7 +35,7 @@ const runtimeFiles=[path.join(cvPackage,cvBinary[0]),require.resolve('sharp'),re
 const fingerprint=sha(JSON.stringify({sourceFiles,runtimeFiles,sharpVersions:sharp.versions,coordinateFrame}));
 const out=fs.mkdtempSync(path.join(root,'printed-layout-replay-')),scripts=path.join(out,'scripts');
 fs.mkdirSync(scripts);
-for(const f of files)fs.copyFileSync(path.join(scriptDir,f),path.join(scripts,f));
+for(const f of files)fs.copyFileSync(sourceFile(f),path.join(scripts,f));
 fs.writeFileSync(path.join(out,'version.json'),JSON.stringify({fingerprint,sourceFiles,runtimeFiles,sharpVersions:sharp.versions,dates,coordinateFrame,
   startedAt:new Date().toISOString(),frozenBeforeFirstRealPhoto:true},null,2));
 const checked=record=>{

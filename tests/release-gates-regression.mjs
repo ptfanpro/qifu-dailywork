@@ -24,8 +24,22 @@ test('missing exit status and execution errors never become a passing gate',asyn
 test('Windows full suite is mandatory and green tests alone do not claim annual acceptance',async()=>{
   const invoked=[];
   const result=await runReleaseGates({platform:'win32',run:async stage=>{invoked.push(stage.id);return {status:0};}});
-  assert.deepEqual(invoked,['scene-semantics','windows-full-suite']);assert.equal(result.passed,true);
+  assert.deepEqual(invoked,['scene-semantics','layout-runtime-assets','windows-full-suite']);assert.equal(result.passed,true);
   assert.equal(result.releaseAccepted,false);
   const unsupported=await runReleaseGates({platform:'linux',run:async()=>{throw Error('must not run');}});
   assert.equal(unsupported.passed,false);assert.equal(unsupported.failedStage,'windows-required');
+});
+test('missing or broken app-local layout runtime blocks release before the Windows suite',async()=>{
+  const invoked=[];
+  const result=await runReleaseGates({platform:'win32',run:async stage=>{
+    invoked.push(stage.id);
+    if(stage.id==='layout-runtime-assets'){
+      assert.equal(stage.args[0],'tests/layout-runtime-integration.mjs');
+      assert.match(stage.args[1],/runtime[\\/]layout-python-v1$/);
+      return {status:1};
+    }
+    return {status:0};
+  }});
+  assert.equal(result.passed,false);assert.equal(result.failedStage,'layout-runtime-assets');
+  assert.equal(result.releaseAccepted,false);assert.deepEqual(invoked,['scene-semantics','layout-runtime-assets']);
 });

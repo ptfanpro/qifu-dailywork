@@ -1,3 +1,6 @@
 # OCR 字典属于经过哈希锁定的发布资产。禁止 checkout/archive 自动改换行，
 # 否则迁移包会把完整字典误判为损坏并禁用本地 ONNX 引擎。
 models/paddleocr-en-v5/ppocrv5_en_dict.txt -text
+# These worker sources are byte-pinned runtime assets on Windows too.
+src/printed_layout_geometry.py -text
+src/layout_runtime_worker.py -text

@@ -1,0 +1,4 @@
+// Reviewed app-local Windows x64 assets, not machine-specific paths.
+export const LAYOUT_RUNTIME_MANIFEST_SHA256='dcc6c12f4356036c8e6c58cdd34ab681288ec8245a6fe63d8e8037770897dcc5';
+export const LAYOUT_WORKER_SHA256='b60309202ce6c74e2df41a45ee4adff1aa6b556e77d36e5003f81306414cc9f3';
+export const LAYOUT_GEOMETRY_SHA256='8a780b22f1d973fbb4a61f586bf2ddf28372f29d2d35a307f38808eed73feb07';
