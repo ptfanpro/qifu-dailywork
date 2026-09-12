@@ -1,5 +1,6 @@
-// Veto-only current-PDF body review. A match never supplies a replacement
-// number, verifies an order set, or clears an earlier failed review.
+// Current-PDF body review: existing claims remain veto-only. Separate guarded
+// code/body and blank-code whole-field joins may establish a new local claim;
+// neither verifies an online order set nor clears an earlier failed review.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -12,6 +13,8 @@ import {buildVisualBodyPages,visualBodyViewNames} from './pdf-visual-body-eviden
 import {readBodyObservation} from './body-observation-cache.mjs';
 import {codeBodyCandidateForItem,codeBodyPositionedEligible,retainCodeBodyResolution,adjudicateCodeBody} from './code-body-adjudication.mjs';
 import {collectPositionedLayouts} from './positioned-layout-collector.mjs';
+import {wholeBodyCandidateBlockReason,retainWholeBodyResolution} from './whole-body-adjudication.mjs';
+import {screenWholeBodyConjunction} from './whole-body-conjunction.mjs';
 const require=createRequire(import.meta.url), hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const id=p=>`${p.pdfSha256}:${p.pageNumber}`;
 
@@ -89,8 +92,10 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
   const candidates=unresolvedClaims.map(item=>({item,candidate:codeBodyCandidateForItem(item,index)}))
     .filter(row=>row.candidate.status==='candidate'&&!claims.includes(row.item));
   const candidateMap=new Map(candidates.map(row=>[row.item,row.candidate]));
-  const includePositions=candidates.length>0;
-  claims=[...claims,...candidates.map(row=>row.item)];
+  const wholeBodyItems=new Set(unresolvedClaims.filter(item=>!claims.includes(item)&&!candidateMap.has(item)
+    &&wholeBodyCandidateBlockReason(item)===null));
+  const includePositions=candidates.length>0||wholeBodyItems.size>0;
+  claims=[...claims,...candidates.map(row=>row.item),...wholeBodyItems];
   if(!claims.length)return {status:'not-needed',attempted:0,blocked:0,results:[]};
   const started=Date.now(), results=[];
   let reader=null,pages=null;
@@ -116,6 +121,8 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
       if(originals[claims.indexOf(item)].photoSha256!==candidate.photoSha256)
         throw Error('Photo changed between code and body review');
     }
+    for(const item of wholeBodyItems)if(originals[claims.indexOf(item)].photoSha256!==item.sourceSha256)
+      throw Error('Photo changed between blank-code and body review');
     for(const pdf of pdfFiles) {
       const saved=pdfIndexBinding.files.filter(p=>p.name===path.basename(pdf));
       if(saved.length!==1||hash(fs.readFileSync(pdf))!==saved[0].sha256)throw Error('PDF source changed during body review');
@@ -165,11 +172,24 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
       const claim=claims[i];
       let assessment;
       try {
-        const number=candidateMap.get(claim)?.number??claim.number;
+        const source=fs.readFileSync(claim.file);
+        let views,number=candidateMap.get(claim)?.number??claim.number;
+        if(wholeBodyItems.has(claim)) {
+          views=await readViews(source);
+          pendingViews.set(claim,views);pendingSources.set(claim,source);
+          const screen=screenWholeBodyConjunction({pages,views,index});
+          if(screen.status!=='single-page-conjunction') {
+            results.push({...originals[i],status:screen.status,route:'blank-code-whole-fields'});
+            onProgress?.(`正文归属检查：${i+1}/${claims.length} 张完成；无编号照片仍未形成唯一完整字段对应。`);
+            continue;
+          }
+          number=screen.candidate.target.number;
+          originals[i].claimedNumber=number;
+        }
         const positions=pdfPages.map((p,index)=>p.number===number?index:-1).filter(n=>n>=0);
         if(positions.length!==1)throw Error('Claimed number is not unique');
         const target=pages.find(p=>id(p)===expectedIds[positions[0]]);
-        const source=fs.readFileSync(claim.file),views=await readViews(source);
+        views??=await readViews(source);
         assessment=assess(views,target);
         if(candidateMap.has(claim)){pendingViews.set(claim,views);pendingSources.set(claim,source);}
       } catch {assessment={status:'body-reader-unavailable',bindingVerified:false};}
@@ -228,10 +248,20 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
       if(result.status!=='resolved')continue;
       adjudicated.push(item);
     }
+    if(wholeBodyItems.has(item)) {
+      if(!sourcesVerified||!pendingViews.has(item))continue;
+      const result=await retainWholeBodyResolution(item,{pages,views:pendingViews.get(item),index,pdfPages,
+        pdfSetDigest:pdfIndexBinding.digest,photoSource:pendingSources.get(item)});
+      results[i].wholeBodyReview={status:result.status,reason:result.reason||null};
+      if(result.status!=='resolved')continue;
+      adjudicated.push(item);
+    }
     retainBodyReview(item,results[i]);
   }
   onProgress?.(`正文读取统计：本机缓存复用 ${cacheHits} 项，实际识别 ${freshReads} 项；归属仍以本次 PDF 核对结果为准。`);
   return {status:'veto-only-not-order-binding',attempted:claims.length,
     blocked:[...originalClaims,...adjudicated].filter(bodyReviewBlockReason).length,
-    adjudicated,adjudicationAttempted:candidates.length,cacheHits,freshReads,seconds:(Date.now()-started)/1000,results,positionedLayoutReview};
+    adjudicated,adjudicationAttempted:candidates.length,wholeBodyAttempted:wholeBodyItems.size,
+    wholeBodyResolved:adjudicated.filter(item=>wholeBodyItems.has(item)).length,
+    cacheHits,freshReads,seconds:(Date.now()-started)/1000,results,positionedLayoutReview};
 }

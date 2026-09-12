@@ -12,6 +12,7 @@ import {decodeOcrSource,extractOcrCrop,writeImageFile} from './ocr-image.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
 import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
 import {codeBodyResolution,codeBodyMethod,codeBodySourceBlockReason,codeBodyModelReviewEligible} from './code-body-adjudication.mjs';
+import {wholeBodyResolution,wholeBodyMethod,wholeBodySourceBlockReason} from './whole-body-adjudication.mjs';
 import {collectCodeModelReviews} from './code-model-review.mjs';
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
 import {createPdfPrintCodeEvidence,appendPdfPrintCodeObservation} from './pdf-print-code-evidence.mjs';
@@ -2401,6 +2402,10 @@ export function photoCodeAuditBlockReason(item) {
   if(pdfReason)return pdfReason;
   const bodyReason=bodyReviewBlockReason(item);
   if(bodyReason)return bodyReason;
+  if(item?.wholeBodyAdjudication||item?.evidence?.method===wholeBodyMethod) {
+    if(!wholeBodyResolution(item))return 'whole-body-resolution-not-current';
+    return detectedCodeReadBlockReason(item)||portableCodeReadBlockReason(item)||null;
+  }
   if(item?.codeBodyAdjudication) {
     if(!codeBodyResolution(item))return 'code-body-resolution-not-current';
     const portableReason=portableCodeReadBlockReason(item);
@@ -2610,11 +2615,14 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
   let inconclusive = 0;
   for (const item of eligible) {
     const claimedNumber = item.number;
-    const claimedPages = indexedPages.filter((page) => page.number === claimedNumber);
+    const method = String(item?.evidence?.method || '');
+    // This source-bound route proves physical page identity from whole fields.
+    // A transient grayscale vector is neither its proof nor a prerequisite.
+    // Other evidence routes retain their existing indexed-page requirements.
+    const claimedPages = (method===wholeBodyMethod?pdfPages:indexedPages).filter((page) => page.number === claimedNumber);
     let reason = null;
     let status = 'confirmed';
     let scores = [];
-    const method = String(item?.evidence?.method || '');
     const observedEvidence = item?.observedOcrEvidence || null;
     // 已经按数字命名的照片属于上一轮已确认结果。OCR 在单个小裁框上会把
     // 清晰的 7 读成 1；这种单票结果只能提示复核，不能反向推翻既有编号。
@@ -2686,6 +2694,10 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
       const proof=codeBodyResolution(item);
       reason=codeBodySourceBlockReason(item,pdfPages);
       if(!reason)item.evidence.pdfRecheck={method:codeBodyMethod,status:'confirmed',pdfSha256:proof.target.pdfSha256,pageNumber:proof.target.pageNumber};
+    } else if (method===wholeBodyMethod && wholeBodyResolution(item)) {
+      const proof=wholeBodyResolution(item);
+      reason=wholeBodySourceBlockReason(item,pdfPages);
+      if(!reason)item.evidence.pdfRecheck={method:wholeBodyMethod,status:'confirmed',pdfSha256:proof.target.pdfSha256,pageNumber:proof.target.pageNumber};
     } else if (visibleConsensus) {
       item.evidence.pdfRecheck={method:strictVisibleCode
         ? 'strict-visible-code-box-and-pdf-index'
@@ -4416,7 +4428,8 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     const recheck=await recheckReliablePhotoClaimsWithPdf(adjudicated,pdfPages,onProgress);
     for(const key of ['attempted','confirmed','rejected','inconclusive'])pdfClaimRecheck[key]=(pdfClaimRecheck[key]||0)+(recheck[key]||0);
     pdfClaimRecheck.diagnostics.push(...recheck.diagnostics);
-    onProgress?.(`编号与正文联合复核：${recheck.confirmed} 张按原图完整编号和当前 PDF 正文确认；原始异读已保留，未解决冲突仍隔离。`);
+    const wholeConfirmed=adjudicated.filter(item=>item.reliable&&item.evidence?.method===wholeBodyMethod).length;
+    onProgress?.(`编号与正文联合复核：${recheck.confirmed-wholeConfirmed} 张按完整编号与正文确认，${wholeConfirmed} 张无完整编号但由唯一完整正文多字段确认；原始读数已保留，未解决冲突仍隔离。`);
   }
   // Runtime-only item references/authorizations never become reusable cache
   // decisions. The persisted plan keeps their source-bound proof separately.
