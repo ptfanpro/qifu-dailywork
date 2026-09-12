@@ -10,7 +10,7 @@ import {createBodyTextRanker} from './body-text-evidence.mjs';
 import {createBodyFieldComparator} from './body-field-evidence.mjs';
 import {buildVisualBodyPages,visualBodyViewNames} from './pdf-visual-body-evidence.mjs';
 import {readBodyObservation} from './body-observation-cache.mjs';
-import {codeBodyCandidateForItem,retainCodeBodyResolution,adjudicateCodeBody} from './code-body-adjudication.mjs';
+import {codeBodyCandidateForItem,codeBodyPositionedEligible,retainCodeBodyResolution,adjudicateCodeBody} from './code-body-adjudication.mjs';
 import {collectPositionedLayouts} from './positioned-layout-collector.mjs';
 const require=createRequire(import.meta.url), hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const id=p=>`${p.pdfSha256}:${p.pageNumber}`;
@@ -186,8 +186,10 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
   let positionedLayoutReview={status:'not-needed',comparisons:0,mayAssignNumber:false,mayClearCodeConflict:false};
   if(sourcesVerified){
     // Only the residual non-conflicting body ambiguity gets expensive layout
-    // collection. Already-supported long fields and contrary content skip it.
-    const residual=candidates.filter(({item},i)=>{
+    // collection. Already-supported fields, contrary content and prefix-only
+    // repair routes that cannot consume geometry must skip it.
+    const residual=candidates.filter(({item,candidate})=>{
+      if(!codeBodyPositionedEligible(candidate))return false;
       const assessment=results[claims.indexOf(item)];
       if(!['observed-body-consistent','no-specific-body-evidence'].includes(assessment?.status)||!pendingViews.has(item))return false;
       return adjudicateCodeBody({read:item.detectedCodeRead,expectedPrefix:item.detectedCodeRead.expectedPrefix,

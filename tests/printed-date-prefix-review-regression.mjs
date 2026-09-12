@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {createRequire} from 'node:module';
 import {codeBodyTestInput,freshItem} from './code-body-adjudication-regression.mjs';
 import {observeCodeModel} from '../src/code-model-review.mjs';
@@ -7,6 +10,7 @@ import {CHINESE_BODY_MODEL_SHA256} from '../src/chinese-body-reader.mjs';
 import {adjudicateCodeBody,retainCodeBodyResolution,codeBodyResolution} from '../src/code-body-adjudication.mjs';
 import {visualBodyViewNames,buildVisualBodyPages} from '../src/pdf-visual-body-evidence.mjs';
 import {horizontalBodyCrop} from '../src/vertical-body-regions.mjs';
+import {reviewCurrentPdfBodies} from '../src/body-content-review.mjs';
 const sharp=createRequire(import.meta.url)('sharp'),hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 const source=await sharp({create:{width:200,height:100,channels:3,background:'#ccc'}}).png().toBuffer();
 const heading='2026年03月14日供灯祈愿';
@@ -100,4 +104,33 @@ const history=JSON.stringify(item.codeAuditHistory);
 assert.equal(retainCodeBodyResolution(item,{...positive,pdfSetDigest:'d'.repeat(64)}).status,'resolved');
 assert.equal(codeBodyResolution(item).number,17);assert.equal(JSON.stringify(item.codeAuditHistory),history);
 item.alternateCodeReview.rows[0].confidence=.99;assert.equal(codeBodyResolution(item),null);
+// The collector must not compute a geometry result the printed-date policy
+// cannot consume. Insufficient date/body proof remains blocked, never relaxed.
+const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'qifu-date-collector-'));
+try {
+ const file=path.join(scratch,'synthetic.png'),pdf=path.join(scratch,'synthetic.pdf');
+ fs.writeFileSync(file,source);fs.writeFileSync(pdf,'synthetic PDF bytes');
+ const pdfSha256=hash(fs.readFileSync(pdf));
+ for(const terms of [[heading,'松风清境'],['松风清境','晨光普照']]) {
+  const pending=await printedDateInput();pending.pages.forEach(p=>p.pdfSha256=pdfSha256);
+  pending.views=fieldViews(terms);
+  const pendingItem=freshItem(pending);
+  Object.assign(pendingItem,{file,sourceSha256:pending.photoSha256,alternateCodeReview:pending.alternateCodeReview});
+  const history=JSON.stringify(pendingItem.codeAuditHistory);
+  const checked=await reviewCurrentPdfBodies({appRoot:scratch,pdfFiles:[pdf],
+   pdfPages:[{pdf,pageNumber:1,number:17},{pdf,pageNumber:2,number:18}],
+   pdfIndexBinding:{digest:hash('set'),files:[{name:path.basename(pdf),sha256:pdfSha256}]},
+   claims:[],unresolvedClaims:[pendingItem],loadPages:async()=>pending.pages,
+   createReader:async()=>({read:async()=>pending.views,release:async()=>{}})});
+  assert.equal(checked.adjudicationAttempted,1,'exercise the live printed-date candidate');
+  assert.equal(checked.adjudicated.length,0);assert.equal(pendingItem.number,null);
+  assert.equal(codeBodyResolution(pendingItem),null);assert.equal(JSON.stringify(pendingItem.codeAuditHistory),history);
+  assert.equal(checked.positionedLayoutReview.status,'not-needed','printed-date prefix route cannot use geometry');
+ }
+} finally {
+ const resolved=fs.realpathSync(scratch),temp=fs.realpathSync(os.tmpdir());
+ assert.equal(path.dirname(resolved).toLowerCase(),temp.toLowerCase());
+ assert(path.basename(resolved).startsWith('qifu-date-collector-'));
+ fs.rmSync(resolved,{recursive:true,force:true});
+}
 console.log(`Printed-date prefix: positive, ${rejected.length} rejections and retained-audit revocation PASS`);

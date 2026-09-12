@@ -59,6 +59,26 @@ try {
  assert.equal(result.adjudicated.length,1,'prefix evidence must reach final collector');
  assert.equal(result.positionedLayoutReview.status,'not-needed','resolved prefix/body evidence was dropped during residual selection');
  assert.equal(messages.some(m=>m.startsWith('位置版式')),false,'no unnecessary layout work after sufficient prefix/body evidence');
+ for(const text of ['阖家平安','松风清境','海月澄明\n竹影清幽']) {
+  const pending=input();pending.pages.forEach(p=>p.pdfSha256=pdfSha256);
+  pending.alternateCodeReview=await prior(pending);pending.prefixCodeReview=await chain(pending);
+  pending.views=views(text);
+  const pendingItem=freshItem(pending);
+  Object.assign(pendingItem,{file,sourceSha256:pending.photoSha256,
+   alternateCodeReview:pending.alternateCodeReview,prefixCodeReview:pending.prefixCodeReview});
+  const pendingHistory=JSON.stringify(pendingItem.codeAuditHistory);
+  const pendingResult=await reviewCurrentPdfBodies({appRoot:scratch,pdfFiles:[pdf],
+   pdfPages:[{pdf,pageNumber:1,number:17},{pdf,pageNumber:2,number:18}],
+   pdfIndexBinding:{digest:sha('set'),files:[{name:path.basename(pdf),sha256:pdfSha256}]},
+   claims:[],unresolvedClaims:[pendingItem],loadPages:async()=>pending.pages,
+   createReader:async()=>({read:async()=>pending.views,release:async()=>{}})});
+  assert.equal(pendingResult.adjudicationAttempted,1,'exercise the live prefix candidate, not an excluded item');
+  assert.equal(pendingResult.adjudicated.length,0,'insufficient or contrary prefix body must remain unresolved');
+  assert.equal(pendingItem.number,null);assert.equal(codeBodyResolution(pendingItem),null);
+  assert.equal(JSON.stringify(pendingItem.codeAuditHistory),pendingHistory);
+  assert.equal(pendingResult.positionedLayoutReview.status,'not-needed',
+   'prefix policy cannot use geometry, so insufficient body must not schedule that work');
+ }
 } finally {
  const resolved=fs.realpathSync(scratch),temp=fs.realpathSync(os.tmpdir());
  assert.equal(path.dirname(resolved).toLowerCase(),temp.toLowerCase());

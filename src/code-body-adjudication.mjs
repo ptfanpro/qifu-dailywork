@@ -205,6 +205,12 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alterna
     weakAlternatives:all.filter(o=>o.fullCode!==code.fullCode).length,bindingVerified:false};
 }
 
+// Share this gate with the collector: prefix repair still requires its own
+// stronger body/date proof, and cannot consume geometry as a substitute.
+export function codeBodyPositionedEligible(candidate) {
+  return candidate?.status==='candidate'&&!candidate.prefixReviewSha256&&!candidate.requiresPrintedDate;
+}
+
 function shortFieldConjunction(views,fields,target,{mixed=false}={}){
   if(!validPositionedBodyViews(views))return [];
   const ordered=visualBodyViewNames.map(name=>views.find(v=>v.view===name)),support=[];
@@ -250,7 +256,7 @@ export function adjudicateCodeBody(input) {
     // A positioned composite can resolve a short/shared-name ambiguity only
     // WITH the original strong full code. Contrary body/code evidence remains
     // a veto; the earlier independent long-field rule remains unchanged.
-    if(!candidate.prefixReviewSha256&&!candidate.requiresPrintedDate&&input.positionedLayoutReview&&['observed-body-consistent','no-specific-body-evidence'].includes(assessment.status)){
+    if(codeBodyPositionedEligible(candidate)&&input.positionedLayoutReview&&['observed-body-consistent','no-specific-body-evidence'].includes(assessment.status)){
       const support=positionedBodySupport(input,candidate.target);
       if(support)return {...candidate,status:'resolved',policy:support.policy,
         bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),positionedSupport:support,assessment,
