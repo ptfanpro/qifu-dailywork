@@ -40,3 +40,19 @@ layout runtime, pass all five gates, and repeat the affected observations and
 full-day comparison. Missing/pending annual, clean-PC and online evidence
 still blocks a release, even when code tests pass. Fixed launcher, manual
 CAPTCHA and photo-yesterday/PDF-today defaults remain unchanged.
+
+## Complete package verification
+
+Fresh Git snapshot `2698e4d` stages both assets through the fixed-hash staging
+functions. Recognition fingerprint:
+`f24dee9bf036e68e46c44b709948e45c87bb5a57a6fcf386e91826c1f5320bf7`.
+Archive SHA-256:
+`2c90e72a692e5b94fd71842ca142a001a0915e81bdbc5a5d778d7c743eb56bba`.
+All five code-gate stages pass in 123.821 seconds. The frozen source is unchanged.
+
+The three lost scene originals were independently reread using that package's
+actual production semantic service: three fresh reads, one session, 4.329
+seconds, recovering the same one water / two lamp roles and scene-entry checks.
+Raw code observations and original hashes remain unchanged; no external
+operation was attempted. This is targeted model verification, not full-day
+acceptance. A new complete June 13 replay is required and remains pending.

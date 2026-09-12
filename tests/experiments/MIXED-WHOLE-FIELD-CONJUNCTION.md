@@ -76,9 +76,13 @@ full Windows suite. Duration: 164.4 seconds. The snapshot remains unchanged.
   `e39ad788b9fd76f43f6e416f0f7e5b5837ddf591aec9010cab80f6e696339722`.
 - Archive SHA-256:
   `4166ac0fe29f5e1d162bc83baf40e0be50cf873c3ad4dd2a39cf51710abeb9af`.
-- This package is currently running a new complete June 13 replay. Its result
-  is not yet available; do not combine the earlier full-day counts and this
-  targeted positive into a purported new full-day acceptance.
+- The complete June 13 replay subsequently finished in 1658.319 seconds:
+  17 assigned / 31 unresolved, versus 19 assigned previously. It adds the
+  targeted photo but loses three prior scene assignments; no remaps or raw
+  detected-code changes. Its regression comparison FAILED. All 69 body reads
+  were fresh. The three losses were traced to omitted app-local semantic assets
+  in this isolated archive, not accepted as harmless. The archive and failed
+  report remain unchanged; see `SEMANTIC-PACKAGE-GATE.md` for the gate repair.
 
 The branch was pushed after two transient empty-server-response failures.
 There is no main-branch merge, release tag, deployment or annual acceptance.
