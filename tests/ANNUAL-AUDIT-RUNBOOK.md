@@ -18,12 +18,15 @@
 node tests/annual-replay.mjs inventory BUSINESS_ROOT PRIVATE_OUTPUT
 node tests/annual-replay.mjs structure BUSINESS_ROOT PRIVATE_OUTPUT
 node tests/annual-replay.mjs replay BUSINESS_ROOT PRIVATE_OUTPUT [YYYY-MM-DD ...]
+node tests/annual-replay.mjs replay BUSINESS_ROOT PRIVATE_OUTPUT --reuse-blind-input PRIOR_REPLAY_ROUND [YYYY-MM-DD ...]
 node tests/annual-pdf-replay.mjs PRIVATE_OUTPUT 0 1 [YYYY-MM-DD ...]
 node tests/experiments/annual-detection-replay.mjs PRIVATE_OUTPUT PINNED_MODEL_FILE 0 1 [YYYY-MM-DD ...]
 node tests/audit-status.mjs PRIVATE_OUTPUT
 ```
 
 `replay` 只生成计划，不改原图；副本文件名隐藏历史编号，不制造拍摄顺序。`structure` 不执行 OCR，不能当作识别通过。`annual-pdf-replay` 不处理订单。实验性检测器的第二引擎结果不达标时仍为未决，不能替代产品验收。
+
+磁盘不足时可显式使用 `--reuse-blind-input` 只读复用先前完整轮次的盲输入，不复用其识别结果。运行器会逐日重新核对原始库存哈希、盲文件精确集合、每个盲副本哈希、PDF 集合和当前源码指纹；缺失、多余、被替换、符号链接或目录项异常均在 OCR 前失败。新计划、状态和报告写入当前源码轮次，旧盲输入目录不写入；该模式只是避免再次复制相同的 2026 输入字节，不降低识别或验收门槛。
 
 大批复核按输入内容哈希保存进度。中断后使用相同输入及源码快照继续；不要在同一组对照中修改算法，也不要把跨快照结果合并成通过率。原文件发生变化时停止该项并重新盘点。
 

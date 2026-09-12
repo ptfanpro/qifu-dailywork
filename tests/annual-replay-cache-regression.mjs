@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {recognitionSourceFingerprint} from '../src/recognition-provenance.mjs';
-import {sealAuditReport} from './audit-replay-cache.mjs';
+import {assertReusableAuditReport,sealAuditReport} from './audit-replay-cache.mjs';
 const appRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
 
@@ -67,6 +67,15 @@ function sealFixture(f) {
   fs.writeFileSync(f.reportFile,JSON.stringify(sealAuditReport(report,{day:f.day,action:'replay',appRoot,dir:f.dir})));
 }
 
+function createExternalBlindInput(f) {
+  const round=path.join(f.root,'replay-old-frozen'),inputDir=path.join(round,f.day.date,'input'),photos=path.join(inputDir,'1');
+  fs.mkdirSync(photos,{recursive:true});
+  const photo=f.day.photos[0],blindName=`audit_${photo.sha256}_0.jpg`;
+  fs.copyFileSync(f.photo,path.join(photos,blindName));
+  fs.copyFileSync(f.pdf,path.join(inputDir,path.basename(f.pdf)));
+  return {round,inputDir,blindName};
+}
+
 test('annual replay reuses intact evidence without rerunning OCR or rewriting a report, preserving unresolved status',()=>withFixture(f=>{
   sealFixture(f);const before=fs.readFileSync(f.reportFile),modified=fs.statSync(f.reportFile,{bigint:true}).mtimeNs;
   const result=f.execute();assert.equal(result.error,undefined);assert.equal(result.status,0,result.stderr);
@@ -102,4 +111,40 @@ test('a planner exception returns a failing CLI exit code, never cached completi
   assert.equal(result.error,undefined);assert.notEqual(result.status,0);
   assert(fs.existsSync(f.reportFile),result.stderr);
   const report=JSON.parse(fs.readFileSync(f.reportFile));assert.equal(report.error,'photo-plan-failed');assert.equal(report.cacheBinding,undefined);
+}));
+
+test('annual replay can read an exact prior blind input without copying it into the new round',()=>withFixture(f=>{
+  fs.unlinkSync(f.reportFile);const reused=createExternalBlindInput(f);
+  const beforePhoto=fs.readFileSync(path.join(reused.inputDir,'1',reused.blindName));
+  const beforePdf=fs.readFileSync(path.join(reused.inputDir,path.basename(f.pdf)));
+  const guard=path.join(f.root,'deny-reused-child.mjs');
+  fs.writeFileSync(guard,"import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';for(const n of ['spawn','spawnSync','exec','execSync','execFile','execFileSync','fork'])cp[n]=()=>{throw Error('synthetic-no-child-test');};syncBuiltinESMExports();");
+  const result=spawnSync(process.execPath,['--import',pathToFileURL(guard).href,path.join(appRoot,'tests/annual-replay.mjs'),'replay',path.dirname(f.day.folder),f.audit,
+    '--reuse-blind-input',reused.round,f.day.date],{windowsHide:true,encoding:'utf8',timeout:20000,maxBuffer:1024*1024});
+  assert.equal(result.error,undefined);assert.notEqual(result.status,0);
+  assert.match(result.stdout,/photo-plan-failed/);assert.equal(fs.existsSync(path.join(f.dir,'input')),false);
+  assert.deepEqual(fs.readFileSync(path.join(reused.inputDir,'1',reused.blindName)),beforePhoto);
+  assert.deepEqual(fs.readFileSync(path.join(reused.inputDir,path.basename(f.pdf))),beforePdf);
+}));
+
+test('external blind input remains part of the sealed cache identity and is rechecked',()=>withFixture(f=>{
+  const reused=createExternalBlindInput(f),photo=f.day.photos[0];
+  fs.writeFileSync(path.join(f.dir,'private-plan.json'),JSON.stringify({ready:false,assignments:[]}));
+  fs.writeFileSync(path.join(f.dir,'private-source-map.json'),JSON.stringify([{...photo,blindName:reused.blindName}]));
+  const sourceHash=recognitionSourceFingerprint(appRoot);
+  const report={sourceHash,date:f.day.date,photos:1,assignments:0,unresolved:1,ready:false,sourceUnchanged:true};
+  const sealed=sealAuditReport(report,{day:f.day,action:'replay',appRoot,dir:f.dir,inputDir:reused.inputDir});
+  assert.equal(sealed.cacheBinding.schemaVersion,2);
+  assert.equal(assertReusableAuditReport(sealed,{day:f.day,action:'replay',appRoot,dir:f.dir,sourceHash,inputDir:reused.inputDir}),true);
+  fs.writeFileSync(path.join(reused.inputDir,'1',reused.blindName),'changed');
+  assert.throws(()=>assertReusableAuditReport(sealed,{day:f.day,action:'replay',appRoot,dir:f.dir,sourceHash,inputDir:reused.inputDir}),/Cached audit report/);
+}));
+
+test('annual replay rejects an incomplete or extra prior blind input before OCR',()=>withFixture(f=>{
+  fs.unlinkSync(f.reportFile);const reused=createExternalBlindInput(f);
+  fs.writeFileSync(path.join(reused.inputDir,'1','extra.jpg'),'extra');
+  const result=spawnSync(process.execPath,[path.join(appRoot,'tests/annual-replay.mjs'),'replay',path.dirname(f.day.folder),f.audit,
+    '--reuse-blind-input',reused.round,f.day.date],{windowsHide:true,encoding:'utf8',timeout:20000,maxBuffer:1024*1024});
+  assert.equal(result.error,undefined);assert.notEqual(result.status,0);
+  assert.match(result.stderr,/does not exactly match inventory/);assert.equal(fs.existsSync(path.join(f.dir,'input')),false);
 }));

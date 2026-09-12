@@ -7,14 +7,21 @@ import {fileURLToPath} from 'node:url';
 import {planPhotoPreparation,diagnosePhotoStructure,classifySceneVisualScore} from '../src/photo-prepare.mjs';
 import {recognitionSourceFingerprint} from '../src/recognition-provenance.mjs';
 import {requirePrivateAuditRoot} from './audit-paths.mjs';
-import {assertAuditOriginalsUnchanged,assertReusableAuditReport,sealAuditReport} from './audit-replay-cache.mjs';
+import {assertAuditOriginalsUnchanged,assertBlindAuditInputs,assertReusableAuditReport,sealAuditReport} from './audit-replay-cache.mjs';
 
-const [action,businessRoot,outputRoot,...filters]=process.argv.slice(2);
+const [action,businessRoot,outputRoot,...rawArguments]=process.argv.slice(2);
 if(!['inventory','structure','replay'].includes(action)||!businessRoot||!outputRoot) throw Error('inventory|structure|replay BUSINESS_ROOT PRIVATE_OUTPUT [YYYY-MM-DD...]');
+const reuseOption=rawArguments.indexOf('--reuse-blind-input');
+if(reuseOption!==-1&&(action!=='replay'||reuseOption===rawArguments.length-1||rawArguments.lastIndexOf('--reuse-blind-input')!==reuseOption))
+  throw Error('--reuse-blind-input requires one existing replay round and is valid only for replay');
+const reuseBlindRoot=reuseOption===-1?null:path.resolve(rawArguments[reuseOption+1]);
+const filters=reuseOption===-1?rawArguments:rawArguments.filter((value,index)=>index!==reuseOption&&index!==reuseOption+1);
+if(filters.some(value=>value.startsWith('--')))throw Error('Unknown annual replay option');
 const appRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const inside=(parent,child)=>{const rel=path.relative(path.resolve(parent),path.resolve(child));return !rel||(!rel.startsWith('..')&&!path.isAbsolute(rel));};
 if(inside(businessRoot,outputRoot)||inside(appRoot,outputRoot)) throw Error('Private output must be outside business and source roots');
 requirePrivateAuditRoot(outputRoot);
+if(reuseBlindRoot)requirePrivateAuditRoot(reuseBlindRoot);
 fs.mkdirSync(outputRoot,{recursive:true});
 const json=(file,value)=>{const temp=file+'.tmp';fs.writeFileSync(temp,JSON.stringify(value,null,2));fs.renameSync(temp,file);};
 const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -53,10 +60,12 @@ if(action==='inventory') {
   for(const day of days) {
     const dir=path.join(outputRoot,`${action}-${sourceHash.slice(0,12)}`,day.date);fs.mkdirSync(dir,{recursive:true});
     const reportFile=path.join(dir,'report.json');
+    const reusedInputDir=reuseBlindRoot?path.join(reuseBlindRoot,day.date,'input'):null;
+    const inputDir=reusedInputDir||path.join(dir,'input');
     assertAuditOriginalsUnchanged(day);
     if(fs.existsSync(reportFile)) {
       const previous=JSON.parse(fs.readFileSync(reportFile));
-      assertReusableAuditReport(previous,{day,action,appRoot,dir,sourceHash});
+      assertReusableAuditReport(previous,{day,action,appRoot,dir,sourceHash,inputDir});
       console.log(JSON.stringify({stage:'verified-cache-reuse',date:day.date,sourceHash}));
       continue;
     }
@@ -83,17 +92,19 @@ if(action==='inventory') {
     if(!day.photos.length||!day.pdfs.length) {json(reportFile,{sourceHash,date:day.date,status:'missing-source-material',photos:day.photos.length,pdfs:day.pdfs.length});process.exitCode=1;continue;}
     // Blind processed filenames, and do not manufacture capture-order evidence.
     // Different bytes get opaque names sorted by hash, not the old number.
-    const folder=path.join(dir,'input'),photoDir=path.join(folder,'1');
-    fs.mkdirSync(photoDir,{recursive:true});
-    for(const pdf of day.pdfs) {
-      if(sha(pdf.file)!==pdf.sha256) throw Error('Source changed since inventory');
-      fs.copyFileSync(pdf.file,path.join(folder,path.basename(pdf.file)));
-    }
+    const folder=inputDir,photoDir=path.join(folder,'1');
+    if(reusedInputDir)assertBlindAuditInputs(day,reusedInputDir);
+    else fs.mkdirSync(photoDir,{recursive:true});
+    if(!reusedInputDir)for(const pdf of day.pdfs) {
+        if(sha(pdf.file)!==pdf.sha256) throw Error('Source changed since inventory');
+        fs.copyFileSync(pdf.file,path.join(folder,path.basename(pdf.file)));
+      }
     const mapping=[];
     for(const [index,photo] of day.photos.entries()) {
       if(sha(photo.file)!==photo.sha256) throw Error('Source changed since inventory');
       const name=`audit_${photo.sha256}_${index}${path.extname(photo.file)}`;
-      fs.copyFileSync(photo.file,path.join(photoDir,name));mapping.push({...photo,blindName:name});
+      if(!reusedInputDir)fs.copyFileSync(photo.file,path.join(photoDir,name));
+      mapping.push({...photo,blindName:name});
     }
     json(path.join(dir,'private-source-map.json'),mapping);
     let plan;
@@ -119,6 +130,6 @@ if(action==='inventory') {
       manualEvidence:rows.filter(r=>/manual/.test(r.method||'')).length,ready:plan.ready,safeToApply:plan.safeToApply,missing:plan.missingExpected.length,
       issues:plan.issues.length,pending:plan.pendingIssues.length,seconds:Math.round((Date.now()-started)/1000),
       sourceUnchanged:[...day.photos,...day.pdfs].every(f=>sha(f.file)===f.sha256)};
-    json(reportFile,sealAuditReport({...summary,rows},{day,action,appRoot,dir}));console.log(JSON.stringify(summary));
+    json(reportFile,sealAuditReport({...summary,rows},{day,action,appRoot,dir,inputDir}));console.log(JSON.stringify(summary));
   }
 }

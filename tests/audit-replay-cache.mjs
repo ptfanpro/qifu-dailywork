@@ -30,31 +30,51 @@ function artifactsFor(action) {
   if(action==='replay')return ['private-plan.json','private-source-map.json'];
   throw Error('Invalid audit cache action');
 }
-function assertCopiedInputs(day,dir) {
-  const entries=[
-    ...day.photos.map((photo,index)=>[path.join('input','1',`audit_${photo.sha256}_${index}${path.extname(photo.file)}`),photo.sha256]),
-    ...day.pdfs.map(pdf=>[path.join('input',path.basename(pdf.file)),pdf.sha256]),
-  ];
-  for(const [relative,expected] of entries)if(fileSha(path.join(dir,relative))!==expected)throw Error('Audit input copy changed');
+function expectedBlindInputs(day) {
+  return {
+    photos:day.photos.map((photo,index)=>({name:`audit_${photo.sha256}_${index}${path.extname(photo.file)}`,sha256:photo.sha256})),
+    pdfs:day.pdfs.map(pdf=>({name:path.basename(pdf.file),sha256:pdf.sha256})),
+  };
+}
+function assertPlainDirectory(root,name) {
+  const target=path.join(root,name),stat=fs.lstatSync(target);
+  if(stat.isSymbolicLink()||!stat.isDirectory())throw Error('Audit blind input must use plain directories');
+  return target;
+}
+export function assertBlindAuditInputs(day,inputDir) {
+  if(fs.lstatSync(inputDir).isSymbolicLink())throw Error('Audit blind input must not be a symbolic link');
+  const expected=expectedBlindInputs(day),root=fs.realpathSync(inputDir),photoDir=assertPlainDirectory(root,'1');
+  const exactNames=(directory,pattern)=>fs.readdirSync(directory,{withFileTypes:true}).filter(entry=>pattern.test(entry.name)).map(entry=>{
+    if(entry.isSymbolicLink()||!entry.isFile())throw Error('Audit blind input contains a non-file entry');
+    return entry.name;
+  }).sort();
+  const actualPhotos=exactNames(photoDir,/\.(jpe?g|png)$/i);
+  const actualPdfs=exactNames(root,/\.pdf$/i);
+  const expectedPhotoNames=expected.photos.map(item=>item.name).sort(),expectedPdfNames=expected.pdfs.map(item=>item.name).sort();
+  if(JSON.stringify(actualPhotos)!==JSON.stringify(expectedPhotoNames)||JSON.stringify(actualPdfs)!==JSON.stringify(expectedPdfNames))
+    throw Error('Audit blind input set does not exactly match inventory');
+  for(const item of expected.photos)if(fileSha(path.join(photoDir,item.name))!==item.sha256)throw Error('Audit blind photo copy changed');
+  for(const item of expected.pdfs)if(fileSha(path.join(root,item.name))!==item.sha256)throw Error('Audit blind PDF copy changed');
+  return sha(JSON.stringify(expected));
 }
 
-export function sealAuditReport(report,{day,action,appRoot,dir}) {
+export function sealAuditReport(report,{day,action,appRoot,dir,inputDir=path.join(dir,'input')}) {
   assertAuditOriginalsUnchanged(day);
   if(report.error||report.status==='missing-source-material'||report.sourceUnchanged!==true)throw Error('Incomplete audit cannot be sealed');
-  if(action==='replay')assertCopiedInputs(day,dir);
+  const blindInputDigest=action==='replay'?assertBlindAuditInputs(day,inputDir):null;
   const {cacheBinding:discard,...payload}=report;
-  const binding={schemaVersion:1,action,inputDigest:inputDigest(day),auditProgramDigest:auditProgramDigest(appRoot),
+  const binding={schemaVersion:2,action,inputDigest:inputDigest(day),blindInputDigest,auditProgramDigest:auditProgramDigest(appRoot),
     artifacts:artifactsFor(action).map(name=>({name,sha256:fileSha(path.join(dir,name))}))};
   return {...payload,cacheBinding:{...binding,digest:sha(JSON.stringify({payload,binding}))}};
 }
 
-export function assertReusableAuditReport(report,{day,action,appRoot,dir,sourceHash}) {
+export function assertReusableAuditReport(report,{day,action,appRoot,dir,sourceHash,inputDir=path.join(dir,'input')}) {
   // Always reread actual originals, even for a green saved report.
   assertAuditOriginalsUnchanged(day);
   try {
     if(!report||report.sourceHash!==sourceHash||report.date!==day.date||report.error||report.sourceUnchanged!==true)throw Error();
     const {cacheBinding,...payload}=report;
-    if(!cacheBinding||cacheBinding.schemaVersion!==1||cacheBinding.action!==action)throw Error();
+    if(!cacheBinding||cacheBinding.schemaVersion!==2||cacheBinding.action!==action)throw Error();
     const {digest,...binding}=cacheBinding;
     if(digest!==sha(JSON.stringify({payload,binding}))||binding.inputDigest!==inputDigest(day)
       ||binding.auditProgramDigest!==auditProgramDigest(appRoot))throw Error();
@@ -64,7 +84,8 @@ export function assertReusableAuditReport(report,{day,action,appRoot,dir,sourceH
       const saved=binding.artifacts[index];
       if(saved.name!==name||!validSha(saved.sha256)||fileSha(path.join(dir,name))!==saved.sha256)throw Error();
     }
-    if(action==='replay')assertCopiedInputs(day,dir);
+    const blindInputDigest=action==='replay'?assertBlindAuditInputs(day,inputDir):null;
+    if(binding.blindInputDigest!==blindInputDigest)throw Error();
   } catch {
     throw Error('Cached audit report is stale or incomplete; preserve it and use a fresh private audit directory');
   }
