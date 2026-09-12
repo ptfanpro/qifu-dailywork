@@ -37,7 +37,14 @@ test('missing semantic model package blocks release even if semantic rule tests 
 });
 test('Windows full suite is mandatory and green tests alone do not claim annual acceptance',async()=>{
   const invoked=[];
-  const result=await runReleaseGates({platform:'win32',run:async stage=>{invoked.push(stage.id);return {status:0};}});
+  const result=await runReleaseGates({platform:'win32',run:async stage=>{
+    invoked.push(stage.id);
+    if(stage.id==='windows-full-suite'){
+      assert.equal(stage.command,'powershell.exe');
+      assert.deepEqual(stage.args,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','ui/Run-Tests.ps1']);
+    }
+    return {status:0};
+  }});
   assert.deepEqual(invoked,['scene-semantics','semantic-package-assets','layout-runtime-assets','positioned-code-join','windows-full-suite']);assert.equal(result.passed,true);
   assert.equal(result.releaseAccepted,false);
   const unsupported=await runReleaseGates({platform:'linux',run:async()=>{throw Error('must not run');}});
