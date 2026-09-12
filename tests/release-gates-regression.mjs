@@ -21,10 +21,24 @@ test('missing exit status and execution errors never become a passing gate',asyn
     assert.equal(result.passed,false);assert.equal(result.failedStage,'scene-semantics');
   }
 });
+test('missing semantic model package blocks release even if semantic rule tests pass',async()=>{
+  const invoked=[];
+  const result=await runReleaseGates({platform:'win32',run:async stage=>{
+    invoked.push(stage.id);
+    if(stage.id==='semantic-package-assets') {
+      assert.equal(stage.args[0],'tests/semantic-package-smoke.mjs');
+      assert.ok(stage.args[1],'check the explicit application package, not a host fallback');
+      return {status:1};
+    }
+    return {status:0};
+  }});
+  assert.equal(result.passed,false);assert.equal(result.failedStage,'semantic-package-assets');
+  assert.deepEqual(invoked,['scene-semantics','semantic-package-assets']);assert.equal(result.releaseAccepted,false);
+});
 test('Windows full suite is mandatory and green tests alone do not claim annual acceptance',async()=>{
   const invoked=[];
   const result=await runReleaseGates({platform:'win32',run:async stage=>{invoked.push(stage.id);return {status:0};}});
-  assert.deepEqual(invoked,['scene-semantics','layout-runtime-assets','positioned-code-join','windows-full-suite']);assert.equal(result.passed,true);
+  assert.deepEqual(invoked,['scene-semantics','semantic-package-assets','layout-runtime-assets','positioned-code-join','windows-full-suite']);assert.equal(result.passed,true);
   assert.equal(result.releaseAccepted,false);
   const unsupported=await runReleaseGates({platform:'linux',run:async()=>{throw Error('must not run');}});
   assert.equal(unsupported.passed,false);assert.equal(unsupported.failedStage,'windows-required');
@@ -40,7 +54,7 @@ test('positioned join/restart regression cannot be omitted from release',async()
     return {status:0};
   }});
   assert.equal(result.passed,false);assert.equal(result.failedStage,'positioned-code-join');
-  assert.equal(result.releaseAccepted,false);assert.deepEqual(invoked,['scene-semantics','layout-runtime-assets','positioned-code-join']);
+  assert.equal(result.releaseAccepted,false);assert.deepEqual(invoked,['scene-semantics','semantic-package-assets','layout-runtime-assets','positioned-code-join']);
 });
 test('missing or broken app-local layout runtime blocks release before the Windows suite',async()=>{
   const invoked=[];
@@ -54,5 +68,5 @@ test('missing or broken app-local layout runtime blocks release before the Windo
     return {status:0};
   }});
   assert.equal(result.passed,false);assert.equal(result.failedStage,'layout-runtime-assets');
-  assert.equal(result.releaseAccepted,false);assert.deepEqual(invoked,['scene-semantics','layout-runtime-assets']);
+  assert.equal(result.releaseAccepted,false);assert.deepEqual(invoked,['scene-semantics','semantic-package-assets','layout-runtime-assets']);
 });
