@@ -2616,10 +2616,12 @@ export async function recheckReliablePhotoClaimsWithPdf(items, pdfPages, onProgr
   for (const item of eligible) {
     const claimedNumber = item.number;
     const method = String(item?.evidence?.method || '');
-    // This source-bound route proves physical page identity from whole fields.
-    // A transient grayscale vector is neither its proof nor a prerequisite.
-    // Other evidence routes retain their existing indexed-page requirements.
-    const claimedPages = (method===wholeBodyMethod?pdfPages:indexedPages).filter((page) => page.number === claimedNumber);
+    // These source-bound routes prove physical page identity from current PDF
+    // fields plus the complete byte/index binding. A transient grayscale
+    // vector is neither their proof nor a prerequisite. Other evidence routes
+    // retain their existing indexed-page requirements.
+    const sourceBoundBodyMethod=method===wholeBodyMethod||method===codeBodyMethod;
+    const claimedPages = (sourceBoundBodyMethod?pdfPages:indexedPages).filter((page) => page.number === claimedNumber);
     let reason = null;
     let status = 'confirmed';
     let scores = [];

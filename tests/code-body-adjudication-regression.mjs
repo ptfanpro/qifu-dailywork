@@ -149,8 +149,56 @@ for(const names of [mixedNames,['松柏清境晨光普照堂',...mixedNames.slic
   assert.equal(result.support[0].distinctFields,3);assert.equal(result.support[0].independentlyExtractedAndVisible,true);
   assert.equal(JSON.stringify(value),before);assert.doesNotMatch(JSON.stringify(result),/松柏清境|海月明|竹风远/);
 }
+// A strong full code already fixes the numeric identity. Two independently
+// corroborated, disjoint PDF whole fields may confirm that same physical page
+// when they contain one long field and one three-Han field. The photo's long
+// term may be in one tightly bounded decorated OCR line. This is narrower than
+// the three-short-field route and must never repair a prefix/code conflict.
+const twoMixedNames=Object.freeze(['松柏清境','海月明']);
+{
+  const value=mixedInput(twoMixedNames),before=JSON.stringify(value),result=adjudicateCodeBody(value);
+  assert.equal(result.status,'resolved','one long plus one short whole field should corroborate an already strong full code');
+  assert.equal(result.policy,'observed-code-plus-two-disjoint-mixed-fields-v1');
+  assert.equal(result.number,17);assert.equal(result.bindingVerified,false);
+  assert.equal(result.support[0].distinctFields,2);
+  assert.equal(result.support[0].independentlyExtractedAndVisible,true);
+  assert.equal(JSON.stringify(value),before);assert.doesNotMatch(JSON.stringify(result),/松柏清境|海月明/);
+}
+{
+  const value=mixedInput(twoMixedNames);
+  value.views=shortViews(['礼：松柏清境1甲',twoMixedNames[1]]);
+  value.views[1]=shortViews(['愿：松柏清境2乙',twoMixedNames[1]])[1];
+  const before=JSON.stringify(value),result=adjudicateCodeBody(value);
+  assert.equal(result.status,'resolved',`a unique long Han run with at most two isolated Han noise characters retains its physical field crop: ${JSON.stringify(result)}`);
+  assert.equal(result.policy,'observed-code-plus-two-disjoint-mixed-fields-v1');
+  assert.equal(result.support[0].distinctFields,2);
+  assert.equal(JSON.stringify(value),before);assert.doesNotMatch(JSON.stringify(result),/松柏清境|海月明/);
+}
+const twoMixedReject=(label,change)=>{const value=mixedInput(twoMixedNames);change(value);assert.notEqual(adjudicateCodeBody(value).status,'resolved',label);};
+twoMixedReject('one whole field remains insufficient',x=>x.views=shortViews(twoMixedNames.slice(0,1)));
+twoMixedReject('two short fields cannot use the two-mixed-field route',x=>x.views=shortViews(['松柏青','海月明']));
+twoMixedReject('repeated observations remain one field',x=>x.views=shortViews([twoMixedNames[0],twoMixedNames[0]]));
+twoMixedReject('unpositioned two-field text cannot authorize',x=>x.views.forEach(v=>delete v.positioned));
+twoMixedReject('long field must be a whole line',x=>x.views=shortViews(['松柏\n清境',twoMixedNames[1]]));
+twoMixedReject('long field needs independent PDF extraction',x=>x.pages[0].fieldTexts.shift());
+twoMixedReject('short field needs independent PDF extraction',x=>x.pages[0].fieldTexts.pop());
+twoMixedReject('long field needs paired visible PDF support',x=>{x.pages[0].visibleFieldViews[1].text=twoMixedNames[1];x.pages[0].supplementalText[1]=twoMixedNames[1];});
+twoMixedReject('long field only in one photo view cannot be pooled',x=>{x.views[1]=shortViews([twoMixedNames[1]])[1];});
+twoMixedReject('long field contained in a foreign page is not unique',x=>x.pages[1].fieldTexts.push('敬祝'+twoMixedNames[0]));
+twoMixedReject('overlapping two-field crops remain one area',x=>{
+  for(const [i,v] of x.views.slice(0,2).entries())for(const [j,f] of v.positioned.fields.entries()){
+    f.region.left=.1+j*.12;f.region.top=.2;f.crop=horizontalBodyCrop(f.region,v.positioned.dimensions,i===0?.35:.65);
+  }
+});
+twoMixedReject('credible independent wrong code remains a veto',x=>{x.read.independent[0].confidence=90;x.read.readings[2].confidence=90;});
+twoMixedReject('one low confidence original code crop remains insufficient',x=>{x.read.observations[1].confidence=.84;x.read.readings[1].confidence=.84;});
+twoMixedReject('wrong number cannot borrow the two fields',x=>{x.index[0].number=18;x.index[1].number=17;});
+twoMixedReject('failed body view is not missing evidence',x=>{x.views[3].errors=1;});
+twoMixedReject('a continuous longer Han run is not the target field',x=>x.views=shortViews(['敬祝'+twoMixedNames[0],twoMixedNames[1]]));
+twoMixedReject('another semantic Han field in the same crop cannot be ignored',x=>x.views=shortViews(['祈福人：'+twoMixedNames[0],twoMixedNames[1]]));
+twoMixedReject('more than two isolated Han noise characters cannot decorate the long field',x=>x.views=shortViews(['甲：'+twoMixedNames[0]+'1乙丙',twoMixedNames[1]]));
+twoMixedReject('two occurrences of the target run in one crop are ambiguous',x=>x.views=shortViews([twoMixedNames[0]+'1'+twoMixedNames[0],twoMixedNames[1]]));
 const mixedReject=(label,change)=>{const value=mixedInput();assert.equal(adjudicateCodeBody(value).status,'resolved',`${label}: clean independent positive baseline`);change(value);assert.notEqual(adjudicateCodeBody(value).status,'resolved',label);};
-mixedReject('one long plus one short is insufficient',x=>x.views=shortViews(mixedNames.slice(0,2)));
 mixedReject('repeated fields do not meet three distinct fields',x=>x.views=shortViews([mixedNames[0],mixedNames[1],mixedNames[1]]));
 mixedReject('unpositioned mixed text cannot authorize',x=>x.views.forEach(v=>delete v.positioned));
 mixedReject('multiline long field cannot be assembled',x=>x.views=shortViews(['松柏\n清境',...mixedNames.slice(1)]));
@@ -159,7 +207,7 @@ mixedReject('split PDF glyphs cannot become an extracted long field',x=>x.pages[
 mixedReject('long field needs paired visible PDF support',x=>{x.pages[0].visibleFieldViews[1].text=mixedNames.slice(1).join('。');x.pages[0].supplementalText[1]=x.pages[0].visibleFieldViews[1].text;});
 mixedReject('long field only in one photo view cannot be pooled',x=>{x.views[1]=shortViews(mixedNames.slice(1))[1];});
 mixedReject('long field inside a longer foreign field is not unique',x=>x.pages[1].fieldTexts.push('敬祝'+mixedNames[0]));
-mixedReject('short field still requires independent extraction',x=>x.pages[0].fieldTexts.pop());
+mixedReject('both short fields still require independent extraction',x=>x.pages[0].fieldTexts.splice(-2));
 mixedReject('long photo line containing a target substring is not a whole field',x=>x.views=shortViews(['敬祝'+mixedNames[0],...mixedNames.slice(1)]));
 mixedReject('changed actual crop invalidates mixed proof',x=>x.views[0].positioned.fields[0].crop.left++);
 mixedReject('overlapping mixed crops do not prove separate fields',x=>{
@@ -175,7 +223,7 @@ mixedReject('opposite body evidence remains a veto',x=>x.views=shortViews([...mi
 mixedReject('duplicate bodies remain unresolved',x=>{x.pages[1]={...structuredClone(x.pages[0]),pageNumber:2};});
 mixedReject('changed original source hash remains invalid',x=>x.photoSha256='c'.repeat(64));
 mixedReject('failed body view is not missing evidence',x=>x.views[3].errors=1);
-console.log('Mixed whole-field conjunction: 2 positives and 21 rejection checks PASS');
+console.log('Mixed whole-field conjunction: 4 positives and 39 rejection checks PASS');
 assert.doesNotMatch(JSON.stringify(run()),/松风|晨光|海月|竹影/,'receipts contain hashes/counts, not private body fields');
 function freshItem(x){return {number:null,reliable:false,sourceSha256:hash,detectedCodeRead:{...x.read,expectedPrefix:'263'},
   codeAuditHistory:[{status:'unresolved',number:null,reason:'detected-code-number-conflict',
@@ -203,5 +251,12 @@ assert.equal(JSON.stringify(mixedClaim.codeAuditHistory),mixedAudit);
 assert.equal(codeBodyResolution(structuredClone(mixedClaim)),null,'serialized mixed proof cannot authorize a new process');
 mixedClaim.codeBodyAdjudication.support[0].fieldHashes.pop();
 assert.equal(codeBodyResolution(mixedClaim),null,'altered field proof revokes the mixed authorization');
+const twoClaimInput=mixedInput(twoMixedNames),twoClaim=freshItem(twoClaimInput),twoAudit=JSON.stringify(twoClaim.codeAuditHistory);
+assert.equal(retainCodeBodyResolution(twoClaim,{...twoClaimInput,pdfSetDigest:'d'.repeat(64)}).status,'resolved');
+assert.equal(codeBodyResolution(twoClaim).policy,'observed-code-plus-two-disjoint-mixed-fields-v1');
+assert.equal(JSON.stringify(twoClaim.codeAuditHistory),twoAudit);
+assert.equal(codeBodyResolution(structuredClone(twoClaim)),null,'serialized two-field proof cannot authorize a new process');
+twoClaim.codeBodyAdjudication.support[0].fieldHashes.pop();
+assert.equal(codeBodyResolution(twoClaim),null,'altered two-field proof revokes the authorization');
 console.log('Code/body adjudication regression PASS: positive join, safety and retained-audit gates');
 export {input as codeBodyTestInput,freshItem,views};

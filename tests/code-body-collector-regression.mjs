@@ -32,6 +32,11 @@ try {
   assert.equal(item.number,17);assert.equal(photoCodeAuditBlockReason(item),null);
   assert.equal(JSON.stringify(item.codeAuditHistory),history);
   assert.equal((await recheckReliablePhotoClaimsWithPdf([item],args.pdfPages)).confirmed,1,'complete plan recheck must accept the newly validated proof');
+  const noShape=make();
+  assert.equal((await reviewCurrentPdfBodies(noShape.args)).adjudicated.length,1);
+  noShape.args.pdfPages.forEach(page=>delete page._localShapeFingerprint);
+  assert.equal((await recheckReliablePhotoClaimsWithPdf([noShape.item],noShape.args.pdfPages)).confirmed,1,
+    'source-bound code/body proof must recheck physical PDF bytes and index without an unrelated grayscale fingerprint');
   for(const kind of ['pdf-change','photo-change','photo-changed-before-body','truncated','incomplete-pages','prior-conflict',
     'pdf-change-on-release','photo-change-on-release']) {
     const test=make();

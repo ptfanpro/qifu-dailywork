@@ -211,13 +211,25 @@ export function codeBodyPositionedEligible(candidate) {
   return candidate?.status==='candidate'&&!candidate.prefixReviewSha256&&!candidate.requiresPrintedDate;
 }
 
-function shortFieldConjunction(views,fields,target,{mixed=false}={}){
+function shortFieldConjunction(views,fields,target,{mixed=false,minDistinct=3,requireMixedLengths=false,allowDecoratedLong=false}={}){
   if(!validPositionedBodyViews(views))return [];
   const ordered=visualBodyViewNames.map(name=>views.find(v=>v.view===name)),support=[];
-  const shortHash=text=>{
+  const fieldSupportsHash=(text,expected)=>{
     if(/[\r\n\u2028\u2029]/u.test(text))return null;
     const value=text.normalize('NFKC').replace(/\s/gu,'');
-    return (mixed?/^\p{Script=Han}{3,40}$/u:/^\p{Script=Han}{3}$/u).test(value)?crypto.createHash('sha256').update(value).digest('hex'):null;
+    const direct=(mixed?/^\p{Script=Han}{3,40}$/u:/^\p{Script=Han}{3}$/u).test(value)
+      ?crypto.createHash('sha256').update(value).digest('hex'):null;
+    if(direct===expected)return true;
+    if(!allowDecoratedLong)return false;
+    const runs=value.match(/\p{Script=Han}+/gu)||[];
+    const matching=runs.filter(run=>[...run].length>=4&&[...run].length<=40
+      &&crypto.createHash('sha256').update(run).digest('hex')===expected);
+    if(matching.length!==1)return false;
+    const other=runs.filter(run=>run!==matching[0]);
+    // Recover a physical crop when recognition surrounds one exact long PDF
+    // term with at most two isolated Han OCR artifacts. A second semantic
+    // field (>=3 Han) or repeated target in the same crop remains ambiguous.
+    return other.every(run=>[...run].length<=2)&&other.reduce((n,run)=>n+[...run].length,0)<=2;
   };
   const overlaps=(a,b)=>Math.min(a.left+a.width,b.left+b.width)>Math.max(a.left,b.left)
     &&Math.min(a.top+a.height,b.top+b.height)>Math.max(a.top,b.top);
@@ -227,7 +239,7 @@ function shortFieldConjunction(views,fields,target,{mixed=false}={}){
     const common=pair[0][key].filter(h=>pair[1][key].includes(h));
     const stable=[];
     for(const hash of common){
-      const observations=ordered.slice(offset,offset+2).map(v=>v.positioned.fields.filter(f=>shortHash(f.text)===hash));
+      const observations=ordered.slice(offset,offset+2).map(v=>v.positioned.fields.filter(f=>fieldSupportsHash(f.text,hash)));
       if(observations.some(fs=>fs.length!==1)||observations[0][0].regionIndex!==observations[1][0].regionIndex)continue;
       stable.push({hash,observations:observations.flat()});
     }
@@ -235,8 +247,9 @@ function shortFieldConjunction(views,fields,target,{mixed=false}={}){
     // A mixture retains the same THREE-field minimum, every source check and
     // the disjointness requirement. Lengthening one field must not remove a
     // valid conjunction. The original short-only route is tried first.
-    if(stable.length<3||stable.some((a,i)=>stable.slice(i+1).some(b=>a.observations.some((f,j)=>overlaps(f.crop,b.observations[j].crop)))))continue;
+    if(stable.length<minDistinct||stable.some((a,i)=>stable.slice(i+1).some(b=>a.observations.some((f,j)=>overlaps(f.crop,b.observations[j].crop)))))continue;
     if(mixed&&!stable.some(f=>!pair[0].corroboratedShortFieldHashes.includes(f.hash)))continue;
+    if(requireMixedLengths&&!stable.some(f=>pair[0].corroboratedShortFieldHashes.includes(f.hash)))continue;
     support.push({views:ordered.slice(offset,offset+2).map(v=>v.view),fieldHashes:stable.map(f=>f.hash),
       distinctFields:stable.length,independentlyExtractedAndVisible:true,disjointPhotoCrops:true});
   }
@@ -276,9 +289,21 @@ export function adjudicateCodeBody(input) {
     }
     const shortSupport=support.length||candidate.prefixReviewSha256||candidate.requiresPrintedDate?[]:shortFieldConjunction(views,fields,candidate.target);
     const mixedSupport=support.length||shortSupport.length||candidate.prefixReviewSha256||candidate.requiresPrintedDate?[]:shortFieldConjunction(views,fields,candidate.target,{mixed:true});
-    if(!support.length&&!shortSupport.length&&!mixedSupport.length)return unresolved('insufficient-paired-whole-field-evidence');
-    return {...candidate,status:'resolved',policy:support.length?'observed-code-plus-paired-current-body-v1':shortSupport.length?'observed-code-plus-three-disjoint-short-fields-v1':'observed-code-plus-three-disjoint-mixed-fields-v1',
-      bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),support:support.length?support:shortSupport.length?shortSupport:mixedSupport,assessment,
+    // A strong original full code plus one long and one short PDF whole field
+    // is a narrower corroboration route. The long photo term may be inside one
+    // tightly bounded decorated OCR line; both terms still need independent
+    // PDF extraction, paired visible-PDF support, paired photo views, unique
+    // page membership and disjoint physical crops. Prefix/date repairs cannot
+    // use it.
+    const twoMixedSupport=support.length||shortSupport.length||mixedSupport.length||candidate.prefixReviewSha256||candidate.requiresPrintedDate?[]
+      :shortFieldConjunction(views,fields,candidate.target,{mixed:true,minDistinct:2,requireMixedLengths:true,allowDecoratedLong:true});
+    if(!support.length&&!shortSupport.length&&!mixedSupport.length&&!twoMixedSupport.length)return unresolved('insufficient-paired-whole-field-evidence');
+    const policy=support.length?'observed-code-plus-paired-current-body-v1'
+      :shortSupport.length?'observed-code-plus-three-disjoint-short-fields-v1'
+      :mixedSupport.length?'observed-code-plus-three-disjoint-mixed-fields-v1'
+      :'observed-code-plus-two-disjoint-mixed-fields-v1';
+    return {...candidate,status:'resolved',policy,
+      bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),support:support.length?support:shortSupport.length?shortSupport:mixedSupport.length?mixedSupport:twoMixedSupport,assessment,
       ...(dateSupport?{printedDateSupport:dateSupport}:{}),
       // Page correspondence only, NOT a statement that online order sets or
       // upload counts have been verified. Those gates remain separate.
