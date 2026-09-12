@@ -55,4 +55,15 @@ actual production semantic service: three fresh reads, one session, 4.329
 seconds, recovering the same one water / two lamp roles and scene-entry checks.
 Raw code observations and original hashes remain unchanged; no external
 operation was attempted. This is targeted model verification, not full-day
-acceptance. A new complete June 13 replay is required and remains pending.
+acceptance.
+
+The complete June 13 replay has now finished: 48 photos / 45 PDF pages,
+20 assignments / 28 unresolved, 1801.298 seconds, 69 fresh body reads and
+zero body-cache hits. Independent comparison against the prior complete
+19-assignment package verifies one addition, zero lost assignments, zero
+remaps and zero changes to original detected-code observations. Source,
+originals, input inventory and complete audit-cache bindings are verified.
+The three prior scene roles are retained in this full-day result, not merely
+in the targeted smoke check. The former incomplete archive remains unchanged
+and failed. `ready=false`: remaining unresolved photos and broader acceptance
+still prohibit calling this a finished daily workflow or release.
