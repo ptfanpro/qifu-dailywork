@@ -60,3 +60,25 @@ The last complete two-day replays still recorded 33 unresolved photos. This
 test resolves one of those in isolation; the complete day, remaining cases,
 frozen available-year corpus, clean-PC and online acceptance remain pending.
 The launcher, manual CAPTCHA and photo-yesterday/PDF-today defaults are unchanged.
+
+## Additional rejection and frozen-package checks
+
+The retained real observations also rejected 31 foreign-photo-body substitutions
+and 44 duplicated PDF-body corpora. This diagnostic made four fresh code-crop
+reads, reused body observations, and did not upload or assign files. A
+prefix/date case and two insufficient/conflicting cases remain unresolved.
+
+The isolated archive of commit `ff7022f` passes all four code-gate stages:
+scene semantics, moved/pinned layout runtime, positioned join/restart, and the
+full Windows suite. Duration: 164.4 seconds. The snapshot remains unchanged.
+
+- Frozen recognition fingerprint:
+  `e39ad788b9fd76f43f6e416f0f7e5b5837ddf591aec9010cab80f6e696339722`.
+- Archive SHA-256:
+  `4166ac0fe29f5e1d162bc83baf40e0be50cf873c3ad4dd2a39cf51710abeb9af`.
+- This package is currently running a new complete June 13 replay. Its result
+  is not yet available; do not combine the earlier full-day counts and this
+  targeted positive into a purported new full-day acceptance.
+
+The branch was pushed after two transient empty-server-response failures.
+There is no main-branch merge, release tag, deployment or annual acceptance.
