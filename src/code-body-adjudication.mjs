@@ -74,7 +74,11 @@ export function codeBodyModelReviewEligible(item,index){
   if(freshItemBlock(item)||!validateRead(item.detectedCodeRead,item.sourceSha256)||item.detectedCodeRead.nativeScaleReview
     ||Number.isInteger(item.observedOcrNumber))return false;
   const read=item.detectedCodeRead,rows=[...read.observations,...read.independent];
-  return codeBodyCandidateForItem(item,index).status!=='candidate'&&rows.some(credible)
+  const candidate=codeBodyCandidateForItem(item,index);
+  // A weak single-view nomination still gets the stronger alternate model
+  // review first. The strict body route is a fallback, not a replacement that
+  // may suppress an already-proven alternate-code path.
+  return (candidate.status!=='candidate'||candidate.requiresStrictBodySupport)&&rows.some(credible)
     &&new Set(rows.map(o=>o.index)).size<=4;
 }
 
@@ -192,8 +196,16 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alterna
   // V17's 0.85 high-confidence digit floor, applied to TWO original crops
   // from the SAME detector region. These are not called independent engines.
   const good=read.observations.filter(o=>o.fullCode===code.fullCode&&o.confidence>=.85);
-  if(!alternate&&!good.some(o=>good.some(p=>o.index===p.index&&o.padding!==p.padding&&!sameCrop(o.crop,p.crop))))
-    return unresolved('insufficient-high-confidence-code-views');
+  let requiresStrictBodySupport=false;
+  if(!alternate&&!good.some(o=>good.some(p=>o.index===p.index&&o.padding!==p.padding&&!sameCrop(o.crop,p.crop)))) {
+    // A single complete in-prefix code is not independently sufficient, but
+    // it may nominate one current PDF page for the stricter three-whole-field
+    // body route. Every complete observation, including low-confidence reads,
+    // must be the same word; this path never clears an opposite code.
+    if(!all.length||new Set(all.map(o=>o.fullCode)).size!==1)
+      return unresolved('insufficient-high-confidence-code-views');
+    requiresStrictBodySupport=true;
+  }
   const targets=index.filter(p=>p.number===code.number);
   if(targets.length!==1)return unresolved('observed-code-outside-pdf');
   return {schemaVersion:1,status:'candidate',number:code.number,fullCode:code.fullCode,
@@ -202,13 +214,15 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alterna
     ...(alternate?.prefixReviewSha256?{prefixReviewSha256:alternate.prefixReviewSha256,codePolicy:alternate.codePolicy}:{}),
     ...(alternate?.requiresPrintedDate?{requiresPrintedDate:true,fullCodeObserved:false,
       codePolicy:alternate.codePolicy,observedFullCodes:alternate.observedFullCodes}:{}),
-    weakAlternatives:all.filter(o=>o.fullCode!==code.fullCode).length,bindingVerified:false};
+    weakAlternatives:all.filter(o=>o.fullCode!==code.fullCode).length,
+    ...(requiresStrictBodySupport?{requiresStrictBodySupport:true}:{}),bindingVerified:false};
 }
 
 // Share this gate with the collector: prefix repair still requires its own
 // stronger body/date proof, and cannot consume geometry as a substitute.
 export function codeBodyPositionedEligible(candidate) {
-  return candidate?.status==='candidate'&&!candidate.prefixReviewSha256&&!candidate.requiresPrintedDate;
+  return candidate?.status==='candidate'&&!candidate.prefixReviewSha256&&!candidate.requiresPrintedDate
+    &&!candidate.requiresStrictBodySupport;
 }
 
 function shortFieldConjunction(views,fields,target,{mixed=false,minDistinct=3,requireMixedLengths=false,allowDecoratedLong=false}={}){
@@ -278,6 +292,19 @@ export function adjudicateCodeBody(input) {
     if(assessment.status!=='observed-body-consistent')return unresolved(`body-${assessment.status}`);
     const fields=assessment.fieldEvidence;
     if(fields.state!=='single-page-field-candidate')return unresolved('body-not-page-specific');
+    if(candidate.requiresStrictBodySupport){
+      // One code crop only nominates the page. Authorization comes from three
+      // distinct physical fields independently extracted from the PDF and
+      // observed in paired, disjoint photo crops. The weaker two-field and
+      // geometry fallback routes remain unavailable here.
+      const short=shortFieldConjunction(views,fields,candidate.target);
+      const mixed=short.length?[]:shortFieldConjunction(views,fields,candidate.target,{mixed:true});
+      const strict=short.length?short:mixed;
+      if(!strict.length)return unresolved('insufficient-strict-body-support');
+      return {...candidate,status:'resolved',policy:'single-code-view-plus-three-disjoint-whole-fields-v1',
+        bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),support:strict,assessment,
+        pageCorrespondenceVerified:true,bindingVerified:false};
+    }
     const support=[];
     for(const offset of [0,2]){
       const pair=fields.readings.slice(offset,offset+2).map(r=>r.ranked.find(p=>id(p)===id(candidate.target)));

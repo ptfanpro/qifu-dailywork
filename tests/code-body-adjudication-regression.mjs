@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {adjudicateCodeBody,codeBodyResolution,retainCodeBodyResolution} from '../src/code-body-adjudication.mjs';
+import {adjudicateCodeBody,codeBodyModelReviewEligible,codeBodyResolution,retainCodeBodyResolution} from '../src/code-body-adjudication.mjs';
 import {photoCodeAuditBlockReason} from '../src/photo-prepare.mjs';
 import {visualBodyViewNames,buildVisualBodyPages} from '../src/pdf-visual-body-evidence.mjs';
 import {horizontalBodyCrop,verticalBodyCrop} from '../src/vertical-body-regions.mjs';
@@ -59,6 +59,66 @@ reject('changed input bytes',x=>{x.photoSha256='c'.repeat(64);});
 reject('invalid crop',x=>{x.read.observations[0].crop.left=-1;});
 reject('forged number field',x=>{x.read.observations[0].number=18;});
 reject('a missing code cannot be filled from PDF contents',x=>{x.read.observations=[];x.read.independent=[];x.read.readings.forEach(o=>o.codeCount=0);});
+
+// Annual blind replay exposed a systemic routing gap: a single complete,
+// in-prefix code observation was discarded before the already-strict body
+// reader could provide independent page identity. This route may only enter
+// body review when every complete observation is the same code. It then needs
+// three distinct, disjoint whole fields tied to one physical PDF page; it may
+// not clear even a low-confidence opposite complete code.
+function oneCodeViewInput(){
+  const value=input(),observed=row('paddle',.45,'263-1-17',.99);
+  const blank=(engine,padding)=>{
+    const result=row(engine,padding,'263-1-17',0);
+    delete result.fullCode;delete result.prefix;delete result.number;
+    return {...result,errorCode:null,codeCount:0,incompleteTailObserved:false};
+  };
+  const strictViews=names=>visualBodyViewNames.map((view,i)=>{
+    const dimensions={width:1000,height:800};
+    const positionedFields=i<2?names.map((text,j)=>{
+      const region={left:.1+(j%2)*.5,top:.2+Math.floor(j/2)*.25,width:.12,height:.025,score:.99};
+      return {text,regionIndex:j,region,confidence:.99,crop:horizontalBodyCrop(region,dimensions,i===0?.35:.65)};
+    }):[];
+    return {view,text:positionedFields.map(f=>f.text).join('。'),errors:0,truncated:false,
+      lineCount:positionedFields.length,regions:positionedFields.length,
+      positioned:{schemaVersion:1,dimensions,fields:positionedFields}};
+  });
+  const strictFields=['松风清境','晨光普照','福慧增长'];
+  const terms=[strictFields,other];
+  value.pages=buildVisualBodyPages(terms.map((fieldTexts,i)=>({pdfSha256:pdfHash,pageNumber:i+1,fieldTexts:[...fieldTexts]})),
+    terms.map((names,i)=>({pdfSha256:pdfHash,pageNumber:i+1,views:strictViews(names)})));
+  value.views=strictViews(strictFields);
+  value.read.observations=[observed];value.read.independent=[];
+  value.read.readings=[{...observed,errorCode:null,codeCount:1,incompleteTailObserved:false},
+    blank('paddle',.75),blank('tesseract',.45),blank('tesseract',.75)];
+  return value;
+}
+{
+  const value=oneCodeViewInput(),before=JSON.stringify(value),result=adjudicateCodeBody(value);
+  assert.equal(result.status,'resolved',`one complete code view plus strict three-field physical-page evidence should resolve: ${JSON.stringify(result)}`);
+  assert.equal(result.number,17);
+  assert.equal(result.policy,'single-code-view-plus-three-disjoint-whole-fields-v1');
+  assert.equal(result.requiresStrictBodySupport,true);
+  assert.equal(codeBodyModelReviewEligible(freshItem(value),value.index),true,
+    'strict body fallback must not suppress the stronger alternate-model review');
+  assert.equal(JSON.stringify(value),before,'strict second-evidence review must not rewrite raw observations');
+}
+const oneCodeReject=(label,change)=>{
+  const value=oneCodeViewInput();change(value);
+  assert.notEqual(adjudicateCodeBody(value).status,'resolved',label);
+};
+oneCodeReject('one code view plus only two whole fields remains insufficient',x=>x.views=views(fields.slice(0,2).join('\n')));
+oneCodeReject('one code view cannot borrow a different page body',x=>x.views=views(other.join('\n')));
+oneCodeReject('one low-confidence opposite complete code remains a veto',x=>{
+  const opposite=row('tesseract',.45,'263-1-18',1);
+  x.read.independent=[opposite];x.read.readings[2]={...opposite,errorCode:null,codeCount:1,incompleteTailObserved:false};
+});
+oneCodeReject('one foreign-prefix complete code remains a veto',x=>{
+  x.read.observations[0]=row('paddle',.45,'283-1-17',.99);
+  x.read.readings[0]={...x.read.observations[0],errorCode:null,codeCount:1,incompleteTailObserved:false};
+});
+oneCodeReject('one code view outside the current PDF index remains unresolved',x=>x.index[0].number=19);
+oneCodeReject('failed body view is not independent support',x=>x.views[3].errors=1);
 // Counterexample found during the June 10 contrast experiment: one photo
 // acquired a stable but wrong 188 reading, while its physical PDF/body was
 // page 186. Synthetic fields below retain no customer content. This checks
@@ -259,4 +319,4 @@ assert.equal(codeBodyResolution(structuredClone(twoClaim)),null,'serialized two-
 twoClaim.codeBodyAdjudication.support[0].fieldHashes.pop();
 assert.equal(codeBodyResolution(twoClaim),null,'altered two-field proof revokes the authorization');
 console.log('Code/body adjudication regression PASS: positive join, safety and retained-audit gates');
-export {input as codeBodyTestInput,freshItem,views};
+export {input as codeBodyTestInput,oneCodeViewInput,freshItem,views};

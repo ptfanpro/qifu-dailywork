@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
-import {codeBodyTestInput,freshItem,views} from './code-body-adjudication-regression.mjs';
+import {codeBodyTestInput,oneCodeViewInput,freshItem,views} from './code-body-adjudication-regression.mjs';
 import {reviewCurrentPdfBodies} from '../src/body-content-review.mjs';
 import {photoCodeAuditBlockReason,recheckReliablePhotoClaimsWithPdf} from '../src/photo-prepare.mjs';
 import {codeBodyResolution} from '../src/code-body-adjudication.mjs';
@@ -11,9 +11,10 @@ const sha=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'qifu-code-body-collector-test-'));
 try {
   const pdf=path.join(root,'synthetic.pdf'),file=path.join(root,'synthetic.jpg');
-  const make=()=>{
+  const make=({singleCode=false}={})=>{
     fs.writeFileSync(pdf,'synthetic PDF content');fs.writeFileSync(file,'synthetic photo content');
-    const data=codeBodyTestInput(),item=freshItem(data),pdfHash=sha(fs.readFileSync(pdf));
+    const data=singleCode?oneCodeViewInput():codeBodyTestInput(),item=freshItem(data),pdfHash=sha(fs.readFileSync(pdf));
+    if(singleCode)item.codeAuditHistory[0].reason='detected-code-unconfirmed';
     item.file=file;item.sourceSha256=item.detectedCodeRead.inputSha256=sha(fs.readFileSync(file));
     data.pages.forEach(p=>p.pdfSha256=pdfHash);
     return {item,data,args:{appRoot:root,pdfFiles:[pdf],
@@ -25,6 +26,15 @@ try {
         return data.views;
       },release:async()=>{}})}};
   };
+  {
+    const test=make({singleCode:true}),history=JSON.stringify(test.item.codeAuditHistory);
+    const result=await reviewCurrentPdfBodies(test.args);
+    assert.equal(result.adjudicated.length,1,'collector must route one complete code view into strict body evidence');
+    assert.equal(codeBodyResolution(test.item).policy,'single-code-view-plus-three-disjoint-whole-fields-v1');
+    assert.equal(photoCodeAuditBlockReason(test.item),null);
+    assert.equal(JSON.stringify(test.item.codeAuditHistory),history,'single-view raw audit remains immutable');
+    assert.equal((await recheckReliablePhotoClaimsWithPdf([test.item],test.args.pdfPages)).confirmed,1);
+  }
   const {item,args}=make(),history=JSON.stringify(item.codeAuditHistory);
   const result=await reviewCurrentPdfBodies(args);
   assert.equal(result.adjudicated.length,1,'collector must review unresolved code candidates too');
