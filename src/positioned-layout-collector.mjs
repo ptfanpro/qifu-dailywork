@@ -10,6 +10,15 @@ const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 const digest=value=>hash(JSON.stringify(value));
 const retained=new WeakMap();
 const pageId=/^[a-f0-9]{64}:[1-9][0-9]{0,4}$/,photoId=/^[a-f0-9]{64}$/;
+// Keep each worker invocation large enough to reuse its fixed model/runtime
+// startup cost. A 19-page x 6-photo real batch needs about 181 seconds, so the
+// caller's already-bounded 300-second total budget—not a contradictory hidden
+// 180-second child cap—must govern that invocation.
+export const positionedLayoutBatchLimits=Object.freeze({pages:32,photos:8,pairs:256});
+export function positionedLayoutWorkerTimeout(remainingMs){
+ if(!Number.isInteger(remainingMs)||remainingMs<1||remainingMs>300_000)throw Error('Invalid positioned remaining budget');
+ return remainingMs;
+}
 
 export function layoutBatches(pages,photos){
  if(!Array.isArray(pages)||!pages.length||pages.length>512||!Array.isArray(photos)||!photos.length||photos.length>32
@@ -18,8 +27,12 @@ export function layoutBatches(pages,photos){
   ||new Set(pages.map(p=>p.id)).size!==pages.length||new Set(photos.map(p=>p.id)).size!==photos.length)
   throw Error('Invalid or duplicate positioned identity');
  const batches=[];
- for(let i=0;i<photos.length;i+=8)for(let j=0;j<pages.length;j+=32)
-  batches.push({photos:photos.slice(i,i+8),pages:pages.slice(j,j+32)});
+ const limits=positionedLayoutBatchLimits;
+ for(let i=0;i<photos.length;i+=limits.photos)for(let j=0;j<pages.length;j+=limits.pages){
+  const batch={photos:photos.slice(i,i+limits.photos),pages:pages.slice(j,j+limits.pages)};
+  if(batch.photos.length*batch.pages.length>limits.pairs)throw Error('Positioned layout batch pair budget exceeded');
+  batches.push(batch);
+ }
  return batches;
 }
 
@@ -66,7 +79,7 @@ export async function collectPositionedLayouts({appRoot,pages,photos,onProgress=
  for(const [i,batch] of batches.entries()){
   const remaining=maxTotalMs-(Date.now()-started);
   if(remaining<=0)throw Error('Positioned layout timed out');
-  const result=await matchPrintedLayouts(appRoot,{...batch,timeoutMs:Math.min(180_000,remaining)});
+  const result=await matchPrintedLayouts(appRoot,{...batch,timeoutMs:positionedLayoutWorkerTimeout(remaining)});
   if(!isFreshLayoutObservation(result))throw Error('Positioned layout observation is not fresh');
   for(const photo of result.results){
    const expectedPhoto=prepared.photos.find(p=>p.id===photo.id);

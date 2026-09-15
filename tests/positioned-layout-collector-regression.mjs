@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import crypto from 'node:crypto';
-import {collectPositionedLayouts,positionedLayoutEvidence,preparePositionedLayoutInput,layoutBatches} from '../src/positioned-layout-collector.mjs';
+import {collectPositionedLayouts,positionedLayoutEvidence,preparePositionedLayoutInput,layoutBatches,positionedLayoutBatchLimits,positionedLayoutWorkerTimeout} from '../src/positioned-layout-collector.mjs';
 import {visualBodyViewNames} from '../src/pdf-visual-body-evidence.mjs';
 const require=createRequire(import.meta.url),sharp=require('sharp');
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
@@ -25,7 +25,14 @@ test('layout request batches retain every physical page and every photo exactly 
  const batches=layoutBatches(pages,photos);assert.equal(batches.length,6);
  const pairs=batches.flatMap(b=>b.photos.flatMap(p=>b.pages.map(q=>`${p.id}/${q.id}`)));
  assert.equal(pairs.length,65*9);assert.equal(new Set(pairs).size,pairs.length);
- for(const b of batches){assert.ok(b.pages.length<=32);assert.ok(b.photos.length<=8);}
+ for(const b of batches){assert.ok(b.pages.length<=positionedLayoutBatchLimits.pages);assert.ok(b.photos.length<=positionedLayoutBatchLimits.photos);
+  assert.ok(b.pages.length*b.photos.length<=positionedLayoutBatchLimits.pairs);}
+ const boundary=layoutBatches(pages.slice(0,19),photos.slice(0,6));
+ assert.equal(boundary.length,1,'the historical workload retains one runtime/model startup');
+ assert.equal(boundary.flatMap(b=>b.photos.flatMap(p=>b.pages.map(q=>`${p.id}/${q.id}`))).length,19*6);
+ assert.equal(positionedLayoutWorkerTimeout(300_000),300_000,'the total guarded budget reaches the child worker');
+ assert.equal(positionedLayoutWorkerTimeout(181_388),181_388,'the old 180-second cliff is absent');
+ assert.throws(()=>positionedLayoutWorkerTimeout(300_001),/remaining budget/);
  assert.throws(()=>layoutBatches([...pages,pages[0]],photos),/identity/);
  assert.throws(()=>layoutBatches(pages,[photos[0],photos[0]]),/identity/);
  assert.throws(()=>layoutBatches([],photos),/budget/);

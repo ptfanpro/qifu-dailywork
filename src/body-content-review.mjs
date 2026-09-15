@@ -18,6 +18,23 @@ import {screenWholeBodyConjunction} from './whole-body-conjunction.mjs';
 const require=createRequire(import.meta.url), hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 const id=p=>`${p.pdfSha256}:${p.pageNumber}`;
 
+// Keep enough information to distinguish an evidence-budget, input-binding,
+// runtime, timeout or corpus failure without persisting exception text, local
+// paths, OCR text or customer material in the plan/report.
+export function positionedLayoutFailureCode(error) {
+  const message=error instanceof Error?error.message:String(error||'');
+  if(/budget exceeded|image budget/i.test(message))return 'positioned-layout-budget';
+  if(/timed out|timeout/i.test(message))return 'positioned-layout-timeout';
+  if(/worker failed/i.test(message))return 'positioned-layout-worker-failed';
+  if(/result or runtime integrity verification failed/i.test(message))return 'positioned-layout-result-invalid';
+  if(/runtime manifest|runtime asset|bundle contents|worker source integrity|changed worker/i.test(message))return 'positioned-layout-runtime-integrity';
+  if(/runtime directory missing|requires Windows|system root|python|onnx|model/i.test(message))return 'positioned-layout-runtime-unavailable';
+  if(/identity|changed|dimensions disagree|source/i.test(message))return 'positioned-layout-input-binding';
+  if(/incomplete|duplicated|not fresh|unavailable/i.test(message))return 'positioned-layout-incomplete-corpus';
+  if(/invalid|missing|too small/i.test(message))return 'positioned-layout-invalid-input';
+  return 'positioned-layout-unknown';
+}
+
 export function assessBodyClaim(views,pages,claim) {
   if(!claim || pages.filter(p=>id(p)===id(claim)).length!==1) throw Error('Invalid claimed PDF identity');
   if(!Array.isArray(views)||views.length!==4||visualBodyViewNames.some(n=>views.filter(v=>v.view===n).length!==1)) throw Error('Incomplete body views');
@@ -223,11 +240,14 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
         onProgress?.(`位置版式观察：复核 ${residual.length} 张剩余难例与完整 ${index.length} 页 PDF；不读取历史文件名作为答案。`);
         positionedLayoutReview=await collectPositionedLayouts({appRoot,pages:positionedPdfInputs,
           photos:residual.map(({item})=>({id:item.sourceSha256,source:pendingSources.get(item),views:pendingViews.get(item)})),onProgress});
-      }catch{
+      }catch(error){
         // Missing runtime or geometry failure is not successful identity proof.
         // It also must not discard independent legacy code/body successes.
-        positionedLayoutReview={status:'positioned-layout-unavailable',comparisons:0,mayAssignNumber:false,mayClearCodeConflict:false};
-        onProgress?.('位置版式观察未完成；保留难例，不更改已有独立确认结果。');
+        const failureCode=positionedLayoutFailureCode(error);
+        positionedLayoutReview={status:'positioned-layout-unavailable',failureCode,
+          requestedPhotoCount:residual.length,requestedPageCount:index.length,
+          comparisons:0,mayAssignNumber:false,mayClearCodeConflict:false};
+        onProgress?.(`位置版式观察未完成（${failureCode}）；保留难例，不更改已有独立确认结果。`);
       }
     }
     // Sources may change while the model releases or the geometry runs.
