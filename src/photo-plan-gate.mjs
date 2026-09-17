@@ -64,6 +64,70 @@ export function photoFilesMatchPlan(plan,receipt,currentFiles) {
   return true;
 }
 
+// A main-button resume may skip recognition only when the entire inbox is the
+// exact post-transaction file set.  The looser upload gate above deliberately
+// permits additional raw files so already confirmed photos can still upload;
+// it must not be used to decide that there is no new work to recognize.
+export function photoFilesExactlyMatchPlan(plan,receipt,currentFiles) {
+  const expected=reviewedPhotoHashes(plan,receipt),current=new Map();
+  if(!expected||!Array.isArray(currentFiles))return false;
+  for(const file of currentFiles) {
+    if(!validName(file.name)||!validHash(file.sha256)||current.has(key(file.name)))return false;
+    current.set(key(file.name),file.sha256);
+  }
+  if(current.size!==expected.size)return false;
+  for(const [name,sha256] of expected)if(current.get(name)!==sha256)return false;
+  // A stale no-op plan must never supersede a stronger completed preparation
+  // receipt.  This catches the historical 11-confirmed -> 6-confirmed retry
+  // regression even if both happen to describe the same files on disk.
+  const priorBlessingCount=Number(receipt?.blessingCount||0);
+  if(priorBlessingCount>0&&(!Array.isArray(plan?.allowedBlessingNumbers)
+    || plan.allowedBlessingNumbers.length<priorBlessingCount))return false;
+  return true;
+}
+
+// Return only outputs whose exact bytes are bound by both the prior recognition
+// plan and its committed transformation receipt.  A supplement run can trust
+// these files and OCR only newly arrived raw photos; filenames alone are never
+// sufficient evidence.
+export function trustedPreparedOutputs(plan,receipt,currentFiles) {
+  if(plan?.photoInputBinding?.schemaVersion!==1||!Array.isArray(plan.photoInputBinding.files)
+    ||!Array.isArray(plan.assignments)||!Array.isArray(receipt?.files)
+    ||receipt.businessDate!==plan.businessDate||!Array.isArray(currentFiles))return [];
+  const plannedAt=Date.parse(plan.createdAt),completedAt=Date.parse(receipt.completedAt);
+  if(!Number.isFinite(plannedAt)||!Number.isFinite(completedAt)||completedAt<plannedAt)return [];
+  const originals=new Map(plan.photoInputBinding.files.map(file=>[key(file.name),file.sha256]));
+  const current=new Map(currentFiles.map(file=>[key(file.name),file.sha256]));
+  const allowed=new Set((plan.allowedBlessingNumbers||[]).map(Number).filter(Number.isInteger));
+  const outputs=[];
+  for(const record of receipt.files) {
+    if(typeof record?.source!=='string'||!validName(record.targetName)||!validHash(record.beforeSha256)
+      ||!validHash(record.afterSha256)||!['blessing','scene-lamp','scene-water'].includes(record.kind))continue;
+    const assignment=plan.assignments.find(item=>typeof item?.source==='string'
+      &&pathKey(item.source)===pathKey(record.source)&&item.targetName===record.targetName&&item.kind===record.kind);
+    if(!assignment||originals.get(key(path.basename(record.source)))!==record.beforeSha256
+      ||current.get(key(record.targetName))!==record.afterSha256)continue;
+    const stem=path.parse(record.targetName).name,number=/^\d+$/.test(stem)?Number(stem):null;
+    if(record.kind==='blessing'&&(!Number.isInteger(number)||!allowed.has(number)))continue;
+    outputs.push({name:record.targetName,sha256:record.afterSha256,kind:record.kind,number});
+  }
+  return outputs;
+}
+
+export function retainVerifiedUploadEvidence(previousUploadedFiles,currentFiles) {
+  if(!previousUploadedFiles||typeof previousUploadedFiles!=='object'||!Array.isArray(currentFiles))return {};
+  const current=new Map();
+  for(const file of currentFiles) {
+    if(!validName(file?.name)||!validHash(file?.sha256)||current.has(key(file.name)))return {};
+    current.set(key(file.name),file.sha256);
+  }
+  const retained={};
+  for(const [name,evidence] of Object.entries(previousUploadedFiles)) {
+    if(validName(name)&&validHash(evidence?.sha256)&&current.get(key(name))===evidence.sha256)retained[name]=evidence;
+  }
+  return retained;
+}
+
 export function assertPhotoFilesMatchPlan(plan,receipt,currentFiles) {
   if(!photoFilesMatchPlan(plan,receipt,currentFiles)) {
     throw Error('照片内容与识别计划或处理回执不一致，未上传或修改订单；请重新核对编号并完成照片处理。');

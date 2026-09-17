@@ -4164,9 +4164,14 @@ export async function classifyScenes(files, occupiedNames, {recognizedByFile=new
   return {assignments, issues};
 }
 
-export async function planPhotoPreparation({ appRoot, folder, photoDir, date, expectedPrefix, workDir, onProgress = null }) {
+export async function planPhotoPreparation({ appRoot, folder, photoDir, date, expectedPrefix, workDir, onProgress = null, trustedPreparedFiles = [] }) {
   const images = fs.readdirSync(photoDir).filter((name) => IMAGE_RE.test(name)).sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })).map((name) => path.join(photoDir, name));
   const photoInputBinding = createPhotoInputBinding(photoDir,images);
+  const currentHashes=new Map(photoInputBinding.files.map(file=>[file.name.toLowerCase(),file.sha256]));
+  const trustedPreparedByName=new Map((Array.isArray(trustedPreparedFiles)?trustedPreparedFiles:[])
+    .filter(file=>typeof file?.name==='string'&&typeof file?.sha256==='string'
+      &&currentHashes.get(file.name.toLowerCase())===file.sha256)
+    .map(file=>[file.name.toLowerCase(),file]));
   const pdfFiles = fs.readdirSync(folder).filter((name) => /\.pdf$/i.test(name)).map((name) => path.join(folder, name))
     .sort((a, b) => photoPdfBusinessRank(a) - photoPdfBusinessRank(b)
       || path.basename(a).localeCompare(path.basename(b), 'zh-CN', { numeric: true }));
@@ -4257,8 +4262,12 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       // 该步骤只读原文件，不自动纠正已经上传过的照片。
       const numericAuditFiles = images.filter((file) => {
         const stem = path.parse(file).name;
-        return /^\d+$/.test(stem) && expectedNumbers.has(Number(stem));
+        return /^\d+$/.test(stem) && expectedNumbers.has(Number(stem))
+          && !trustedPreparedByName.has(path.basename(file).toLowerCase());
       });
+      const trustedNumericCount=images.filter(file=>/^\d+$/.test(path.parse(file).name)
+        &&trustedPreparedByName.get(path.basename(file).toLowerCase())?.kind==='blessing').length;
+      if(trustedNumericCount)onProgress?.(`已复用 ${trustedNumericCount} 张哈希锁定的处理完成凭据；本次只核对新增或已变化照片。`);
       let numericAuditIndex = 0;
       for (const file of numericAuditFiles) {
         numericAuditIndex += 1;
