@@ -15,7 +15,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.6.8-rc.3',
+        '祈福本地执行器 V9.6.8-rc.4',
         'OK',
         'Information'
     ) | Out-Null
@@ -57,7 +57,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.8-rc.3（正文识别提速·验收候选）'
+$form.Text = '祈福本地执行器 V9.6.8-rc.4（明确问题提示·验收候选）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -112,6 +112,8 @@ $photoRefreshButton = Add-Button $photoGroup '重新核对编号' 510 24 135 42
 $openPhotoButton = Add-Button $photoGroup '打开照片目录' 655 24 165 42
 $photoStatus = Add-Label $photoGroup '尚未初始化。' 18 76 800 28
 $photoStatus.ForeColor = [System.Drawing.Color]::DimGray
+$photoStatus.AutoEllipsis = $true
+$photoStatusToolTip = New-Object System.Windows.Forms.ToolTip
 $photoProgress = New-Object System.Windows.Forms.ProgressBar
 $photoProgress.Location = New-Object System.Drawing.Point(18,108)
 $photoProgress.Size = New-Object System.Drawing.Size(802,18)
@@ -490,11 +492,22 @@ function Set-Running([bool]$value) {
 }
 function Set-PhotoResult([string]$text, [System.Drawing.Color]$color, [int]$progress, [string]$buttonText, [bool]$enabled, [string]$nextAction) {
     $photoStatus.Text = $text
+    $photoStatusToolTip.SetToolTip($photoStatus,$text)
     $photoStatus.ForeColor = $color
     $photoProgress.Value = [Math]::Max(0,[Math]::Min(100,$progress))
     $photoMainButton.Text = $buttonText
     $photoMainButton.Enabled = ($enabled -and -not $script:running)
     $script:photoNextAction = $nextAction
+}
+function Get-FirstPhotoIssue($manifest) {
+    foreach ($property in @('blockingErrors','sceneManualIssues','manualIssues')) {
+        if ($null -ne $manifest.$property) {
+            $issue = @($manifest.$property) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -First 1
+            if ($null -ne $issue) { return [string]$issue }
+        }
+    }
+    if ($manifest.photoAvailability -and $manifest.photoAvailability.summary) { return [string]$manifest.photoAvailability.summary }
+    return '请查看下方运行日志中的具体文件名和处理建议。'
 }
 function Get-LocalPageMatchStatus([string]$photoRunDir) {
     $plan = Read-JsonFile (Join-Path $photoRunDir 'photo-prepare-plan.json')
@@ -551,30 +564,31 @@ function Refresh-PhotoCard {
             "$missingCount 个 PDF 页面尚未匹配已确认福单图；目录另有 $([int]$manifest.counts.unexpected) 张待识别或确认图片，不能直接判定缺图"
         } else { "$missingCount 个 PDF 页面尚未匹配已确认福单图，请核对原图与 PDF 批次" }
     } else { '请核对尚未确认的图片及场景类别' }
+    $firstPhotoIssue = Get-FirstPhotoIssue $manifest
     if ($sceneReceipt -and $sceneReceipt.complete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash -and $blockingErrorCount -eq 0 -and $manualIssueCount -eq 0) {
         Set-PhotoResult "$date 照片业务已完成：福单图 $blessingCount 张，场景图 $sceneCount 张。" ([System.Drawing.Color]::DarkGreen) 100 '照片业务已完成' $false $null
         return
     }
     if ($sceneReceipt -and $sceneReceipt.partialComplete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash -and ($missingCount -gt 0 -or $manualIssueCount -gt 0)) {
         $completedOrders = [int]$sceneReceipt.completedOrderCount
-        Set-PhotoResult "$date 已确定福单图 $blessingCount 张及其 $completedOrders 条订单已分批完成；$pendingPhotoText。另有 $manualIssueCount 项待人工确认。" ([System.Drawing.Color]::DarkOrange) 78 '核对并处理未匹配照片' $true 'photo-prepare'
+        Set-PhotoResult "$date 已确定福单图 $blessingCount 张及其 $completedOrders 条订单已分批完成。具体问题：$pendingPhotoText" ([System.Drawing.Color]::DarkOrange) 78 '核对并处理未匹配照片' $true 'photo-prepare'
         return
     }
     if ($blockingErrorCount -gt 0 -or $manifest.blessingReady -ne $true) {
         $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
         $pageMatch = Get-LocalPageMatchStatus $photoRunDir
-        Set-PhotoResult "$prefix 初始化发现 $blockingErrorCount 项硬性问题；本地编号兜底：$pageMatch。" ([System.Drawing.Color]::DarkOrange) 15 '一键处理照片' $true 'photo-prepare'
+        Set-PhotoResult "$prefix 具体问题：$firstPhotoIssue 本地编号兜底：$pageMatch。" ([System.Drawing.Color]::DarkOrange) 15 '一键处理照片' $true 'photo-prepare'
         return
     }
     $uploadReceipt = Read-JsonFile (Join-Path $photoRunDir 'photo-upload-receipt.json')
     if (-not ($uploadReceipt -and $uploadReceipt.complete -eq $true -and [string]$uploadReceipt.fileSetHash -eq $manifestHash -and [int]$uploadReceipt.uploadedCount -eq $blessingCount)) {
         $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
-        $manualText = if ($manualIssueCount -gt 0) { "另有 $manualIssueCount 项待人工处理，但不阻断已确认福单。" } else { '' }
+        $manualText = if ($manualIssueCount -gt 0) { "待人工处理：$firstPhotoIssue" } else { '' }
         Set-PhotoResult "$prefix 预检通过：福单图 $blessingCount 张、场景图 $sceneCount 张；下一步上传福单图。$manualText" ([System.Drawing.Color]::DarkBlue) 40 '继续照片：上传福单图' $true 'photo-upload'
         return
     }
     if ($sceneManualIssueCount -gt 0) {
-        Set-PhotoResult "$date 已上传 $blessingCount 张已确认福单图；场景图仍有 $sceneManualIssueCount 项需人工补齐或确认。上方主按钮只续跑本日期断点；历史待办请使用中间的【复核线上并处理未完成项】。" ([System.Drawing.Color]::DarkOrange) 62 '补齐场景后继续本日期' $true 'photo-prepare'
+        Set-PhotoResult "$date 已上传 $blessingCount 张已确认福单图。具体问题：$firstPhotoIssue" ([System.Drawing.Color]::DarkOrange) 62 '补齐场景后继续本日期' $true 'photo-prepare'
         return
     }
     if ($missingCount -gt 0) {
@@ -867,8 +881,9 @@ function Complete-Runner([int]$code) {
         if ($script:photoNextAction -eq 'photo-prepare') {
             Write-WorkflowCheckpoint 'photo' 'waiting-supplement' $completedAction 0
             $waitingDate = $script:backlogBusinessDate
+            $specificPhotoProblem = $photoStatus.Text
             Restore-BacklogPhotoDate
-            $globalStatus.Text = "历史未完成日期 $waitingDate 的确定项目已处理；仍有缺图或场景图需补齐/确认，完成后再次点击【复核线上并处理未完成项】。"
+            $globalStatus.Text = "历史未完成日期 $waitingDate 的确定项目已处理。$specificPhotoProblem 完成后再次点击【复核线上并处理未完成项】。"
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
             return
         }
@@ -887,7 +902,7 @@ function Complete-Runner([int]$code) {
         if ($code -ne 0) {
             Write-WorkflowCheckpoint 'photo' 'failed' $completedAction $code
             Refresh-PhotoCard
-            $globalStatus.Text = "照片流程中断在【$(Get-ActionLabel $completedAction)】。已完成阶段已保存，修复问题后点击照片主按钮即可续跑。"
+            $globalStatus.Text = "照片流程中断在【$(Get-ActionLabel $completedAction)】。$($photoStatus.Text)"
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkRed
             return
         }
@@ -895,7 +910,7 @@ function Complete-Runner([int]$code) {
         Refresh-PhotoCard
         if ($script:photoNextAction -eq 'photo-prepare') {
             Write-WorkflowCheckpoint 'photo' 'waiting-supplement' $completedAction 0
-            $globalStatus.Text = '现有照片及其已上传订单已分批完成；请先核对未匹配图片及场景类别，确认缺图后再补图。再次点击照片主按钮只处理新增图片和剩余订单。'
+            $globalStatus.Text = "现有照片及其已上传订单已分批完成。$($photoStatus.Text)再次点击照片主按钮只处理新增图片和剩余订单。"
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
             return
         }

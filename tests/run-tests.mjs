@@ -772,7 +772,7 @@ const categoryWaterArrivedManifest=await scanPhotoWorkday(categoryPartialRoot,'2
   expectedNumberModes:new Map([[496,'water'],[503,'lamp']]),
 });
 assert.deepEqual(categoryWaterArrivedManifest.requiredSceneModes,['water','lamp']);
-assert.match(categoryWaterArrivedManifest.sceneManualIssues.join('\n'),/缺少已确认的供水场景图/);
+assert.match(categoryWaterArrivedManifest.sceneManualIssues.join('\n'),/没有识别到 2\.5\.jpg 或 2\.6\.jpg/);
 
 await sharp({create:{width:1800,height:1350,channels:3,background:'#5d5d5d'}}).jpeg({quality:90}).toFile(path.join(partialPhotos,'待确认原图.jpg'));
 const partialWithManualReview=await scanPhotoWorkday(partialRoot,'2026-08-10',path.join(dir,'partial-run-manual'),{runOcr:false});
@@ -848,7 +848,9 @@ assert.equal(fs.existsSync(path.join(incrementalPhotoDir,'225.jpg')),true);
 const uiSource=fs.readFileSync(new URL('../ui/PrayerAssistant.ps1',import.meta.url),'utf8');
 assert.match(uiSource,/自动处理并编号/);
 assert.ok(uiSource.includes(`V${JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version}`));
-assert.match(uiSource,/正文识别提速/);
+assert.match(uiSource,/明确问题提示/);
+assert.match(uiSource,/Get-FirstPhotoIssue/);
+assert.match(uiSource,/具体问题：\$firstPhotoIssue/);
 assert.match(uiSource,/重新核对编号/);
 assert.match(uiSource,/Start-Runner 'photo-recheck' \$false 'manual' \$true/);
 assert.match(runnerSource,/只读编号复核完成/);
@@ -878,7 +880,7 @@ assert.match(uiSource,/\$script:initQueue\.Enqueue\('cleanup-local-state'\)/);
 assert.match(uiSource,/不触碰 NAS 业务文件/);
 assert.match(uiSource,/再次点击照片主按钮只处理新增图片和剩余订单/);
 assert.match(uiSource,/waiting-supplement/);
-assert.match(uiSource,/请先核对未匹配图片及场景类别，确认缺图后再补图/);
+assert.match(uiSource,/现有照片及其已上传订单已分批完成。\$\(\$photoStatus\.Text\)/);
 assert.match(uiSource,/Get-PendingPhotoBusinessDates/);
 assert.match(uiSource,/已列入独立任务栏；主日期保持/);
 assert.match(uiSource,/completedFlow -eq 'backlog'/);

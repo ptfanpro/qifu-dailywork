@@ -45,6 +45,16 @@ try {
     Assert-Equal $script:photoNextAction 'photo-upload' '预检完成后应从福单图上传继续'
     Assert-Equal $photoProgress.Value 40 '福单上传前进度错误'
 
+    $manifest.blessingReady = $false
+    $manifest.blockingErrors = @('微信图片_损坏.jpg：图片无法读取')
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
+    Write-TestJson (Join-Path $photoRunDir 'ui-workflow-state.json') ([ordered]@{state='running';lastAction='photo-prepare'})
+    Refresh-PhotoCard
+    if ($photoStatus.Text -notmatch '微信图片_损坏\.jpg：图片无法读取') { throw "照片卡片没有显示具体失败文件名和原因：$($photoStatus.Text)" }
+    $manifest.blessingReady = $true
+    $manifest.blockingErrors = @()
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
+
     Write-TestJson (Join-Path $photoRunDir 'photo-upload-receipt.json') ([ordered]@{complete=$true;fileSetHash='hash-1';uploadedCount=15})
     Write-TestJson (Join-Path $photoRunDir 'ui-workflow-state.json') ([ordered]@{state='failed';lastAction='photo-scenes'})
     Refresh-PhotoCard
@@ -53,18 +63,24 @@ try {
 
     $manifest.counts.missingBlessing = 2
     $manifest.counts.unexpected = 2
+    $manifest.photoAvailability = [ordered]@{
+        summary='未匹配的 PDF 编号：702、703。以下现有文件尚未识别或确认：微信图片_A.jpg、微信图片_B.jpg。它们可能对应上述编号，暂不能判定真正缺图；请先逐张核对。'
+    }
+    $manifest.manualIssues = @('以下照片没有识别成福单编号，也没有确认成供灯或供水场景：微信图片_A.jpg、微信图片_B.jpg。')
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
     Refresh-PhotoCard
     Assert-Equal $script:photoNextAction 'photo-scenes' '缺图批次上传现有照片后应先处理已上传订单'
     if ($photoStatus.Text -notmatch '只处理福单已上传的订单状态') { throw '缺图分批完成状态提示不正确' }
-    if ($photoStatus.Text -notmatch '2 个 PDF 页面尚未匹配' -or $photoStatus.Text -notmatch '2 张待识别或确认' -or $photoStatus.Text -match '张待补|仍待补 2') { throw '已在目录内的未识别图片不能误报为缺照片' }
+    if ($photoStatus.Text -notmatch '未匹配的 PDF 编号：702、703' -or $photoStatus.Text -notmatch '微信图片_A\.jpg、微信图片_B\.jpg' -or $photoStatus.Text -match '张待补|仍待补 2') { throw '照片卡片没有列明未匹配编号和未识别文件' }
     Write-TestJson (Join-Path $photoRunDir 'scene-upload-receipt.json') ([ordered]@{complete=$false;partialComplete=$true;fileSetHash='hash-1';completedOrderCount=150;tabletCompletionVerified=$true})
     Refresh-PhotoCard
     Assert-Equal $script:photoNextAction 'photo-prepare' '现有已上传订单分批完成后应等待新增补图'
     if ($photoStatus.Text -notmatch '150 条订单已分批完成') { throw '缺图分批完成回执没有显示' }
-    if ($photoStatus.Text -notmatch '不能直接判定缺图') { throw '分批完成后的提示也必须保留待识别说明' }
+    if ($photoStatus.Text -notmatch '微信图片_A\.jpg、微信图片_B\.jpg') { throw '分批完成后的提示没有列出待识别文件' }
     $manifest.counts.missingBlessing = 0
     $manifest.counts.unexpected = 0
+    $manifest.photoAvailability = $null
+    $manifest.manualIssues = @()
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
 
     Write-TestJson (Join-Path $photoRunDir 'photo-online-closure.json') ([ordered]@{
@@ -85,11 +101,13 @@ try {
     Assert-Equal $photoMainButton.Enabled $false '照片完成后主按钮应禁用'
     $manifest.counts.unexpected = 1
     $manifest.errors = @('发现新增原图')
+    $manifest.blockingErrors = @('微信补图.jpg：尚未识别编号或场景类别')
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
     Refresh-PhotoCard
     Assert-Equal $script:photoNextAction 'photo-prepare' '历史日期完成后又出现新增原图时不能被旧终态回执掩盖'
     $manifest.counts.unexpected = 0
     $manifest.errors = @()
+    $manifest.blockingErrors = @()
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
 
     $oldPhotoRunDir = Join-Path (Join-Path (Join-Path $script:localStateRoot 'workdays') '2026-08-07') 'photos'

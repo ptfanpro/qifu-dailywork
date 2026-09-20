@@ -15,6 +15,18 @@ const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png']);
 const LAMP_SCENES = new Set(['2.1', '2.2']);
 const WATER_SCENES = new Set(['2.5', '2.6']);
 
+function baseNames(files) {
+  return files.map((file) => path.basename(file)).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+}
+
+function joinNames(files) {
+  return baseNames(files).join('、');
+}
+
+function joinNumbers(numbers) {
+  return [...numbers].sort((a, b) => a - b).join('、');
+}
+
 export function dayFolder(root, date) {
   const [year, month, day] = date.split('-').map(Number);
   if (!year || !month || !day) throw new Error(`无效业务日期：${date}`);
@@ -245,46 +257,61 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
   const blockingErrors = allInspections.flatMap((item) => item.errors.map((message) => `${item.name}：${message}`));
   const manualIssues = [];
   const sceneManualIssues = [];
-  if(reviewExcluded.length)manualIssues.push(`有 ${reviewExcluded.length} 张照片未通过编号或正文复核，已排除本次处理和上传；原图保留，其他已确认照片可继续。`);
-  if (!blessing.length) blockingErrors.push('没有发现纯整数命名的福单图');
+  if(reviewExcluded.length)manualIssues.push(`以下照片未通过编号或正文复核，已排除本次处理和上传：${joinNames(reviewExcluded)}。请逐张查看原图中的完整编号和正文；其他已确认照片可继续。`);
+  if (!blessing.length) {
+    const candidates = baseNames([...unexpected, ...reviewExcluded, ...foreignBlessing]);
+    blockingErrors.push(`没有发现已确认的纯整数编号福单图${candidates.length ? `；以下文件仍需核对：${candidates.join('、')}` : `；照片目录为：${photoDir}`}。`);
+  }
   if (foreignBlessing.length) manualIssues.push(`有 ${foreignBlessing.length} 张纯数字照片不属于本日 PDF 唯一编号，已隔离且不会上传：${foreignBlessing.map((file)=>path.basename(file)).join('、')}`);
-  if (unexpected.length) manualIssues.push(`有 ${unexpected.length} 张图片尚未确认编号或场景类别；已确认福单仍可继续处理`);
-  if (duplicateNumbers.length) blockingErrors.push(`福单编号重复：${duplicateNumbers.join('、')}`);
+  if (unexpected.length) manualIssues.push(`以下照片没有识别成福单编号，也没有确认成供灯或供水场景：${joinNames(unexpected)}。请逐张确认类别；若是福单，请检查照片右上完整编号是否清晰。已确认福单仍可继续处理。`);
+  if (duplicateNumbers.length) {
+    const duplicateFiles = blessing.filter((file) => duplicateNumbers.includes(Number(path.parse(file).name)));
+    blockingErrors.push(`福单编号重复：${duplicateNumbers.join('、')}；对应文件：${joinNames(duplicateFiles)}。请保留正确原图，不能让同一编号对应多张照片。`);
+  }
   if (lampScenes.length > 2) {
-    const message = '供灯场景图超过2张，需人工确认保留的2张';
+    const message = `识别出 ${lampScenes.length} 张供灯场景图，但平台只允许2张：${joinNames(lampScenes)}。请明确保留哪2张。`;
     manualIssues.push(message); sceneManualIssues.push(message);
   }
   if (waterScenes.length > 2) {
-    const message = '供水场景图超过2张，需人工确认保留的2张';
+    const message = `识别出 ${waterScenes.length} 张供水场景图，但平台只允许2张：${joinNames(waterScenes)}。请明确保留哪2张。`;
     manualIssues.push(message); sceneManualIssues.push(message);
   }
-  if (!pdfFiles.length) blockingErrors.push('当天目录没有 PDF，无法做页数闭环校验');
+  if (!pdfFiles.length) blockingErrors.push(`业务日期 ${date} 的目录没有 PDF：${folder}。无法核对照片编号和页数。`);
   const missingBlessingCount = Math.max(0, pdfPageCount - blessing.length);
   const extraBlessingCount = Math.max(0, blessing.length - pdfPageCount);
   const unclassifiedCount=unexpected.length+reviewExcluded.length;
+  const presentBlessingNumbers = blessing.map((file) => Number(path.parse(file).name));
+  const missingBlessingNumbers = expectedNumbers instanceof Set
+    ? [...expectedNumbers].filter((number) => !presentBlessingNumbers.includes(Number(number))).map(Number).sort((a,b)=>a-b)
+    : [];
+  const unclassifiedFiles = baseNames([...unexpected, ...reviewExcluded]);
+  const missingNumberText = missingBlessingNumbers.length
+    ? `未匹配的 PDF 编号：${joinNumbers(missingBlessingNumbers)}。`
+    : `${missingBlessingCount} 个 PDF 页面尚未匹配已确认福单图。`;
   // This is an unmatched-page count, not proof that a physical photo is absent.
   // Keep missingBlessing for old checkpoints and completion gates; use the
   // explicit diagnosis in messages so an OCR failure does not request re-shoots.
   const photoAvailability = {
     schemaVersion: 1,
     unmatchedPages: missingBlessingCount,
+    unmatchedNumbers: missingBlessingNumbers,
     unclassifiedPhotos: unclassifiedCount,
+    unclassifiedFiles,
     summary: missingBlessingCount > 0
-      ? `${missingBlessingCount} 个 PDF 页面尚未匹配已确认福单图；${unclassifiedCount
-        ? `目录另有 ${unclassifiedCount} 张待识别或确认图片，不能直接判定缺图。请先核对现有图片`
-        : '请核对对应原图与 PDF 批次，确认缺图后再补入原图'}`
+      ? `${missingNumberText}${unclassifiedCount
+        ? `以下现有文件尚未识别或确认：${unclassifiedFiles.join('、')}。它们可能对应上述编号，暂不能判定真正缺图；请先逐张核对。`
+        : '目录内没有其他待识别照片；请核对上述编号对应的原图，确认缺少后再补入。'}`
       : extraBlessingCount > 0
         ? `福单图数量比 PDF 页数多 ${extraBlessingCount} 张，请核对编号及 PDF 批次`
       : unclassifiedCount > 0
-        ? `福单图数量与 PDF 页数已齐；目录另有 ${unclassifiedCount} 张待识别或确认图片，仍需核对类别`
+        ? `福单图数量与 PDF 页数已齐；以下文件仍未识别或确认类别：${unclassifiedFiles.join('、')}。请逐张确认是福单、供灯还是供水。`
         : '福单图数量与 PDF 页数已齐；编号及业务闭环以各项校验结果为准',
   };
-  if (pdfFiles.length && extraBlessingCount > 0) manualIssues.push(`本日可用福单图比 PDF 页数多 ${extraBlessingCount} 张；超出项已进入人工清单，唯一确认项仍可继续`);
+  if (pdfFiles.length && extraBlessingCount > 0) manualIssues.push(`已确认福单图比 PDF 页数多 ${extraBlessingCount} 张。当前福单文件：${joinNames(blessing)}；PDF 共 ${pdfPageCount} 页。请核对是否混入其他日期照片或 PDF 批次不完整；系统不会猜测删除哪张。`);
   // A day's PDFs can contain categories whose photos have not arrived yet.  Only
   // require scenes for blessing photos that are actually present in this batch.
   // Older checkpoints do not have a number-to-category index, so retain the
   // conservative whole-PDF fallback unless every present blessing is mapped.
-  const presentBlessingNumbers = blessing.map((file) => Number(path.parse(file).name));
   const modeForNumber = (number) => expectedNumberModes instanceof Map
     ? expectedNumberModes.get(number)
     : expectedNumberModes?.[number] ?? expectedNumberModes?.[String(number)];
@@ -300,11 +327,14 @@ export async function scanPhotoWorkday(root, date, workDir, { runOcr = true, exp
   const needsWaterScene = requiredSceneModes.includes('water');
   const needsLampScene = requiredSceneModes.includes('lamp');
   if (needsWaterScene && waterScenes.length < 1) {
-    const message = '当天供水订单缺少已确认的供水场景图（2.5.jpg/2.6.jpg）';
+    const message = '供水订单需要至少1张供水场景图；当前没有识别到 2.5.jpg 或 2.6.jpg。请补入1张供水场景照片，确认后命名为 2.5.jpg（第二张才使用 2.6.jpg）。';
     manualIssues.push(message); sceneManualIssues.push(message);
   }
   if (needsLampScene && lampScenes.length < 2) {
-    const message = '当天供灯或牌位订单缺少2张已确认的供灯场景图（2.1.jpg、2.2.jpg）';
+    const presentLampNames = baseNames(lampScenes);
+    const presentLampStems = new Set(lampScenes.map((file) => path.parse(file).name));
+    const missingLampNames = ['2.1','2.2'].filter((stem) => !presentLampStems.has(stem)).map((stem) => `${stem}.jpg`);
+    const message = `供灯或牌位订单需要2张供灯场景图；缺少：${missingLampNames.join('、')}${presentLampNames.length ? `；当前已有：${presentLampNames.join('、')}` : ''}。请补齐缺少的供灯场景照片并按上述缺少文件名命名。`;
     manualIssues.push(message); sceneManualIssues.push(message);
   }
   const ocrSuggestions = runOcr && unexpected.length ? await recognizeUnexpectedImages(unexpected, date, workDir) : [];
