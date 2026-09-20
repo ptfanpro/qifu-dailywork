@@ -61,24 +61,47 @@ export function embeddedChineseDictionary(buffer) {
 // Plain text remains the legacy default. Locations are observations, not proof
 // of a foreground paper, page identity or authorization to clear a code audit.
 export async function readDetectedBodyViews(original, regions, readLine,
-  {includeVertical = false, includePositions = false} = {}) {
+  {includeVertical = false, includePositions = false, readLines = null} = {}) {
   const views = [];
   for (const vertical of includeVertical ? [false, true] : [false]) for (const padding of [.35, .65]) {
     const crops = regions.map((region, regionIndex) => ({region, regionIndex,
       crop: (vertical ? verticalBodyCrop : horizontalBodyCrop)(region, original.info, padding)})).filter(v => v.crop);
     const limit = vertical ? 80 : 300, lines = [], fields = []; let errors = 0;
-    for (const {region, regionIndex, crop} of crops.slice(0, limit)) {
+    const prepared = [];
+    for (const item of crops.slice(0, limit)) {
       try {
-        const {rotation, ...extract} = crop;
+        const {rotation, ...extract} = item.crop;
         let image = sharp(original.data, {raw: original.info}).extract(extract);
         if (rotation) image = image.rotate(rotation);
-        const reading = await readLine(await image.png().toBuffer());
-        if (reading.confidence >= .65) {
-          lines.push(reading.text);
-          if (includePositions) fields.push({regionIndex, region: {...region}, crop: {...crop},
-            text: reading.text, confidence: reading.confidence});
-        }
+        prepared.push({...item, source: await image.png().toBuffer()});
       } catch { errors++; }
+    }
+    let readings = [];
+    if (prepared.length) {
+      if (readLines) {
+        try { readings = await readLines(prepared.map(item => item.source)); }
+        catch {
+          readings = [];
+          for (const item of prepared) {
+            try { readings.push(await readLine(item.source)); }
+            catch (error) { readings.push({error}); }
+          }
+        }
+      } else {
+        for (const item of prepared) {
+          try { readings.push(await readLine(item.source)); }
+          catch (error) { readings.push({error}); }
+        }
+      }
+    }
+    for (let index = 0; index < prepared.length; index++) {
+      const {region, regionIndex, crop} = prepared[index], reading = readings[index];
+      if (!reading || reading.error) { errors++; continue; }
+      if (reading.confidence >= .65) {
+        lines.push(reading.text);
+        if (includePositions) fields.push({regionIndex, region: {...region}, crop: {...crop},
+          text: reading.text, confidence: reading.confidence});
+      }
     }
     views.push({view: `chinese-${vertical ? 'vertical' : 'detected'}-${padding}`,
       text: lines.join('。'), lineCount: lines.length, errors, regions: crops.length, truncated: crops.length > limit,
@@ -100,23 +123,86 @@ export async function createChineseBodyReader(appRoot, modelRoot) {
   let detector;
   try { detector = await createTextDetector(appRoot, path.join(modelRoot, 'ch_PP-OCRv4_det_mobile.onnx')); }
   catch (error) { await session.release(); throw error; }
-  async function readLine(source) {
+  async function prepareLine(source) {
     const decoded = await sharp(source).toColourspace('srgb').removeAlpha().raw().toBuffer({resolveWithObject: true});
     const height = 48, resizedWidth = Math.ceil(height * decoded.info.width / decoded.info.height);
-    if (resizedWidth > 2048) return {text: '', confidence: 0, reason: 'line-too-wide'};
+    if (resizedWidth > 2048) return {skipped: {text: '', confidence: 0, reason: 'line-too-wide'}};
     const width = Math.max(320, resizedWidth);
     const rgb = await sharp(decoded.data, {raw: decoded.info}).resize(resizedWidth, height, {fit: 'fill', kernel: 'linear'}).raw().toBuffer();
     const plane = width * height, values = new Float32Array(plane * 3);
     for (let y = 0; y < height; y++) for (let x = 0; x < resizedWidth; x++) for (let c = 0; c < 3; c++) {
       values[c * plane + y * width + x] = (rgb[(y * resizedWidth + x) * 3 + 2 - c] / 255 - .5) / .5;
     }
-    const outputs = await session.run({[session.inputNames[0]]: new ort.Tensor('float32', values, [1, 3, height, width])});
+    return {height, width, values};
+  }
+  async function runPrepared(prepared) {
+    if (prepared.skipped) return prepared.skipped;
+    const outputs = await session.run({[session.inputNames[0]]:
+      new ort.Tensor('float32', prepared.values, [1, 3, prepared.height, prepared.width])});
     return decodePaddleCtc(outputs[session.outputNames[0]], dictionary);
   }
-  return {modelSha256: CHINESE_BODY_MODEL_SHA256, dictionaryLength: dictionary.length, readLine,
+  async function readLine(source) {
+    return runPrepared(await prepareLine(source));
+  }
+  async function mapLimited(items, concurrency, visit) {
+    const results = new Array(items.length);
+    let cursor = 0;
+    await Promise.all(Array.from({length: Math.min(concurrency, items.length)}, async () => {
+      while (cursor < items.length) {
+        const index = cursor++;
+        results[index] = await visit(items[index], index);
+      }
+    }));
+    return results;
+  }
+  async function readLines(sources, {concurrency = 4} = {}) {
+    if (!Array.isArray(sources)) throw Error('Chinese OCR batch input must be an array');
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) {
+      throw Error('Chinese OCR concurrency must be an integer from 1 to 4');
+    }
+    const prepared = await mapLimited(sources, Math.min(2, concurrency), async source => {
+      try {
+        return {prepared: await prepareLine(source)};
+      } catch (error) { return {error}; }
+    });
+    const results = new Array(sources.length);
+    const narrow = [], medium = [], wide = [];
+    for (let index = 0; index < prepared.length; index++) {
+      const item = prepared[index];
+      if (item.error) results[index] = item;
+      else if (item.prepared.skipped) results[index] = item.prepared.skipped;
+      else (item.prepared.width <= 700 ? narrow : item.prepared.width <= 1200 ? medium : wide)
+        .push({index, prepared: item.prepared});
+    }
+    // Every inference still receives the exact single-line tensor used by
+    // readLine. Only independent narrow lines overlap; wide lines stay serial
+    // because parallel wide tensors reduce throughput and increase memory.
+    const runItems = async (items, limit) => mapLimited(items, limit, async item => {
+      try { return await runPrepared(item.prepared); }
+      catch (error) { return {error}; }
+    });
+    const narrowResults = await runItems(narrow, concurrency);
+    narrow.forEach((item, index) => { results[item.index] = narrowResults[index]; });
+    // Some ORT/CPU combinations may reject overlapping runs on one session.
+    // Retry only those failures serially before reporting the line unavailable.
+    for (const item of narrow.filter(item => results[item.index]?.error)) {
+      try { results[item.index] = await runPrepared(item.prepared); }
+      catch (error) { results[item.index] = {error}; }
+    }
+    const mediumResults = await runItems(medium, Math.min(2, concurrency));
+    medium.forEach((item, index) => { results[item.index] = mediumResults[index]; });
+    for (const item of medium.filter(item => results[item.index]?.error)) {
+      try { results[item.index] = await runPrepared(item.prepared); }
+      catch (error) { results[item.index] = {error}; }
+    }
+    const wideResults = await runItems(wide, 1);
+    wide.forEach((item, index) => { results[item.index] = wideResults[index]; });
+    return results;
+  }
+  return {modelSha256: CHINESE_BODY_MODEL_SHA256, dictionaryLength: dictionary.length, readLine, readLines,
     async read(source, options = {}) {
       const {regions, original} = await detector.detect(source);
-      return readDetectedBodyViews(original, regions, readLine, options);
+      return readDetectedBodyViews(original, regions, readLine, {...options, readLines});
     },
     async release() { try { await detector.release(); } finally { await session.release(); } },
   };

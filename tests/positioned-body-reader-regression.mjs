@@ -42,6 +42,28 @@ assert.equal(located[0].positioned.fields.length,2);
 assert.equal(located[0].positioned.fields[0].text,located[0].positioned.fields[1].text);
 const empty=await readDetectedBodyViews(original,[],readLine,{includePositions:true});
 assert.equal(empty.length,2);assert.ok(empty.every(v=>v.regions===0&&!v.truncated&&v.positioned.fields.length===0));
+let batchCalls=0;
+const batched=await readDetectedBodyViews(original,regions,async()=>{throw Error('batch path must be used');},{
+ includePositions:true,
+ readLines:async sources=>{
+  batchCalls++;
+  assert.equal(sources.length,2);
+  return batchCalls===1
+   ? [{text:'甲',confidence:.9},{error:Error('isolated batch item')}]
+   : [{text:'乙',confidence:.9},{text:'丙',confidence:.9}];
+ },
+});
+assert.equal(batchCalls,2);
+assert.deepEqual(batched.map(view=>({text:view.text,lineCount:view.lineCount,errors:view.errors})),[
+ {text:'甲',lineCount:1,errors:1},{text:'乙。丙',lineCount:2,errors:0},
+]);
+assert.deepEqual(batched[1].positioned.fields.map(field=>field.regionIndex),[0,3]);
+let fallbackReads=0;
+const fallback=await readDetectedBodyViews(original,regions,async()=>{
+ fallbackReads++;return {text:'回退',confidence:.9};
+},{readLines:async()=>{throw Error('synthetic batch failure');}});
+assert.equal(fallbackReads,4);
+assert.ok(fallback.every(view=>view.text==='回退。回退'&&view.errors===0));
 const verticals=Array.from({length:81},()=>({left:.4,top:.3,width:.04,height:.5,score:.9}));
 let cappedReads=0;
 const capped=await readDetectedBodyViews(original,verticals,async()=>{cappedReads++;return {text:'春山',confidence:.9};},{includeVertical:true,includePositions:true});
