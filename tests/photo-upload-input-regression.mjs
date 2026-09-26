@@ -32,6 +32,17 @@ assert.deepEqual(trustedPreparedOutputs({...prepared,allowedBlessingNumbers:[8,9
   'supplement recognition receives only source/hash/receipt-bound prior outputs');
 assert.deepEqual(trustedPreparedOutputs({...prepared,allowedBlessingNumbers:[8]},receipt,current),[],
   'a numeric output outside the prior allowed PDF scope is never trusted');
+const unresolvedPlan={...plan,
+  unresolvedStandardizations:[{source:photoDir+'/raw.jpg',targetName:'raw.jpg',kind:'unresolved-standardized'}]};
+const unresolvedReceipt={businessDate:plan.businessDate,completedAt:'2026-01-02T01:01:00Z',files:[],duplicates:[],
+  standardizedUnresolvedFiles:[{source:photoDir+'/raw.jpg',targetName:'raw.jpg',kind:'unresolved-standardized',beforeSha256:b,afterSha256:c}]};
+const unresolvedCurrent=[{name:'8.jpg',sha256:a},{name:'raw.jpg',sha256:c}];
+assert.equal(photoFilesExactlyMatchPlan(unresolvedPlan,unresolvedReceipt,unresolvedCurrent),true,
+  'a source-bound unresolved normalization checkpoint must not be recompressed on resume');
+assert.deepEqual(trustedPreparedOutputs(unresolvedPlan,unresolvedReceipt,unresolvedCurrent),[],
+  'standardized unresolved photos never become trusted upload outputs');
+assert.equal(photoFilesExactlyMatchPlan(unresolvedPlan,{...unresolvedReceipt,standardizedUnresolvedFiles:[]},unresolvedCurrent),false,
+  'an incomplete unresolved-normalization receipt cannot authorize resume');
 const uploadEvidence={
   '8.jpg':{sha256:a,uploadedAt:'2026-01-02T01:02:00Z'},
   '9.jpg':{sha256:c,uploadedAt:'2026-01-02T01:02:00Z'},
@@ -82,6 +93,6 @@ assert.match(runner,/retainVerifiedUploadEvidence\(previous\.uploadedFiles,curre
 assert.match(planner,/!trustedPreparedByName\.has\(path\.basename\(file\)\.toLowerCase\(\)\)/,
   'supplement planning must not OCR unchanged receipt-bound numeric outputs');
 const gatePosition=runner.indexOf('assertPhotoFilesMatchPlan(cachedPhotoPlan');
-assert.ok(gatePosition>runner.indexOf('const manifest = await scanPhotoWorkday(root,photoDate'));
+assert.ok(gatePosition>runner.indexOf('manifest=await scanPhotoWorkday(root,photoDate'));
 assert.ok(gatePosition<runner.indexOf('if (args.action === \'photo-upload\')'));
 console.log('Upload recognition/source and exact preparation-output binding PASS');

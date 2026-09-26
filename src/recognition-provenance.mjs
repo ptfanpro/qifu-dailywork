@@ -68,7 +68,15 @@ export function assertPhotoInputBinding(plan) {
     if(!/^(?:\d+|2\.[1256])\.jpg$/i.test(assignment.targetName||'')||targets.has(assignment.targetName.toLowerCase()))throw Error('照片目标编号不唯一或路径无效，未修改照片。');
     targets.add(assignment.targetName.toLowerCase());
   }
-  for(const item of [...(plan.assignments||[]),...(plan.duplicateSources||[])]) {
+  const standardizations=plan.unresolvedStandardizations||[];
+  if(!Array.isArray(standardizations))throw Error('未识别照片规格处理计划无效，未修改照片。');
+  for(const item of standardizations) {
+    const target=item?.targetName;
+    if(item?.kind!=='unresolved-standardized'||typeof target!=='string'||path.basename(target)!==target
+      ||!/\.jpg$/i.test(target)||targets.has(target.toLowerCase()))throw Error('未识别照片规格处理目标不唯一或路径无效，未修改照片。');
+    targets.add(target.toLowerCase());
+  }
+  for(const item of [...(plan.assignments||[]),...standardizations,...(plan.duplicateSources||[])]) {
     const key=pathKey(item.source);
     if(pathKey(path.dirname(item.source))!==pathKey(plan.photoDir)||sources.has(key))throw Error('照片来源不唯一或越出业务目录，未修改照片。');
     sources.add(key);

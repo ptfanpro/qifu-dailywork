@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const phases = ['date-resolution','pdf-index','photo-match','photoshop','upload','order-processing','pdf-query','pdf-export','pdf-finalize','tablet-renewal','quantity'];
+const phases = ['date-resolution','pdf-index','photo-match','photoshop','photo-manual-prepare','photo-manual-scan','upload','order-processing','pdf-query','pdf-export','pdf-finalize','tablet-renewal','quantity'];
 const counterNames = ['photo_count','pdf_page_count','export_order_count','digit_direct_count','text_resolved_count','fingerprint_fallback_count','manual_review_count','browser_action_count','browser_reconnect_count','full_dom_snapshot_count','filechooser_manual_takeover_count','dialog_manual_takeover_count','download_event_wait_count','download_directory_watch_count','retry_count','duplicate_validation_count','user_intervention_count'];
 
 function atomicJson(file, value) {

@@ -61,6 +61,7 @@ test('exclusions require exact input identity and forbid every processing role',
   assertPhotoReviewIsolation(plan);
   assertWritePlanReady(plan,{imageCount:1,action:'photo-upload'});
   for(const kind of ['blessing','scene-lamp','scene-water'])assert.throws(()=>assertPhotoReviewIsolation({...plan,assignments:[{source:file,targetName:kind==='blessing'?'9.jpg':'2.1.jpg',kind}]}),/待复核照片/);
+  assert.throws(()=>assertPhotoReviewIsolation({...plan,unresolvedStandardizations:[{source:file,targetName:'8.jpg',kind:'unresolved-standardized'}]}),/待复核照片/);
   assert.throws(()=>assertPhotoReviewIsolation({...plan,duplicateSources:[{source:file,duplicateOfNumber:9}]}),/待复核照片/);
   assert.throws(()=>assertPhotoReviewIsolation({...plan,assignments:[{source:path.join(photoDir,'good.jpg'),targetName:'8.jpg',kind:'blessing'}]}),/待复核照片/);
   assert.throws(()=>assertPhotoReviewIsolation({...plan,allowedBlessingNumbers:[8,9]}),/允许上传编号/);

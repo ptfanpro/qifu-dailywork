@@ -19,4 +19,4 @@ assert.doesNotThrow(()=>assertWritePlanReady({safeToApply:true,issues:[],allowed
 assert.doesNotThrow(()=>assertWritePlanReady(null,{imageCount:18,action:'photo-scan'}));
 const runner=fs.readFileSync(new URL('../src/runner.mjs',import.meta.url),'utf8');
 assert.match(runner,/mustRebuildPhotoPlan\(\{indexReusable:allowedBlessingNumbers!==null/);
-assert.ok(runner.indexOf('assertWritePlanReady(cachedPhotoPlan')<runner.indexOf('const manifest = await scanPhotoWorkday(root,photoDate'));
+assert.ok(runner.indexOf('assertWritePlanReady(cachedPhotoPlan')<runner.indexOf('manifest=await scanPhotoWorkday(root,photoDate'));

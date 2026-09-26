@@ -11,7 +11,7 @@ import { getMachineLocalStateRoot } from './runtime-paths.mjs';
 import {decodeOcrSource,extractOcrCrop,writeImageFile} from './ocr-image.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,createPhotoInputBinding,assertPhotoInputBinding} from './recognition-provenance.mjs';
 import {bodyReviewBlockReason,reviewCurrentPdfBodies} from './body-content-review.mjs';
-import {codeBodyResolution,codeBodyMethod,codeBodySourceBlockReason,codeBodyModelReviewEligible} from './code-body-adjudication.mjs';
+import {codeBodyResolution,codeBodyMethod,codeBodySourceBlockReason,codeBodyCandidateForItem,codeBodyModelReviewEligible} from './code-body-adjudication.mjs';
 import {wholeBodyResolution,wholeBodyMethod,wholeBodySourceBlockReason} from './whole-body-adjudication.mjs';
 import {collectCodeModelReviews} from './code-model-review.mjs';
 import {parseCompletePrintedCodes} from './printed-code-parser.mjs';
@@ -1115,6 +1115,30 @@ function portableCodeReadBlockReason(item) {
   if(codes.length && (!item.reliable || !Number.isInteger(item.number)))return 'portable-complete-code-unconfirmed';
   if(codes.some(code=>code.number!==item.number))return 'portable-code-proposal-conflict';
   return null;
+}
+
+// Existing numeric filenames are comparison claims, never recognition input.
+// If the first source-bound detected-code audit rejected that claim solely
+// because the two OCR engines disagreed, create a fresh item containing only
+// immutable image/code evidence. The existing strict alternate-model + current
+// PDF body route may then resolve the disagreement. Prior portable reviews,
+// unrelated PDF failures and renamed files remain blocked.
+export function prepareExistingNumericConflictCandidate(item,index) {
+  const stem=path.parse(String(item?.file||'')).name;
+  if(!/^\d+$/.test(stem)||item?.evidence?.method!=='existing-numeric-filename-claim'
+    ||item?.reliable!==false||Number.isInteger(item?.observedOcrNumber)
+    ||item?.pdfRecheck?.status!=='rejected'||item.pdfRecheck.claimedNumber!==Number(stem)
+    ||item?.portableCodeRead!=null)return null;
+  const reasons=new Set(['detected-code-number-conflict','detected-code-prefix-conflict']);
+  const history=item.codeAuditHistory;
+  if(!reasons.has(item.pdfRecheck.reason)||!Array.isArray(history)||history.length!==1
+    ||history[0]?.status!=='unresolved'||history[0]?.number!==null
+    ||history[0]?.reason!==item.pdfRecheck.reason)return null;
+  const candidate={file:item.file,reliable:false,number:null,sourceSha256:item.sourceSha256,
+    detectedCodeRead:structuredClone(item.detectedCodeRead),codeAuditHistory:structuredClone(history)};
+  const proposal=codeBodyCandidateForItem(candidate,index);
+  if(proposal.status!=='candidate'&&!codeBodyModelReviewEligible(candidate,index))return null;
+  return {item:candidate,filenameNumber:Number(stem)};
 }
 
 export function retainPortableCodeRead(item,read) {
@@ -4402,8 +4426,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
       [...recognized,...existingNumericAuditItems],pdfPages,onProgress,{candidateNumbers:newClaimCandidateNumbers},
     );
     if (pdfClaimRecheck.rejected) {
-      const rejectedFiles = pdfClaimRecheck.diagnostics.filter((item)=>item.status==='rejected').map((item)=>item.file);
-      pendingIssues.push(`编号二次复核未通过 ${pdfClaimRecheck.rejected} 张：${rejectedFiles.join('、')}。这些照片已隔离，不改名、不上传、不转为场景；其余独立确认照片可继续，请查看 PDF 指纹诊断。`);
+      onProgress?.(`编号二次复核暂有 ${pdfClaimRecheck.rejected} 张冲突；将继续尝试备用编号模型与当天 PDF 正文联合复核。`);
     } else if (pdfClaimRecheck.attempted) {
       onProgress?.(`编号二次复核完成：${pdfClaimRecheck.confirmed}/${pdfClaimRecheck.attempted} 张得到第二证据确认，${pdfClaimRecheck.inconclusive || 0} 张暂缺足够复核证据，保留待确认；其他已确认照片可继续。`);
     }
@@ -4416,6 +4439,20 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     issues.push('编号二次复核发生异常；为防止错误上传，本轮所有自动编号均已停止。');
   }
 
+  const modelReviewIndex=pdfPages.map(p=>({pdfSha256:pdfIndexBinding.files.find(f=>f.name===path.basename(p.pdf||p.file||''))?.sha256,
+    pageNumber:p.pageNumber,number:p.number}));
+  // A rejected numeric filename cannot authorize itself. Rebuild only the
+  // narrow detected-engine conflict cases from immutable raw observations;
+  // all other prior reviews remain attached to the original blocked item.
+  const existingNumericConflictOrigins=new Map();
+  for(let i=0;i<existingNumericAuditItems.length;i++) {
+    const original=existingNumericAuditItems[i];
+    const prepared=prepareExistingNumericConflictCandidate(original,modelReviewIndex);
+    if(!prepared)continue;
+    existingNumericAuditItems[i]=prepared.item;
+    existingNumericConflictOrigins.set(prepared.item,{original,filenameNumber:prepared.filenameNumber});
+  }
+
   // Review the actual final numeric claim, including an existing-file repair.
   // The current-PDF content guard can only withhold a claim, never replace it
   // with its highest-ranking body page or clear a prior code conflict.
@@ -4426,21 +4463,46 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     if(existing)existing.number=repair.to;
     else bodyClaims.push({file:repair.source,number:repair.to,reliable:true,evidence:repair.evidence});
   }
-  const modelReviewIndex=pdfPages.map(p=>({pdfSha256:pdfIndexBinding.files.find(f=>f.name===path.basename(p.pdf||p.file||''))?.sha256,
-    pageNumber:p.pageNumber,number:p.number}));
+  const unresolvedBodyClaims=[...recognized,...existingNumericAuditItems].filter(item=>!item.reliable);
   const modelReview=await collectCodeModelReviews({appRoot,onProgress,
-    items:recognized.filter(item=>codeBodyModelReviewEligible(item,modelReviewIndex))});
+    items:unresolvedBodyClaims.filter(item=>codeBodyModelReviewEligible(item,modelReviewIndex))});
   const bodyClaimReview=await reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndexBinding,claims:bodyClaims,onProgress,
-    cacheDir:path.join(workDir,'body-observation-cache'),unresolvedClaims:recognized.filter(item=>!item.reliable)});
+    cacheDir:path.join(workDir,'body-observation-cache'),unresolvedClaims:unresolvedBodyClaims});
   bodyClaimReview.modelReview=modelReview;
-  const adjudicated=bodyClaimReview.adjudicated||[];
+  const adjudicated=[];
+  for(const item of bodyClaimReview.adjudicated||[]) {
+    const origin=existingNumericConflictOrigins.get(item);
+    if(origin&&item.number!==origin.filenameNumber) {
+      item.reliable=false;item.number=null;
+      item.pdfRecheck={status:'rejected',reason:'adjudicated-code-disagrees-with-filename',claimedNumber:origin.filenameNumber};
+      continue;
+    }
+    adjudicated.push(item);
+  }
   if(adjudicated.length) {
     bodyClaims.push(...adjudicated);
     const recheck=await recheckReliablePhotoClaimsWithPdf(adjudicated,pdfPages,onProgress);
-    for(const key of ['attempted','confirmed','rejected','inconclusive'])pdfClaimRecheck[key]=(pdfClaimRecheck[key]||0)+(recheck[key]||0);
+    // A successful strict adjudication supersedes the earlier filename-claim
+    // rejection for the same file. Keep final counts truthful while the raw
+    // conflict remains inside the item's codeAuditHistory.
+    let replaced=0;
+    for(const diagnostic of recheck.diagnostics) {
+      const priorIndex=pdfClaimRecheck.diagnostics.findIndex(row=>row.file===diagnostic.file);
+      if(priorIndex<0)continue;
+      const prior=pdfClaimRecheck.diagnostics[priorIndex];
+      if(['confirmed','rejected','inconclusive'].includes(prior.status))
+        pdfClaimRecheck[prior.status]=Math.max(0,(pdfClaimRecheck[prior.status]||0)-1);
+      pdfClaimRecheck.diagnostics.splice(priorIndex,1);replaced++;
+    }
+    pdfClaimRecheck.attempted=(pdfClaimRecheck.attempted||0)+(recheck.attempted||0)-replaced;
+    for(const key of ['confirmed','rejected','inconclusive'])pdfClaimRecheck[key]=(pdfClaimRecheck[key]||0)+(recheck[key]||0);
     pdfClaimRecheck.diagnostics.push(...recheck.diagnostics);
     const wholeConfirmed=adjudicated.filter(item=>item.reliable&&item.evidence?.method===wholeBodyMethod).length;
     onProgress?.(`编号与正文联合复核：${recheck.confirmed-wholeConfirmed} 张按完整编号与正文确认，${wholeConfirmed} 张无完整编号但由唯一完整正文多字段确认；原始读数已保留，未解决冲突仍隔离。`);
+  }
+  if(pdfClaimRecheck.rejected) {
+    const rejectedFiles=pdfClaimRecheck.diagnostics.filter(item=>item.status==='rejected').map(item=>item.file);
+    pendingIssues.push(`编号二次复核未通过 ${pdfClaimRecheck.rejected} 张：${rejectedFiles.join('、')}。这些照片已隔离，不改名、不上传、不转为场景；其余独立确认照片可继续，请查看 PDF 指纹诊断。`);
   }
   // Runtime-only item references/authorizations never become reusable cache
   // decisions. The persisted plan keeps their source-bound proof separately.
@@ -4450,7 +4512,13 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   const isReviewExcluded=file=>reviewExcludedNames.has(path.basename(file).toLowerCase());
   const reviewExcludedNumbers=new Set(images.filter(file=>isReviewExcluded(file)&&/^\d+$/.test(path.parse(file).name)).map(file=>Number(path.parse(file).name)));
   if(photoReviewExclusions.files.length)pendingIssues.push(`有 ${photoReviewExclusions.files.length} 张照片未通过编号或正文复核，已按原图内容凭据隔离；不改名、不压缩、不上传、不转为场景，其他独立确认照片可继续。`);
-  if(bodyClaimReview.blocked)pendingIssues.push(`有 ${bodyClaimReview.blocked} 张照片的正文归属存在冲突或检查不可用；保留原图，未按数字共识或正文最高分自动改号。`);
+  const bodySourceChanged=bodyClaimReview.results?.filter(result=>result.status==='source-changed')||[];
+  if(bodySourceChanged.length) {
+    const sourceKinds=[...new Set(bodySourceChanged.map(result=>result.failureCode))];
+    pendingIssues.push(`正文归属复核期间检测到源文件发生变化（${sourceKinds.join('、')}），本轮 ${bodySourceChanged.length} 项结果已全部作废；请停止同步或图片批处理后重新核对。`);
+  } else if(bodyClaimReview.blocked) {
+    pendingIssues.push(`有 ${bodyClaimReview.blocked} 张照片的正文归属存在冲突或检查不可用；保留原图，未按数字共识或正文最高分自动改号。`);
+  }
   const bodyBlockedPaths=new Set(bodyClaims.filter(bodyReviewBlockReason).map(item=>path.resolve(item.file)));
   const bodyBlockedExistingNumbers=new Set(images.filter(file=>bodyBlockedPaths.has(path.resolve(file)) && /^\d+$/.test(path.parse(file).name))
     .map(file=>Number(path.parse(file).name)));
@@ -4581,7 +4649,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   if(unavailableAuditCount)pendingIssues.push(`有 ${unavailableAuditCount} 张照片的独立编号复核不可用；失败前观察已保留，未按剩余编号继续赋号。`);
   if (conflictingCodeCandidates.length) pendingIssues.push(`有 ${conflictingCodeCandidates.length} 张福单照片存在多个强编号候选，已保留原图等待人工确认。`);
   if (unavailableSemanticCandidates.length) pendingIssues.push(`有 ${unavailableSemanticCandidates.length} 张未决照片的本地场景模型不可用或校验失败；请检查完整软件模型包。这不代表照片不清晰，未按明暗或剩余位置猜测类别。`);
-  if (unreadableCodeCandidates.length) pendingIssues.push(`有 ${unreadableCodeCandidates.length} 张福单照片尚未可靠读出编号，已保留原图等待人工补录。`);
+  if (unreadableCodeCandidates.length) pendingIssues.push(`以下 ${unreadableCodeCandidates.length} 张福单照片尚未可靠读出编号：${unreadableCodeCandidates.map((file)=>path.basename(file)).join('、')}。程序不会猜号或上传；照片规格仍会自动调整为 1800×1350、JPG、不超过 1.5 MiB。`);
 
   const missingExpected = [...expectedNumbers].filter((number) => !assignedNumbers.has(number));
   if (missingExpected.length) {
@@ -4604,6 +4672,50 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
   for(let index=assignments.length-1;index>=0;index--)if(isReviewExcluded(assignments[index].source))assignments.splice(index,1);
   const duplicateSources=verifiedBatch.duplicateSources.filter(item=>!isReviewExcluded(item.source)
     && !reviewExcludedNumbers.has(item.duplicateOfNumber));
+
+  // Number recognition and upload authorization are separate from image
+  // normalization. Ordinary unreadable photos still receive the same pixel,
+  // crop and size treatment, but remain outside assignments and therefore can
+  // never become trusted upload outputs. Review-conflicted photos stay byte-for-
+  // byte isolated so normalization cannot erase evidence needed by a human.
+  const handledSources=new Set([
+    ...assignments.map(item=>path.resolve(item.source)),
+    ...duplicateSources.map(item=>path.resolve(item.source)),
+  ]);
+  const assignmentTargetNames=new Set(assignments.map(item=>item.targetName.toLowerCase()));
+  const unresolvedNormalizationCandidates=[];
+  for(const file of unresolved) {
+    if(isReviewExcluded(file)||handledSources.has(path.resolve(file)))continue;
+    const parsed=path.parse(file),targetName=`${parsed.name}.jpg`;
+    const metadata=autoOrientedMetadata(await sharpFile(file).metadata());
+    const needsNormalization=parsed.ext.toLowerCase()!=='.jpg'
+      ||fs.statSync(file).size>MAX_IMAGE_BYTES
+      ||Number(metadata.width||0)!==1800
+      ||Number(metadata.height||0)!==1350;
+    if(needsNormalization)unresolvedNormalizationCandidates.push({
+      source:file,targetName,kind:'unresolved-standardized',
+      evidence:{method:'unresolved-photo-spec-normalization'},
+    });
+  }
+  const unresolvedTargetCounts=new Map();
+  for(const item of unresolvedNormalizationCandidates) {
+    const name=item.targetName.toLowerCase();
+    unresolvedTargetCounts.set(name,(unresolvedTargetCounts.get(name)||0)+1);
+  }
+  const unresolvedStandardizations=[];
+  const unresolvedStandardizationSkipped=[];
+  for(const item of unresolvedNormalizationCandidates) {
+    const target=path.join(photoDir,item.targetName),samePath=path.resolve(target)===path.resolve(item.source);
+    if(unresolvedTargetCounts.get(item.targetName.toLowerCase())!==1
+      ||assignmentTargetNames.has(item.targetName.toLowerCase())
+      ||(fs.existsSync(target)&&!samePath)) {
+      unresolvedStandardizationSkipped.push(path.basename(item.source));
+      continue;
+    }
+    unresolvedStandardizations.push(item);
+  }
+  if(unresolvedStandardizations.length)onProgress?.(`未识别照片仍将完成规格处理：${unresolvedStandardizations.map(item=>path.basename(item.source)).join('、')}；不改为数字名，也不进入上传清单。`);
+  if(unresolvedStandardizationSkipped.length)pendingIssues.push(`以下未识别照片因同名 JPG 已存在或目标名冲突，未自动调整规格：${unresolvedStandardizationSkipped.join('、')}。请只保留其中一份后再次处理。`);
 
   const targetNames = assignments.map((item) => item.targetName.toLowerCase());
   if (new Set(targetNames).size !== targetNames.length) issues.push('自动处理目标文件名发生重复。');
@@ -4652,6 +4764,7 @@ export async function planPhotoPreparation({ appRoot, folder, photoDir, date, ex
     allowedBlessingNumbers: [...expectedNumbers].filter(number=>!bodyBlockedExistingNumbers.has(number)&&!reviewExcludedNumbers.has(number)).sort((a,b)=>a-b),
     foreignNumericFiles,
     assignments,
+    unresolvedStandardizations,
     duplicateSources,
     sceneCandidateCount: sceneCandidates.length,
     semanticRecognition: {...semanticServices.stats},
@@ -4713,7 +4826,11 @@ export async function applyPhotoPreparation(plan, workDir) {
   fs.mkdirSync(stagingDir, { recursive: true });
   fs.mkdirSync(quarantineDir, { recursive: true });
   const prepared = [];
-  for (const assignment of plan.assignments) {
+  const preparationItems=[
+    ...(plan.assignments||[]).map(item=>({...item,receiptGroup:'assigned'})),
+    ...(plan.unresolvedStandardizations||[]).map(item=>({...item,receiptGroup:'unresolved'})),
+  ];
+  for (const assignment of preparationItems) {
     const backup = path.join(backupDir, path.basename(assignment.source));
     fs.copyFileSync(assignment.source, backup, fs.constants.COPYFILE_EXCL);
     if(sha256(backup)!==expectedPhotoHash(assignment.source))throw Error('备份时原图发生变化，请重新检测；业务照片未改名。');
@@ -4806,11 +4923,14 @@ export async function applyPhotoPreparation(plan, workDir) {
       ...(fs.existsSync(stagingDir) ? [stagingDir] : []),
     ],
     processedCount: prepared.length,
+    assignedProcessedCount: prepared.filter((item)=>item.receiptGroup==='assigned').length,
+    unresolvedStandardizedCount: prepared.filter((item)=>item.receiptGroup==='unresolved').length,
     blessingCount: prepared.filter((item) => item.kind === 'blessing').length,
     lampSceneCount: prepared.filter((item) => item.kind === 'scene-lamp').length,
     waterSceneCount: prepared.filter((item) => item.kind === 'scene-water').length,
     duplicateRemovedCount: duplicateBackups.length,
     duplicates: duplicateBackups.map(({ source, backup, beforeSha256, duplicateOfNumber, evidence }) => ({ source, backup, beforeSha256, duplicateOfNumber, evidence })),
-    files: prepared.map(({ source, target, targetName, kind, backup, beforeSha256, afterSha256, bytes, quality, evidence }) => ({ source, target, targetName, kind, backup, beforeSha256, afterSha256, bytes, quality, evidence })),
+    files: prepared.filter(item=>item.receiptGroup==='assigned').map(({ source, target, targetName, kind, backup, beforeSha256, afterSha256, bytes, quality, evidence }) => ({ source, target, targetName, kind, backup, beforeSha256, afterSha256, bytes, quality, evidence })),
+    standardizedUnresolvedFiles: prepared.filter(item=>item.receiptGroup==='unresolved').map(({ source, target, targetName, kind, backup, beforeSha256, afterSha256, bytes, quality, evidence }) => ({ source, target, targetName, kind, backup, beforeSha256, afterSha256, bytes, quality, evidence })),
   };
 }

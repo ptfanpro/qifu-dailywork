@@ -18,6 +18,13 @@ $testBeijingTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Ti
 $testBeijingToday = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$testBeijingTimeZone).Date
 Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.AddDays(-1).ToString('yyyy-MM-dd') '软件启动时照片业务日期必须固定为北京时间昨天'
 Assert-Equal $pdfDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.ToString('yyyy-MM-dd') '软件启动时 PDF 业务日期必须固定为北京时间今天'
+Assert-Equal $photoGroup.Text '照片业务（人工编号后，软件压缩并上传）' '照片界面没有切换到人工编号模式'
+Assert-Equal $photoMainButton.Text '一键处理照片' '照片主按钮名称不正确'
+Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称不正确'
+if ($null -ne $photoRefreshButton -or $null -ne $pdfRefreshButton) { throw '照片或 PDF 主区域仍保留重新检查按钮' }
+if ($null -ne $pendingPhotoPicker) { throw '历史未解决业务仍要求选择日期' }
+Assert-Equal $pendingProcessButton.Text '检查历史未解决业务' '历史线上检查按钮名称不正确'
+Assert-Equal $manualPhotoPrepare.Text '人工编号照片压缩' '高级工具仍然显示自动识别入口'
 
 $originalRoot = $rootBox.Text
 $originalLocalStateRoot = $script:localStateRoot
@@ -48,7 +55,7 @@ try {
     $manifest.blessingReady = $false
     $manifest.blockingErrors = @('微信图片_损坏.jpg：图片无法读取')
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
-    Write-TestJson (Join-Path $photoRunDir 'ui-workflow-state.json') ([ordered]@{state='running';lastAction='photo-prepare'})
+    Write-TestJson (Join-Path $photoRunDir 'ui-workflow-state.json') ([ordered]@{state='running';lastAction='photo-manual-prepare'})
     Refresh-PhotoCard
     if ($photoStatus.Text -notmatch '微信图片_损坏\.jpg：图片无法读取') { throw "照片卡片没有显示具体失败文件名和原因：$($photoStatus.Text)" }
     $manifest.blessingReady = $true
@@ -74,7 +81,7 @@ try {
     if ($photoStatus.Text -notmatch '未匹配的 PDF 编号：702、703' -or $photoStatus.Text -notmatch '微信图片_A\.jpg、微信图片_B\.jpg' -or $photoStatus.Text -match '张待补|仍待补 2') { throw '照片卡片没有列明未匹配编号和未识别文件' }
     Write-TestJson (Join-Path $photoRunDir 'scene-upload-receipt.json') ([ordered]@{complete=$false;partialComplete=$true;fileSetHash='hash-1';completedOrderCount=150;tabletCompletionVerified=$true})
     Refresh-PhotoCard
-    Assert-Equal $script:photoNextAction 'photo-prepare' '现有已上传订单分批完成后应等待新增补图'
+    Assert-Equal $script:photoNextAction 'photo-manual-prepare' '现有已上传订单分批完成后应等待人工编号补图'
     if ($photoStatus.Text -notmatch '150 条订单已分批完成') { throw '缺图分批完成回执没有显示' }
     if ($photoStatus.Text -notmatch '微信图片_A\.jpg、微信图片_B\.jpg') { throw '分批完成后的提示没有列出待识别文件' }
     $manifest.counts.missingBlessing = 0
@@ -104,55 +111,24 @@ try {
     $manifest.blockingErrors = @('微信补图.jpg：尚未识别编号或场景类别')
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
     Refresh-PhotoCard
-    Assert-Equal $script:photoNextAction 'photo-prepare' '历史日期完成后又出现新增原图时不能被旧终态回执掩盖'
+    Assert-Equal $script:photoNextAction 'photo-manual-prepare' '历史日期完成后又出现新增原图时不能被旧终态回执掩盖'
     $manifest.counts.unexpected = 0
     $manifest.errors = @()
     $manifest.blockingErrors = @()
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
 
-    $oldPhotoRunDir = Join-Path (Join-Path (Join-Path $script:localStateRoot 'workdays') '2026-08-07') 'photos'
-    Write-TestJson (Join-Path $oldPhotoRunDir 'photo-manifest.json') ([ordered]@{businessDate='2026-08-07';counts=[ordered]@{allImages=5;missingBlessing=2}})
-    Write-TestJson (Join-Path $oldPhotoRunDir 'ui-workflow-state.json') ([ordered]@{state='waiting-supplement';lastAction='photo-upload'})
-    Write-TestJson (Join-Path $oldPhotoRunDir 'photo-online-closure.json') ([ordered]@{businessDate='2026-08-07';checkedAt='2026-08-31T02:00:00Z';complete=$true})
-    $lateInbox = Join-Path (Join-Path $testRoot '8月8日') '1'
-    New-Item -ItemType Directory -Force -Path $lateInbox | Out-Null
-    [System.IO.File]::WriteAllBytes((Join-Path $lateInbox '微信补图.jpg'),[byte[]](1,2,3))
-
-    $legacyInbox = Join-Path (Join-Path $testRoot '1月26日') '1'
-    New-Item -ItemType Directory -Force -Path $legacyInbox | Out-Null
-    [System.IO.File]::WriteAllBytes((Join-Path $legacyInbox '16.jpg'),[byte[]](1,2,3))
-    [System.IO.File]::WriteAllBytes((Join-Path $legacyInbox '17.jpg'),[byte[]](1,2,3))
-    [System.IO.File]::WriteAllBytes((Join-Path $legacyInbox '2.1.jpg'),[byte[]](1,2,3))
-    [System.IO.File]::WriteAllBytes((Join-Path $legacyInbox '2.3.jpg'),[byte[]](1,2,3))
-    [System.IO.File]::WriteAllBytes((Join-Path $legacyInbox '4.5.jpg'),[byte[]](1,2,3))
-    $legacyRunDir = Join-Path (Join-Path (Join-Path $script:localStateRoot 'workdays') '2026-01-26') 'photos'
-    Write-TestJson (Join-Path $legacyRunDir 'photo-manifest.json') ([ordered]@{
-        businessDate='2026-01-26'; blessingReady=$false; fileSetHash='legacy-hash';
-        counts=[ordered]@{allImages=5;blessing=2;lampScene=1;waterScene=0;unexpected=2;pdfPages=2;missingBlessing=0;extraBlessing=0};
-        errors=@('16.jpg：文件超过 1.5 MiB','有 1 张图片尚未确认编号或场景类别')
+    Refresh-PendingPhotoBar
+    Assert-Equal $pendingProcessButton.Enabled $true '历史线上检查按钮应可直接使用'
+    if ($pendingStatus.Text -notmatch '点击按钮查询') { throw '首次使用没有显示历史线上检查说明' }
+    $historyDir = Join-Path $script:localStateRoot 'historical-backlog'
+    Write-TestJson (Join-Path $historyDir 'latest.json') ([ordered]@{
+        checkedAt='2026-08-11T02:00:00Z'; complete=$false; totalCount=4;
+        pendingPrayerCount=2; prayingWithoutPhotoCount=2; businessDates=@('2026-08-07','2026-08-08');
+        range=[ordered]@{endExclusive='2026-08-11';todayExcluded=$true};readOnly=$true;platformModified=$false
     })
-    Write-TestJson (Join-Path $legacyRunDir 'ui-workflow-state.json') ([ordered]@{state='failed';lastAction='photo-prepare'})
-
-    $pendingDates = @(Get-PendingPhotoBusinessDates)
-    Assert-Equal ($pendingDates -join ',') '2026-08-08' '线上已确认闭环的旧断点仍被错误列入待复核日期'
-    Remove-Item -LiteralPath (Join-Path $oldPhotoRunDir 'photo-online-closure.json') -Force
-    $pendingDates = @(Get-PendingPhotoBusinessDates)
-    Assert-Equal ($pendingDates -join ',') '2026-08-07,2026-08-08' '初始化没有同时发现历史断点和其他日期新增原图'
-    $script:running = $true
-    $photoDate.Value = [DateTime]'2026-01-26'
-    $script:running = $false
-    Refresh-PhotoCard
-    if ($photoStatus.Text -notmatch '仅发现历史成品') { throw '历史纯数字福单与旧小数编号场景图仍被显示为新增待办' }
-    Assert-Equal $photoMainButton.Enabled $false '历史成品目录不应允许一键重新处理'
-    if (-not [string]::IsNullOrWhiteSpace($script:photoNextAction)) { throw '历史成品目录不应安排照片动作' }
-    $script:running = $true
-    $photoDate.Value = [DateTime]'2026-08-10'
-    $script:running = $false
-    [void](Refresh-PendingPhotoDates)
-    Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') '2026-08-10' '待办扫描不应覆盖主业务日期'
-    Assert-Equal ([string]$pendingPhotoPicker.SelectedItem) '2026-08-07' '待办栏没有默认选中最早未闭环日期'
-    Assert-Equal $pendingProcessButton.Enabled $true '存在待办日期时一键处理按钮应可用'
-    if ($pendingStatus.Text -notmatch '2 个本机待复核日期') { throw '待办栏没有显示待复核日期数量' }
+    Refresh-PendingPhotoBar
+    if ($pendingStatus.Text -notmatch '发现 4 条' -or $pendingStatus.Text -notmatch '待祈福 2 条' -or $pendingStatus.Text -notmatch '祈福中未上传照片 2 条') { throw '历史线上检查结果没有显示两类未解决业务' }
+    Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') '2026-08-10' '历史线上检查不应改变照片业务日期'
 
     $pdfFolder = Join-Path $testRoot '8月11日'
     New-Item -ItemType Directory -Force -Path $pdfFolder | Out-Null
@@ -167,18 +143,18 @@ try {
     Write-TestJson (Join-Path $pdfRunDir 'online-verification.json') ([ordered]@{blessingPendingCount=1;tabletPendingCount=0;complete=$false})
     Refresh-PdfCard
     Assert-Equal $script:pdfNextAction 'export' '同日新增待祈福应进入增量导出'
-    if ($pdfMainButton.Text -notmatch '同日补单') { throw '同日新增订单没有显示增量补单按钮' }
+    Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称在同日补单状态下发生变化'
     Remove-Item -LiteralPath (Join-Path $pdfRunDir 'online-verification.json') -Force
 
     Write-TestJson (Join-Path $pdfRunDir 'renewal-online-verification.json') ([ordered]@{pendingCount=2;complete=$false})
     Refresh-PdfCard
     Assert-Equal $script:pdfNextAction 'export' '发现未处理续费后应继续 PDF 导出流程'
-    if ($pdfMainButton.Text -notmatch '处理续费') { throw '发现续费后主按钮没有进入续费导出阶段' }
+    Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称在续费状态下发生变化'
 
     Write-TestJson (Join-Path $pdfRunDir 'renewal-state.json') ([ordered]@{pdfVerified=$true;stateChanged=$false;orderCount=2;orderIdHash='renew-hash'})
     Refresh-PdfCard
     Assert-Equal $script:pdfNextAction 'renewal-state-change' '续费自动状态变更中断后应进入补做阶段'
-    Assert-Equal $pdfMainButton.Text '继续 PDF：补做续费状态' '续费状态补做按钮文字错误'
+    Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称在状态补做阶段发生变化'
 
     'UI state tests passed'
 } finally {

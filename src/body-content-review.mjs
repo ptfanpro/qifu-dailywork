@@ -35,6 +35,24 @@ export function positionedLayoutFailureCode(error) {
   return 'positioned-layout-unknown';
 }
 
+// Report source replacement separately from a missing/failed OCR runtime.
+// The code intentionally stores only a bounded category: exception text may
+// contain local paths and must never enter the persisted plan.
+export function bodyReviewFailureCode(error) {
+  const message=error instanceof Error?error.message:String(error||'');
+  if(/PDF source changed/i.test(message))return 'pdf-source-changed';
+  if(/Photo changed/i.test(message))return 'photo-source-changed';
+  if(/body\/index page identity|claimed number is not unique/i.test(message))return 'body-index-identity-invalid';
+  if(/incomplete body views|body corpus/i.test(message))return 'body-corpus-incomplete';
+  return 'body-reader-unavailable';
+}
+
+const failedBodyAssessment=error=>{
+  const failureCode=bodyReviewFailureCode(error);
+  return {status:failureCode.endsWith('source-changed')?'source-changed':'body-reader-unavailable',
+    failureCode,bindingVerified:false};
+};
+
 export function assessBodyClaim(views,pages,claim) {
   if(!claim || pages.filter(p=>id(p)===id(claim)).length!==1) throw Error('Invalid claimed PDF identity');
   if(!Array.isArray(views)||views.length!==4||visualBodyViewNames.some(n=>views.filter(v=>v.view===n).length!==1)) throw Error('Incomplete body views');
@@ -130,7 +148,7 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
   const originals=claims.map(base);
   const pendingViews=new Map();
   const positionedPdfInputs=[],pendingSources=new Map();
-  let sourcesVerified=false;
+  let sourcesVerified=false,terminalFailure=null;
   const verifySources=()=>{
     // Code and body must describe the SAME original bytes, not merely a file
     // that stayed unchanged during this particular body-reading operation.
@@ -209,18 +227,22 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
         views??=await readViews(source);
         assessment=assess(views,target);
         if(candidateMap.has(claim)){pendingViews.set(claim,views);pendingSources.set(claim,source);}
-      } catch {assessment={status:'body-reader-unavailable',bindingVerified:false};}
+      } catch(error) {assessment=failedBodyAssessment(error);}
       results.push({...originals[i],...assessment});
       onProgress?.(`正文归属检查：${i+1}/${claims.length} 张完成。`);
     }
     verifySources();
     sourcesVerified=true;
-  } catch {
+  } catch(error) {
     // Missing models, partial PDF reads and source changes are failures, not
     // "no conflicting text". Discard apparent passes from an invalid corpus.
-    results.splice(0,results.length,...originals.map(v=>({...v,status:'body-reader-unavailable'})));
+    const failure=failedBodyAssessment(error);
+    terminalFailure=failure;
+    results.splice(0,results.length,...originals.map(v=>({...v,...failure})));
   } finally {if(reader)try {await reader.release();}catch{}}
-  let positionedLayoutReview={status:'not-needed',comparisons:0,mayAssignNumber:false,mayClearCodeConflict:false};
+  let positionedLayoutReview=terminalFailure?.status==='source-changed'
+    ?{status:'source-changed',failureCode:terminalFailure.failureCode,comparisons:0,mayAssignNumber:false,mayClearCodeConflict:false}
+    :{status:'not-needed',comparisons:0,mayAssignNumber:false,mayClearCodeConflict:false};
   if(sourcesVerified){
     // Only the residual non-conflicting body ambiguity gets expensive layout
     // collection. Already-supported fields, contrary content and prefix-only
@@ -251,10 +273,12 @@ export async function reviewCurrentPdfBodies({appRoot,pdfFiles,pdfPages,pdfIndex
       }
     }
     // Sources may change while the model releases or the geometry runs.
-    try{verifySources();}catch{
+    try{verifySources();}catch(error){
       sourcesVerified=false;
-      results.splice(0,results.length,...originals.map(v=>({...v,status:'body-reader-unavailable'})));
-      positionedLayoutReview={status:'source-changed',comparisons:0,mayAssignNumber:false,mayClearCodeConflict:false};
+      const failure=failedBodyAssessment(error);
+      results.splice(0,results.length,...originals.map(v=>({...v,...failure})));
+      positionedLayoutReview={status:'source-changed',failureCode:failure.failureCode,
+        comparisons:0,mayAssignNumber:false,mayClearCodeConflict:false};
     }
   }
   const adjudicated=[];

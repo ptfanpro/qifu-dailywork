@@ -15,7 +15,7 @@ $script:singleInstance = if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
 if (-not $script:singleInstance.OwnsLock) {
     [System.Windows.Forms.MessageBox]::Show(
         '祈福本地执行器已经在运行。请切换到现有窗口，不要重复启动。',
-        '祈福本地执行器 V9.6.8-rc.4',
+        '祈福本地执行器 V9.6.8-rc.5',
         'OK',
         'Information'
     ) | Out-Null
@@ -57,7 +57,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.8-rc.4（明确问题提示·验收候选）'
+$form.Text = '祈福本地执行器 V9.6.8-rc.5（人工编号·自动压缩上传）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -95,7 +95,7 @@ $form.Controls.Add($rootBox)
 $browseButton = Add-Button $form '选择目录' 755 13 105 36
 
 $photoGroup = New-Object System.Windows.Forms.GroupBox
-$photoGroup.Text = '照片业务（独立执行）'
+$photoGroup.Text = '照片业务（人工编号后，软件压缩并上传）'
 $photoGroup.Location = New-Object System.Drawing.Point(20,62)
 $photoGroup.Size = New-Object System.Drawing.Size(840,145)
 $form.Controls.Add($photoGroup)
@@ -107,8 +107,7 @@ $photoDate.Value = $photoDateDefault
 $photoDate.Location = New-Object System.Drawing.Point(92,27)
 $photoDate.Size = New-Object System.Drawing.Size(150,30)
 $photoGroup.Controls.Add($photoDate)
-$photoMainButton = Add-Button $photoGroup '正在初始化照片状态…' 255 24 245 42
-$photoRefreshButton = Add-Button $photoGroup '重新核对编号' 510 24 135 42
+$photoMainButton = Add-Button $photoGroup '一键处理照片' 255 24 390 42
 $openPhotoButton = Add-Button $photoGroup '打开照片目录' 655 24 165 42
 $photoStatus = Add-Label $photoGroup '尚未初始化。' 18 76 800 28
 $photoStatus.ForeColor = [System.Drawing.Color]::DimGray
@@ -120,19 +119,13 @@ $photoProgress.Size = New-Object System.Drawing.Size(802,18)
 $photoGroup.Controls.Add($photoProgress)
 
 $pendingGroup = New-Object System.Windows.Forms.GroupBox
-$pendingGroup.Text = '历史待复核业务（先查线上状态，完成后恢复上方日期）'
+$pendingGroup.Text = '历史未解决业务（线上查询，不含今天）'
 $pendingGroup.Location = New-Object System.Drawing.Point(20,218)
 $pendingGroup.Size = New-Object System.Drawing.Size(840,68)
 $form.Controls.Add($pendingGroup)
-$pendingStatus = Add-Label $pendingGroup '正在扫描本机待复核日期……' 18 28 385 28
+$pendingStatus = Add-Label $pendingGroup '点击按钮查询今天以前的待祈福及祈福中未上传照片业务。' 18 28 530 28
 $pendingStatus.ForeColor = [System.Drawing.Color]::DimGray
-$pendingPhotoPicker = New-Object System.Windows.Forms.ComboBox
-$pendingPhotoPicker.DropDownStyle = 'DropDownList'
-$pendingPhotoPicker.Location = New-Object System.Drawing.Point(415,23)
-$pendingPhotoPicker.Size = New-Object System.Drawing.Size(145,30)
-$pendingGroup.Controls.Add($pendingPhotoPicker)
-$pendingProcessButton = Add-Button $pendingGroup '复核线上并处理未完成项' 575 20 245 36
-$pendingProcessButton.Enabled = $false
+$pendingProcessButton = Add-Button $pendingGroup '检查历史未解决业务' 575 20 245 36
 
 $pdfGroup = New-Object System.Windows.Forms.GroupBox
 $pdfGroup.Text = 'PDF 业务（独立执行，不会自动关联照片日期）'
@@ -147,8 +140,7 @@ $pdfDate.Value = $pdfDateDefault
 $pdfDate.Location = New-Object System.Drawing.Point(92,27)
 $pdfDate.Size = New-Object System.Drawing.Size(150,30)
 $pdfGroup.Controls.Add($pdfDate)
-$pdfMainButton = Add-Button $pdfGroup '正在初始化 PDF 状态…' 255 24 245 42
-$pdfRefreshButton = Add-Button $pdfGroup '重新检测 PDF' 510 24 135 42
+$pdfMainButton = Add-Button $pdfGroup '一键处理 PDF' 255 24 390 42
 $openPdfButton = Add-Button $pdfGroup '打开 PDF 目录' 655 24 165 42
 $pdfStatus = Add-Label $pdfGroup '尚未初始化。' 18 76 800 28
 $pdfStatus.ForeColor = [System.Drawing.Color]::DimGray
@@ -168,8 +160,8 @@ $advancedPanel.Size = New-Object System.Drawing.Size(840,92)
 $advancedPanel.BorderStyle = 'FixedSingle'
 $advancedPanel.Visible = $false
 $form.Controls.Add($advancedPanel)
-$manualPhotoPrepare = Add-Button $advancedPanel '自动处理并编号' 8 8 180 34
-$manualPhotoScan = Add-Button $advancedPanel '照片：只预检' 198 8 155 34
+$manualPhotoPrepare = Add-Button $advancedPanel '人工编号照片压缩' 8 8 180 34
+$manualPhotoScan = Add-Button $advancedPanel '照片：检查人工编号' 198 8 155 34
 $manualPhotoUpload = Add-Button $advancedPanel '照片：只上传福单' 363 8 175 34
 $manualSceneUpload = Add-Button $advancedPanel '照片：只处理场景' 548 8 180 34
 $manualPdfInspect = Add-Button $advancedPanel 'PDF：只检查' 8 49 180 34
@@ -215,9 +207,6 @@ $script:activeProcess = $null
 $script:initQueue = New-Object System.Collections.Queue
 $script:initFailures = New-Object System.Collections.Generic.List[string]
 $script:photoNextAction = $null
-$script:pendingPhotoDates = @()
-$script:backlogOriginalPhotoDate = $null
-$script:backlogBusinessDate = $null
 $script:pdfWorkflowComplete = $false
 $script:pdfNextAction = 'export'
 $script:lastSummary = $null
@@ -319,6 +308,21 @@ function Test-PhotoInboxHasNewRaw([string]$inbox) {
         $_.BaseName -notmatch '^\d+\.\d+$'
     }).Count -gt 0
 }
+function Test-PhotoInboxHasPendingWork([string]$inbox, $manifest) {
+    if ([string]::IsNullOrWhiteSpace($inbox) -or -not (Test-Path -LiteralPath $inbox -PathType Container)) { return $false }
+    if ($manifest -and $manifest.manualNumberedMode -eq $true -and $null -ne $manifest.inputFileHashes) {
+        $current = @(Get-ChildItem -LiteralPath $inbox -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(jpg|jpeg|png)$' })
+        $savedNames = @($manifest.inputFileHashes.PSObject.Properties.Name)
+        if ($current.Count -ne $savedNames.Count) { return $true }
+        foreach ($file in $current) {
+            $property = $manifest.inputFileHashes.PSObject.Properties[$file.Name]
+            if ($null -eq $property) { return $true }
+            if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne ([string]$property.Value).ToLowerInvariant()) { return $true }
+        }
+        return $false
+    }
+    return Test-PhotoInboxHasNewRaw $inbox
+}
 function Test-PhotoRunHasResumeEvidence([string]$photoRunDir, $manifest, $checkpoint) {
     if ($manifest -and [int]$manifest.counts.missingBlessing -gt 0) { return $true }
     foreach ($receiptName in @('photo-prepare-receipt.json','photo-upload-receipt.json','scene-upload-receipt.json')) {
@@ -330,69 +334,31 @@ function Test-PhotoRunHasResumeEvidence([string]$photoRunDir, $manifest, $checkp
     }
     return $false
 }
-function Get-PendingPhotoBusinessDates {
-    $found = New-Object 'System.Collections.Generic.HashSet[string]'
-    if (-not (Validate-Root $false)) { return @() }
-    $businessRootPath = $rootBox.Text.Trim()
-    $reference = [DateTime]::Today
-    foreach ($folder in Get-ChildItem -LiteralPath $businessRootPath -Directory -ErrorAction SilentlyContinue) {
-        if ($folder.Name -notmatch '^(\d{1,2})月(\d{1,2})日$') { continue }
-        $month = [int]$Matches[1]; $day = [int]$Matches[2]
-        try { $date = [DateTime]::new($reference.Year,$month,$day) } catch { continue }
-        if ($date -gt $reference.AddDays(31)) { $date = $date.AddYears(-1) }
-        $inbox = Join-Path $folder.FullName '1'
-        if (-not (Test-Path -LiteralPath $inbox -PathType Container)) { continue }
-        # 自动发现只认真正的新增原图。纯数字福单和历史小数编号场景成品都不应把旧归档重新拉回待办。
-        $hasRaw = Test-PhotoInboxHasNewRaw $inbox
-        if ($hasRaw) { [void]$found.Add($date.ToString('yyyy-MM-dd')) }
-    }
-    $workdays = Join-Path $script:localStateRoot 'workdays'
-    if (Test-Path -LiteralPath $workdays -PathType Container) {
-        foreach ($workday in Get-ChildItem -LiteralPath $workdays -Directory -ErrorAction SilentlyContinue) {
-            if ($workday.Name -notmatch '^\d{4}-\d{2}-\d{2}$') { continue }
-            $photos = Join-Path $workday.FullName 'photos'
-            if (-not (Test-Path -LiteralPath $photos -PathType Container)) { continue }
-            $manifest = Read-JsonFile (Join-Path $photos 'photo-manifest.json')
-            $checkpoint = Read-JsonFile (Join-Path $photos 'ui-workflow-state.json')
-            $sceneReceipt = Read-JsonFile (Join-Path $photos 'scene-upload-receipt.json')
-            $onlineClosure = Read-JsonFile (Join-Path $photos 'photo-online-closure.json')
-            $sceneTerminal = $sceneReceipt -and $sceneReceipt.complete -eq $true -and $sceneReceipt.tabletCompletionVerified -eq $true
-            $onlineTerminal = $onlineClosure -and $onlineClosure.complete -eq $true -and [string]$onlineClosure.businessDate -eq $workday.Name
-            $terminalComplete = $sceneTerminal -or $onlineTerminal
-            $inbox = Get-PhotoInboxForBusinessDate $workday.Name
-            $hasNewRaw = Test-PhotoInboxHasNewRaw $inbox
-            $hasResumeEvidence = Test-PhotoRunHasResumeEvidence $photos $manifest $checkpoint
-            # 旧版本曾把历史 2.3、4.5、5.6 等场景成品和超规格旧成品误报为 failed/photo-prepare。
-            # 没有新增原图、待补编号或已提交阶段回执时，该失败断点不是可执行待办。
-            # 新增原图始终重新打开业务；否则线上零待办复核回执优先于旧断点。
-            if ($hasNewRaw -or (-not $terminalComplete -and $hasResumeEvidence)) { [void]$found.Add($workday.Name) }
-        }
-    }
-    return @($found | Sort-Object)
-}
 function Refresh-PendingPhotoBar {
-    $selected = [string]$pendingPhotoPicker.SelectedItem
-    $pendingPhotoPicker.Items.Clear()
-    foreach ($dateText in @($script:pendingPhotoDates)) { [void]$pendingPhotoPicker.Items.Add($dateText) }
-    if (@($script:pendingPhotoDates).Count -eq 0) {
-        $pendingStatus.Text = '没有发现需要复核的历史照片业务。'
-        $pendingStatus.ForeColor = [System.Drawing.Color]::DarkGreen
-        $pendingProcessButton.Enabled = $false
+    $receipt = Read-JsonFile (Join-Path (Join-Path $script:localStateRoot 'historical-backlog') 'latest.json')
+    if ($null -eq $receipt) {
+        $pendingStatus.Text = '点击按钮查询今天以前的待祈福及祈福中未上传照片业务。'
+        $pendingStatus.ForeColor = [System.Drawing.Color]::DimGray
+        $pendingProcessButton.Enabled = -not $script:running
         return
     }
-    $target = if (@($script:pendingPhotoDates) -contains $selected) { $selected } else { [string]$script:pendingPhotoDates[0] }
-    $pendingPhotoPicker.SelectedItem = $target
-    $count = @($script:pendingPhotoDates).Count
-    $preview = (@($script:pendingPhotoDates) | Select-Object -First 3) -join '、'
-    if ($count -gt 3) { $preview += '……' }
-    $pendingStatus.Text = "发现 $count 个本机待复核日期：$preview；先查线上状态再决定是否处理"
-    $pendingStatus.ForeColor = [System.Drawing.Color]::DarkOrange
+    $checkedAt = if ($receipt.checkedAt) { ([DateTime]$receipt.checkedAt).ToLocalTime().ToString('MM-dd HH:mm') } else { '最近一次' }
+    if ($receipt.complete -eq $true) {
+        $pendingStatus.Text = "$checkedAt 线上检查：今天以前没有历史未解决业务。"
+        $pendingStatus.ForeColor = [System.Drawing.Color]::DarkGreen
+    } else {
+        $dates = @($receipt.businessDates)
+        $preview = ($dates | Select-Object -First 3) -join '、'
+        if ($dates.Count -gt 3) { $preview += '……' }
+        $dateText = if ($preview) { "；涉及 $preview" } else { '' }
+        $pendingStatus.Text = "$checkedAt 发现 $([int]$receipt.totalCount) 条：待祈福 $([int]$receipt.pendingPrayerCount) 条，祈福中未上传照片 $([int]$receipt.prayingWithoutPhotoCount) 条$dateText。"
+        $pendingStatus.ForeColor = [System.Drawing.Color]::DarkOrange
+    }
     $pendingProcessButton.Enabled = -not $script:running
 }
 function Refresh-PendingPhotoDates {
-    $script:pendingPhotoDates = @(Get-PendingPhotoBusinessDates)
     Refresh-PendingPhotoBar
-    return @($script:pendingPhotoDates).Count
+    return 0
 }
 function Test-NeedAutomaticPdfInspect {
     if (-not (Validate-Root $false)) { return $false }
@@ -433,8 +399,10 @@ function Get-ActionLabel([string]$action) {
     switch ($action) {
         'cleanup-local-state' { return '本机空间清理' }
         'photo-prepare' { return '照片处理与编号' }
+        'photo-manual-prepare' { return '人工编号照片压缩' }
         'photo-recheck' { return '照片编号只读复核' }
         'photo-online-recheck' { return '照片线上闭环只读复核' }
+        'historical-backlog-check' { return '历史未解决业务线上检查' }
         'photo-scan' { return '照片预检' }
         'photo-upload' { return '福单图上传' }
         'photo-scenes' { return '场景图与牌位批量完成' }
@@ -480,12 +448,9 @@ function Set-Running([bool]$value) {
     $browseButton.Enabled = -not $value
     $photoDate.Enabled = -not $value
     $pdfDate.Enabled = -not $value
-    $pendingPhotoPicker.Enabled = -not $value
-    $pendingProcessButton.Enabled = (-not $value -and @($script:pendingPhotoDates).Count -gt 0)
+    $pendingProcessButton.Enabled = -not $value
     $photoMainButton.Enabled = -not $value
     $pdfMainButton.Enabled = -not $value
-    $photoRefreshButton.Enabled = -not $value
-    $pdfRefreshButton.Enabled = -not $value
     $refreshAllButton.Enabled = -not $value
     foreach ($button in @($manualPhotoPrepare,$manualPhotoScan,$manualPhotoUpload,$manualSceneUpload,$manualPdfInspect,$manualPdfExport,$manualState,$credentialButton)) { $button.Enabled = -not $value }
     Update-CredentialButtons
@@ -495,7 +460,7 @@ function Set-PhotoResult([string]$text, [System.Drawing.Color]$color, [int]$prog
     $photoStatusToolTip.SetToolTip($photoStatus,$text)
     $photoStatus.ForeColor = $color
     $photoProgress.Value = [Math]::Max(0,[Math]::Min(100,$progress))
-    $photoMainButton.Text = $buttonText
+    $photoMainButton.Text = '一键处理照片'
     $photoMainButton.Enabled = ($enabled -and -not $script:running)
     $script:photoNextAction = $nextAction
 }
@@ -528,7 +493,7 @@ function Refresh-PhotoCard {
     $manifest = Read-JsonFile (Join-Path $photoRunDir 'photo-manifest.json')
     $checkpoint = Read-JsonFile (Join-Path $photoRunDir 'ui-workflow-state.json')
     if ($null -eq $manifest) {
-        Set-PhotoResult '尚未完成照片初始化检测。' ([System.Drawing.Color]::DimGray) 0 '一键处理照片' $true 'photo-prepare'
+        Set-PhotoResult '尚未检查人工编号照片。请先把福单照片改成纯数字文件名。' ([System.Drawing.Color]::DimGray) 0 '压缩并上传照片' $true 'photo-manual-prepare'
         return
     }
     $allCount = [int]$manifest.counts.allImages
@@ -542,7 +507,7 @@ function Refresh-PhotoCard {
         return
     }
     $currentInbox = Get-PhotoInboxForBusinessDate $date
-    $hasNewRaw = Test-PhotoInboxHasNewRaw $currentInbox
+    $hasNewRaw = Test-PhotoInboxHasPendingWork $currentInbox $manifest
     $hasResumeEvidence = Test-PhotoRunHasResumeEvidence $photoRunDir $manifest $checkpoint
     $onlineClosure = Read-JsonFile (Join-Path $photoRunDir 'photo-online-closure.json')
     if ($onlineClosure -and $onlineClosure.complete -eq $true -and [string]$onlineClosure.businessDate -eq $date -and -not $hasNewRaw) {
@@ -571,13 +536,12 @@ function Refresh-PhotoCard {
     }
     if ($sceneReceipt -and $sceneReceipt.partialComplete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash -and ($missingCount -gt 0 -or $manualIssueCount -gt 0)) {
         $completedOrders = [int]$sceneReceipt.completedOrderCount
-        Set-PhotoResult "$date 已确定福单图 $blessingCount 张及其 $completedOrders 条订单已分批完成。具体问题：$pendingPhotoText" ([System.Drawing.Color]::DarkOrange) 78 '核对并处理未匹配照片' $true 'photo-prepare'
+        Set-PhotoResult "$date 已确定福单图 $blessingCount 张及其 $completedOrders 条订单已分批完成。具体问题：$pendingPhotoText" ([System.Drawing.Color]::DarkOrange) 78 '检查人工编号照片' $true 'photo-manual-prepare'
         return
     }
     if ($blockingErrorCount -gt 0 -or $manifest.blessingReady -ne $true) {
         $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
-        $pageMatch = Get-LocalPageMatchStatus $photoRunDir
-        Set-PhotoResult "$prefix 具体问题：$firstPhotoIssue 本地编号兜底：$pageMatch。" ([System.Drawing.Color]::DarkOrange) 15 '一键处理照片' $true 'photo-prepare'
+        Set-PhotoResult "$prefix 具体问题：$firstPhotoIssue 请先人工完成编号，软件只负责压缩和上传，不读取 PDF。" ([System.Drawing.Color]::DarkOrange) 15 '检查并压缩照片' $true 'photo-manual-prepare'
         return
     }
     $uploadReceipt = Read-JsonFile (Join-Path $photoRunDir 'photo-upload-receipt.json')
@@ -588,7 +552,7 @@ function Refresh-PhotoCard {
         return
     }
     if ($sceneManualIssueCount -gt 0) {
-        Set-PhotoResult "$date 已上传 $blessingCount 张已确认福单图。具体问题：$firstPhotoIssue" ([System.Drawing.Color]::DarkOrange) 62 '补齐场景后继续本日期' $true 'photo-prepare'
+        Set-PhotoResult "$date 已上传 $blessingCount 张人工编号福单图。具体问题：$firstPhotoIssue" ([System.Drawing.Color]::DarkOrange) 62 '补齐并检查照片' $true 'photo-manual-prepare'
         return
     }
     if ($missingCount -gt 0) {
@@ -608,7 +572,7 @@ function Refresh-PdfCard {
     $copyButton.Enabled = $false
     if (-not (Validate-Root $false)) {
         $pdfStatus.Text = '业务目录无效。'; $pdfStatus.ForeColor = [System.Drawing.Color]::DarkRed
-        $pdfProgress.Value = 0; $pdfMainButton.Text = '请先选择目录'; $pdfMainButton.Enabled = $false
+        $pdfProgress.Value = 0; $pdfMainButton.Text = '一键处理 PDF'; $pdfMainButton.Enabled = $false
         return
     }
     $date = $pdfDate.Value.ToString('yyyy-MM-dd')
@@ -631,41 +595,41 @@ function Refresh-PdfCard {
         $script:pdfNextAction = 'export'
         $pdfStatus.Text = "$date 已有 PDF，但线上新增福单/牌位 $regularPending 条；将只导出新增订单并延续当天编号。"
         $pdfStatus.ForeColor = [System.Drawing.Color]::DarkOrange
-        $pdfProgress.Value = 85; $pdfMainButton.Text = '继续 PDF：处理同日补单'; $pdfMainButton.Enabled = -not $script:running
+        $pdfProgress.Value = 85; $pdfMainButton.Text = '一键处理 PDF'; $pdfMainButton.Enabled = -not $script:running
         return
     }
     if ($complete -and $renewalHasNewOrders) {
         $script:pdfNextAction = 'export'
         $pdfStatus.Text = "$date 续费清单较上次新增；将只导出尚未覆盖的订单并延续红/黄纸编号。"
         $pdfStatus.ForeColor = [System.Drawing.Color]::DarkOrange
-        $pdfProgress.Value = 85; $pdfMainButton.Text = '继续 PDF：处理续费补单'; $pdfMainButton.Enabled = -not $script:running
+        $pdfProgress.Value = 85; $pdfMainButton.Text = '一键处理 PDF'; $pdfMainButton.Enabled = -not $script:running
         return
     }
     if ($complete -and $renewalAwaitingStatus) {
         $script:pdfNextAction = 'renewal-state-change'
         $pdfStatus.Text = "$date 续费 PDF 已校验，但自动状态变更曾中断；可安全补做同一批代理已处理。"
         $pdfStatus.ForeColor = [System.Drawing.Color]::DarkOrange
-        $pdfProgress.Value = 95; $pdfMainButton.Text = '继续 PDF：补做续费状态'; $pdfMainButton.Enabled = -not $script:running
+        $pdfProgress.Value = 95; $pdfMainButton.Text = '一键处理 PDF'; $pdfMainButton.Enabled = -not $script:running
         return
     }
     if ($complete -and $renewalPending -gt 0) {
         $script:pdfNextAction = 'export'
         $pdfStatus.Text = "$date 常规 PDF 已完成；发现续费 $renewalPending 条未处理，将按红/黄纸顺延编号导出。"
         $pdfStatus.ForeColor = [System.Drawing.Color]::DarkOrange
-        $pdfProgress.Value = 85; $pdfMainButton.Text = '继续 PDF：处理续费'; $pdfMainButton.Enabled = -not $script:running
+        $pdfProgress.Value = 85; $pdfMainButton.Text = '一键处理 PDF'; $pdfMainButton.Enabled = -not $script:running
         return
     }
     if ($complete) {
         $script:pdfWorkflowComplete = $true
         $pdfStatus.Text = "$date PDF 业务已完成：本地 $($localPdfs.Count) 个 PDF，线上完成状态已确认。"
         $pdfStatus.ForeColor = [System.Drawing.Color]::DarkGreen
-        $pdfProgress.Value = 100; $pdfMainButton.Text = 'PDF 业务已完成'; $pdfMainButton.Enabled = $false
+        $pdfProgress.Value = 100; $pdfMainButton.Text = '一键处理 PDF'; $pdfMainButton.Enabled = $false
         return
     }
     if ((Get-BeijingHour) -lt 10) {
         $pdfStatus.Text = "$date PDF 尚未处理；还不到北京时间 10 点。"
         $pdfStatus.ForeColor = [System.Drawing.Color]::DarkOrange
-        $pdfProgress.Value = 10; $pdfMainButton.Text = '北京时间10点后可执行'; $pdfMainButton.Enabled = $false
+        $pdfProgress.Value = 10; $pdfMainButton.Text = '一键处理 PDF'; $pdfMainButton.Enabled = $false
         return
     }
     $pendingText = ''
@@ -675,7 +639,7 @@ function Refresh-PdfCard {
         $pdfStatus.Text = "$prefix 本地已有 $($localPdfs.Count) 个 PDF$pendingText；将校验凭据并从未完成环节续跑。"
         $pdfStatus.ForeColor = [System.Drawing.Color]::DarkOrange
         $pdfProgress.Value = if ($state -and $state.pdfVerified -eq $true) { 80 } else { 55 }
-        $pdfMainButton.Text = '继续 PDF：校验并完成'
+        $pdfMainButton.Text = '一键处理 PDF'
     } else {
         $pdfStatus.Text = "$prefix 初始化完成$pendingText；可以执行 PDF 导出闭环。"
         $pdfStatus.ForeColor = [System.Drawing.Color]::DarkBlue
@@ -737,7 +701,9 @@ function Start-Runner([string]$action, [bool]$authorized, [string]$flow, [bool]$
     $globalStatus.Text = "正在执行：$(Get-ActionLabel $action)。已完成阶段会自动跳过。"
     $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
     Append-Log "[$(Get-Date -Format HH:mm:ss)] 开始：$(Get-ActionLabel $action)"
-    if ($action -eq 'photo-prepare' -or $action -eq 'photo-recheck') {
+    if ($action -eq 'photo-manual-prepare') {
+        Append-Log "[$(Get-Date -Format HH:mm:ss)] 人工编号模式：不运行 OCR，不读取或比对 PDF；只校验文件名、压缩规格并进入后台上传。"
+    } elseif ($action -eq 'photo-prepare' -or $action -eq 'photo-recheck') {
         Append-Log "[$(Get-Date -Format HH:mm:ss)] 本轮仅使用本地 OCR 与 PDF 页面匹配；不会读取 API 密钥、不会上传图片。如仍未决将明确停止，不会改名或上传。"
     }
     [void]$script:activeProcess.Start()
@@ -747,12 +713,7 @@ function Start-NextInitialization {
     if ($script:initQueue.Count -eq 0) {
         Refresh-AllCards
         if ($script:initFailures.Count -eq 0) {
-            $pendingCount = @($script:pendingPhotoDates).Count
-            $globalStatus.Text = if ($pendingCount -gt 0) {
-                "初始化完成：发现 $pendingCount 个本机待复核日期，已列入独立任务栏；主日期保持 $($photoDate.Value.ToString('yyyy-MM-dd'))。"
-            } else {
-                '初始化完成。照片和 PDF 是两个独立任务，请按需要点击对应的一键处理。'
-            }
+            $globalStatus.Text = '初始化完成。照片和 PDF 是两个独立任务；历史未解决业务只在点击检查按钮时查询线上。'
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
         } else {
             $globalStatus.Text = "初始化完成，但有 $($script:initFailures.Count) 个检查未通过；对应卡片会显示可继续位置。"
@@ -836,6 +797,17 @@ function Complete-Runner([int]$code) {
         Start-NextInitialization
         return
     }
+    if ($completedFlow -eq 'historical-backlog') {
+        Refresh-PendingPhotoBar
+        if ($code -eq 0) {
+            $globalStatus.Text = $pendingStatus.Text
+            $globalStatus.ForeColor = $pendingStatus.ForeColor
+        } else {
+            $globalStatus.Text = '历史未解决业务线上检查失败；没有修改平台，请检查登录或网络后重试。'
+            $globalStatus.ForeColor = [System.Drawing.Color]::DarkRed
+        }
+        return
+    }
     if ($completedFlow -eq 'backlog') {
         if ($code -ne 0) {
             $failedDate = $script:backlogBusinessDate
@@ -878,7 +850,7 @@ function Complete-Runner([int]$code) {
         }
         Write-WorkflowCheckpoint 'photo' 'stage-completed' $completedAction 0
         Refresh-PhotoCard
-        if ($script:photoNextAction -eq 'photo-prepare') {
+        if ($script:photoNextAction -eq 'photo-manual-prepare') {
             Write-WorkflowCheckpoint 'photo' 'waiting-supplement' $completedAction 0
             $waitingDate = $script:backlogBusinessDate
             $specificPhotoProblem = $photoStatus.Text
@@ -908,7 +880,7 @@ function Complete-Runner([int]$code) {
         }
         Write-WorkflowCheckpoint 'photo' 'stage-completed' $completedAction 0
         Refresh-PhotoCard
-        if ($script:photoNextAction -eq 'photo-prepare') {
+        if ($script:photoNextAction -eq 'photo-manual-prepare') {
             Write-WorkflowCheckpoint 'photo' 'waiting-supplement' $completedAction 0
             $globalStatus.Text = "现有照片及其已上传订单已分批完成。$($photoStatus.Text)再次点击照片主按钮只处理新增图片和剩余订单。"
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
@@ -967,23 +939,16 @@ $photoMainButton.Add_Click({
     }
 })
 $pendingProcessButton.Add_Click({
-    if ($script:running -or $null -eq $pendingPhotoPicker.SelectedItem) { return }
-    $selectedDate = [DateTime]::ParseExact([string]$pendingPhotoPicker.SelectedItem,'yyyy-MM-dd',[Globalization.CultureInfo]::InvariantCulture)
-    $script:backlogOriginalPhotoDate = $photoDate.Value
-    $script:backlogBusinessDate = $selectedDate.ToString('yyyy-MM-dd')
-    $script:running = $true
-    try { $photoDate.Value = $selectedDate } finally { $script:running = $false }
-    $globalStatus.Text = "正在只读复核历史日期 $($script:backlogBusinessDate) 的线上福单、供灯和牌位状态，不会覆盖上方默认日期。"
+    if ($script:running) { return }
+    $globalStatus.Text = '正在查询今天以前的历史未解决业务：待祈福，以及祈福中但尚未上传照片；今天的数据不计入。'
     $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
-    Start-Runner 'photo-online-recheck' $false 'backlog' $true
+    Start-Runner 'historical-backlog-check' $false 'historical-backlog' $true
 })
 $pdfMainButton.Add_Click({
     if (-not $script:running) {
         Start-Runner $script:pdfNextAction $true 'pdf' $true
     }
 })
-$photoRefreshButton.Add_Click({ Start-Runner 'photo-recheck' $false 'manual' $true })
-$pdfRefreshButton.Add_Click({ Start-Initialization 'pdf' })
 $refreshAllButton.Add_Click({ Start-Initialization 'all' })
 
 $browseButton.Add_Click({
@@ -1022,7 +987,7 @@ $advancedToggle.Add_Click({
     Update-ResponsiveLayout
 })
 
-$manualPhotoPrepare.Add_Click({ Start-Runner 'photo-prepare' $true 'manual' $true })
+$manualPhotoPrepare.Add_Click({ Start-Runner 'photo-manual-prepare' $true 'manual' $true })
 $manualPhotoScan.Add_Click({ Start-Runner 'photo-scan' $false 'manual' $true })
 $manualPhotoUpload.Add_Click({ Start-Runner 'photo-upload' $true 'manual' $true })
 $manualSceneUpload.Add_Click({ Start-Runner 'photo-scenes' $true 'manual' $true })

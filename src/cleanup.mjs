@@ -106,6 +106,8 @@ function scrubPurgedBackupReferences(photoDirectory, nowIso) {
   receipt.cleanupPending = [];
   receipt.backupPurgedAt = nowIso;
   receipt.files = Array.isArray(receipt.files) ? receipt.files.map(({ backup, ...item }) => item) : receipt.files;
+  receipt.standardizedUnresolvedFiles = Array.isArray(receipt.standardizedUnresolvedFiles)
+    ? receipt.standardizedUnresolvedFiles.map(({ backup, ...item }) => item) : receipt.standardizedUnresolvedFiles;
   receipt.duplicates = Array.isArray(receipt.duplicates) ? receipt.duplicates.map(({ backup, ...item }) => item) : receipt.duplicates;
   writeJsonAtomic(receiptFile, receipt);
 }

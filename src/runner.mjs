@@ -8,6 +8,7 @@ import { Timing } from './timing.mjs';
 import { calculateQuantities, normalizeText, venueMessage } from './quantity.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolder as photoDayFolder, scanPhotoWorkday, splitUploadBatches } from './photos.mjs';
 import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs';
+import {planManualNumberedPreparation,scanManualNumberedWorkday} from './manual-photo-workflow.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,canReusePdfIndex,createPhotoInputBinding} from './recognition-provenance.mjs';
 import {mustRebuildPhotoPlan,assertWritePlanReady,photoFilesMatchPlan,photoFilesExactlyMatchPlan,trustedPreparedOutputs,retainVerifiedUploadEvidence,assertPhotoFilesMatchPlan} from './photo-plan-gate.mjs';
 import {reviewExcludedPhotoNames} from './photo-review-isolation.mjs';
@@ -15,6 +16,7 @@ import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
 import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
+import {beijingDateToken,buildHistoricalBacklogReport,HISTORICAL_RANGE_START} from './historical-backlog.mjs';
 
 function parseArgs(argv) { const out = { action: argv[2] }; for (let i=3;i<argv.length;i+=2) out[argv[i].replace(/^--/,'')] = argv[i+1]; return out; }
 function atomic(file, value) {
@@ -258,8 +260,43 @@ if (args.action === 'cleanup-local-state') {
 const pdfDate = args['pdf-date']; const photoDate = args['photo-date'];
 const loginTimeoutMs = Number(args['login-timeout-ms'] || 10 * 60 * 1000);
 const siteOptions = { loginTimeoutMs, credentialPath, credentialHelperPath };
-if (!photoDate && ['scan','photo-prepare','photo-recheck','photo-online-recheck','photo-scan','photo-upload','photo-scenes'].includes(args.action)) { fail('缺少照片业务日期。'); process.exit(2); }
+if (!photoDate && ['scan','photo-manual-prepare','photo-prepare','photo-recheck','photo-online-recheck','photo-scan','photo-upload','photo-scenes'].includes(args.action)) { fail('缺少照片业务日期。'); process.exit(2); }
 if (!pdfDate && ['scan','inspect','export','state-change','renewal-state-change'].includes(args.action)) { fail('缺少 PDF 业务日期。'); process.exit(2); }
+
+if (args.action === 'historical-backlog-check') {
+  const asOfDate=beijingDateToken();
+  const reportDir=path.join(localStateRoot,'historical-backlog');
+  fs.mkdirSync(reportDir,{recursive:true});
+  const timing=new Timing(reportDir,'photo-only',asOfDate);
+  let site;
+  try {
+    timing.start('date-resolution');
+    log(`正在查询 ${HISTORICAL_RANGE_START} 至 ${asOfDate} 之前的历史未解决业务；北京时间今天的数据明确排除。`);
+    timing.end();
+    timing.start('order-processing');
+    site=new PrayerSite(reportDir,timing,log,siteOptions);
+    await site.open();
+    const rows=await site.queryHistoricalUnresolved(asOfDate,HISTORICAL_RANGE_START);
+    const report=buildHistoricalBacklogReport({asOfDate,...rows});
+    atomic(path.join(reportDir,'latest.json'),report);
+    timing.end();
+    if(report.complete)log('历史线上检查完成：今天以前没有“待祈福”或“祈福中但福单图未上传”的遗留业务。');
+    else {
+      const dates=report.businessDates.length?`，涉及日期 ${report.businessDates.join('、')}`:'';
+      log(`历史线上检查发现 ${report.totalCount} 条未解决业务：待祈福 ${report.pendingPrayerCount} 条，祈福中但福单图未上传 ${report.prayingWithoutPhotoCount} 条${dates}。今天的数据未计入。`);
+    }
+    await site.close(); site=null;
+    timing.finish();
+    process.exit(0);
+  } catch(error) {
+    fail(cleanErrorMessage(error));
+    const failedPhase=timing.current?.phase??null;
+    try { if(timing.current)timing.end('failed',String(error.message).slice(0,80)); timing.event('blocked',failedPhase,0); } catch {}
+    if(site)await site.close().catch(()=>{});
+    try { timing.finish(); } catch {}
+    process.exit(1);
+  }
+}
 
 if (args.action === 'export') {
   const beijingHour = Number(new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Shanghai',hour:'2-digit',hour12:false}).format(new Date()));
@@ -383,7 +420,7 @@ if (args.action === 'photo-online-recheck') {
   }
 }
 
-if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.action === 'photo-scan' || args.action === 'photo-upload' || args.action === 'photo-scenes') {
+if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.action === 'photo-scan' || args.action === 'photo-upload' || args.action === 'photo-scenes') {
   const photoRunDir = path.join(workdaysRoot,photoDate,'photos');
   fs.mkdirSync(photoRunDir, { recursive:true });
   const photoTiming = new Timing(photoRunDir,'photo-only',photoDate);
@@ -392,6 +429,25 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
     photoTiming.start('date-resolution');
     log(`照片业务日期：${photoDate}。只处理该日期目录，不自动关联 PDF 业务日期。`);
     photoTiming.end();
+    if(args.action==='photo-manual-prepare') {
+      if(args.authorized!=='yes')throw Error('人工编号照片规格处理会修改照片目录，缺少本次按钮授权。');
+      const photoDir=path.join(photoDayFolder(root,photoDate),'1');
+      photoTiming.start('photo-manual-prepare');
+      const plan=await planManualNumberedPreparation({photoDir,date:photoDate});
+      atomic(path.join(photoRunDir,'photo-manual-prepare-plan.json'),plan);
+      photoTiming.setCount('photo_count',plan.photoInputBinding.files.length);
+      photoTiming.setCount('pdf_page_count',0);
+      if(!plan.safeToApply) {
+        for(const issue of plan.issues)log(`需人工处理：${issue}`);
+        throw Error('人工编号照片检查未通过；未压缩、未打开后台、未上传。');
+      }
+      if(plan.assignments.length) {
+        const receipt=await applyPhotoPreparation(plan,photoRunDir);
+        atomic(path.join(photoRunDir,'photo-prepare-receipt.json'),receipt);
+        log(`人工编号照片规格处理完成：${receipt.processedCount} 张已统一为 1800×1350、JPG、且不超过 1.5 MiB；编号保持不变。`);
+      } else log('人工编号照片已经全部符合 1800×1350、JPG、且不超过 1.5 MiB，本次无需重复压缩。');
+      photoTiming.end();
+    }
     if (args.action === 'photo-prepare' || args.action === 'photo-recheck') {
       const readOnlyRecheck = args.action === 'photo-recheck';
       if (!readOnlyRecheck && args.authorized !== 'yes') throw new Error('自动处理和编号会修改照片目录，缺少本次按钮授权。');
@@ -444,7 +500,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
             pendingIssues:plan.pendingIssues,
             missingExpected:plan.missingExpected,
             manualReview:plan.manualReview || {},
-            nextStep:'已确定编号的福单会继续上传；人工补录或移除未决图片后再次点击照片主按钮。',
+            nextStep:'已确定编号的福单会继续上传；未识别但无复核冲突的照片仍会统一像素和体积，人工补录编号后再次点击照片主按钮。',
           });
         } else if (!readOnlyRecheck && fs.existsSync(manualReviewFile)) fs.rmSync(manualReviewFile,{force:true});
         photoTiming.setCount('photo_count',imageFiles.length);
@@ -477,83 +533,80 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
           throw new Error('自动处理方案未通过一一对应校验，NAS 照片没有被修改。');
         }
         for (const issue of plan.pendingIssues || []) log(`待人工处理（不阻断已确认照片）：${issue}`);
-        if (plan.assignments.length) {
+        if (plan.assignments.length || plan.unresolvedStandardizations?.length) {
           photoTiming.start('photoshop');
           const receipt = await applyPhotoPreparation(plan,photoRunDir);
           atomic(preparationReceiptFile,receipt);
           photoTiming.end();
-          log(`自动处理和编号完成：福单图 ${receipt.blessingCount} 张，供灯场景图 ${receipt.lampSceneCount} 张，供水场景图 ${receipt.waterSceneCount} 张；原图备份已保存。${plan.missingExpected.length ? ` 仍有 ${plan.missingExpected.length} 个 PDF 编号待匹配，请核对未识别原图；不阻断现有福单图上传。` : ''}`);
+          log(`自动处理和编号完成：福单图 ${receipt.blessingCount} 张，供灯场景图 ${receipt.lampSceneCount} 张，供水场景图 ${receipt.waterSceneCount} 张，未识别但已统一规格 ${receipt.unresolvedStandardizedCount || 0} 张；原图备份已保存。${plan.missingExpected.length ? ` 仍有 ${plan.missingExpected.length} 个 PDF 编号待匹配，请核对未识别原图；这些照片不会猜号或上传。` : ''}`);
         } else {
           log('照片已经是规范名称，本次没有重复处理或重复改名。');
         }
       }
     }
-    photoTiming.start('pdf-index');
+    const manualNumberedMode=!['photo-prepare','photo-recheck'].includes(args.action);
+    photoTiming.start(manualNumberedMode?'photo-manual-scan':'pdf-index');
     const photoInbox = path.join(photoDayFolder(root, photoDate), '1');
     const photoFileNames = fs.existsSync(photoInbox)
       ? fs.readdirSync(photoInbox).filter((name) => /\.(?:jpe?g|png)$/i.test(name)) : [];
     const currentPhotoInputBinding=createPhotoInputBinding(photoInbox,photoFileNames.map(name=>path.join(photoInbox,name)));
     const quickImageCount = photoFileNames.length;
-    log(`照片目录快速清点：发现 ${quickImageCount} 张图片。初始化预检不读取未编号原图做 OCR；正式识别和编号由照片处理阶段完成。`);
-    const cachedPlanFile = path.join(photoRunDir,'photo-prepare-plan.json');
-    let cachedPhotoPlan = readJson(cachedPlanFile,null);
-    const bindingFolder = photoDayFolder(root,photoDate);
-    const currentPdfFiles = fs.existsSync(bindingFolder) ? fs.readdirSync(bindingFolder)
-      .filter(name=>/\.pdf$/i.test(name)).map(name=>path.join(bindingFolder,name)) : [];
-    const currentPdfBinding = createPdfIndexBinding(photoDate,currentPdfFiles,recognitionSourceFingerprint(appRoot));
-    const indexReusable = canReusePdfIndex(cachedPhotoPlan,currentPdfBinding);
-    if(cachedPhotoPlan&&!indexReusable) log('本地编号索引缺少有效凭据，或 PDF 文件/识别规则已变化，不能复用旧编号；已保留上传回执。');
-    const writePhotoAction = ['photo-upload','photo-scenes'].includes(args.action);
-    const preparationReceipt = writePhotoAction ? readJson(path.join(photoRunDir,'photo-prepare-receipt.json'),null) : null;
-    const photoIdentityMatches = !writePhotoAction || photoFilesMatchPlan(cachedPhotoPlan,preparationReceipt,
-      currentPhotoInputBinding.files);
-    if(writePhotoAction&&indexReusable&&!photoIdentityMatches) log('照片新增、替换或缺少处理哈希凭据，将重新核对，不沿用同名照片的旧识别结论。');
-    let allowedBlessingNumbers = indexReusable && photoIdentityMatches
-      && Array.isArray(cachedPhotoPlan.allowedBlessingNumbers)
-      ? new Set(cachedPhotoPlan.allowedBlessingNumbers.map(Number).filter(Number.isInteger))
-      : null;
-    // Old or changed plans need read-only recognition before actual writes.
-    // Raw-image initialization stays lightweight; it is not an upload permit.
-    const standardizedOnly = fs.existsSync(photoInbox) && fs.readdirSync(photoInbox)
-      .filter((name) => /\.(?:jpe?g|png)$/i.test(name))
-      .every((name) => /^\d+$/.test(path.parse(name).name) || /^2\.[1256]$/.test(path.parse(name).name));
-    if (mustRebuildPhotoPlan({indexReusable:allowedBlessingNumbers!==null,standardizedOnly,imageCount:quickImageCount,action:args.action})) {
-      const [year, month, day] = photoDate.split('-').map(Number);
-      log('检测到旧版或已失效照片计划，正在只读重新核对本日 PDF、编号和正文归属；不会按旧断点直接上传。');
-      cachedPhotoPlan = await planPhotoPreparation({
-        appRoot,folder:path.join(root,`${month}月${day}日`),photoDir:photoInbox,date:photoDate,
-        expectedPrefix:`${String(year).slice(-2)}${month}`,workDir:photoRunDir,onProgress:(message)=>log(message),
-      });
-      atomic(cachedPlanFile,cachedPhotoPlan);
-      allowedBlessingNumbers = new Set((cachedPhotoPlan.allowedBlessingNumbers || []).map(Number).filter(Number.isInteger));
-    }
-    assertWritePlanReady(cachedPhotoPlan,{imageCount:quickImageCount,action:args.action});
-    let expectedNumberModes = null;
-    if (allowedBlessingNumbers && Array.isArray(cachedPhotoPlan?.pdfPages)) {
-      const indexedModes = new Map();
-      let modeIndexComplete = true;
-      for (const page of cachedPhotoPlan.pdfPages) {
-        const number = Number(page.number);
-        if (!Number.isInteger(number) || !allowedBlessingNumbers.has(number)) continue;
-        const pdfName = String(page.pdfName || path.basename(page.pdf || ''));
-        const mode = /供水/.test(pdfName) ? 'water' : page.portrait ? 'tablet' : 'lamp';
-        if (indexedModes.has(number) && indexedModes.get(number) !== mode) modeIndexComplete = false;
-        indexedModes.set(number,mode);
+    let manifest;
+    if(manualNumberedMode) {
+      log(`人工编号模式：发现 ${quickImageCount} 张图片；不运行 OCR，不读取或比对 PDF。`);
+      manifest=await scanManualNumberedWorkday(root,photoDate);
+    } else {
+      log(`照片目录快速清点：发现 ${quickImageCount} 张图片。初始化预检不读取未编号原图做 OCR；正式识别和编号由照片处理阶段完成。`);
+      const cachedPlanFile = path.join(photoRunDir,'photo-prepare-plan.json');
+      let cachedPhotoPlan = readJson(cachedPlanFile,null);
+      const bindingFolder = photoDayFolder(root,photoDate);
+      const currentPdfFiles = fs.existsSync(bindingFolder) ? fs.readdirSync(bindingFolder)
+        .filter(name=>/\.pdf$/i.test(name)).map(name=>path.join(bindingFolder,name)) : [];
+      const currentPdfBinding = createPdfIndexBinding(photoDate,currentPdfFiles,recognitionSourceFingerprint(appRoot));
+      const indexReusable = canReusePdfIndex(cachedPhotoPlan,currentPdfBinding);
+      const writePhotoAction = ['photo-upload','photo-scenes'].includes(args.action);
+      const preparationReceipt = writePhotoAction ? readJson(path.join(photoRunDir,'photo-prepare-receipt.json'),null) : null;
+      const photoIdentityMatches = !writePhotoAction || photoFilesMatchPlan(cachedPhotoPlan,preparationReceipt,currentPhotoInputBinding.files);
+      let allowedBlessingNumbers = indexReusable && photoIdentityMatches && Array.isArray(cachedPhotoPlan?.allowedBlessingNumbers)
+        ? new Set(cachedPhotoPlan.allowedBlessingNumbers.map(Number).filter(Number.isInteger)):null;
+      const standardizedOnly = fs.existsSync(photoInbox) && fs.readdirSync(photoInbox)
+        .filter((name) => /\.(?:jpe?g|png)$/i.test(name))
+        .every((name) => /^\d+$/.test(path.parse(name).name) || /^2\.[1256]$/.test(path.parse(name).name));
+      if (mustRebuildPhotoPlan({indexReusable:allowedBlessingNumbers!==null,standardizedOnly,imageCount:quickImageCount,action:args.action})) {
+        const [year, month, day] = photoDate.split('-').map(Number);
+        cachedPhotoPlan = await planPhotoPreparation({appRoot,folder:path.join(root,`${month}月${day}日`),photoDir:photoInbox,date:photoDate,
+          expectedPrefix:`${String(year).slice(-2)}${month}`,workDir:photoRunDir,onProgress:(message)=>log(message)});
+        atomic(cachedPlanFile,cachedPhotoPlan);
+        allowedBlessingNumbers = new Set((cachedPhotoPlan.allowedBlessingNumbers || []).map(Number).filter(Number.isInteger));
       }
-      if ([...allowedBlessingNumbers].some((number) => !indexedModes.has(number))) modeIndexComplete = false;
-      if (modeIndexComplete) expectedNumberModes = indexedModes;
-      else log('本地 PDF 编号分类索引不完整，将继续使用整日场景保守校验。');
+      assertWritePlanReady(cachedPhotoPlan,{imageCount:quickImageCount,action:args.action});
+      let expectedNumberModes=null;
+      if(allowedBlessingNumbers&&Array.isArray(cachedPhotoPlan?.pdfPages)) {
+        const indexedModes=new Map();let complete=true;
+        for(const page of cachedPhotoPlan.pdfPages) {
+          const number=Number(page.number);
+          if(!Number.isInteger(number)||!allowedBlessingNumbers.has(number))continue;
+          const pdfName=String(page.pdfName||path.basename(page.pdf||''));
+          const mode = /供水/.test(pdfName) ? 'water' : page.portrait ? 'tablet' : 'lamp';
+          if(indexedModes.has(number)&&indexedModes.get(number)!==mode)complete=false;
+          indexedModes.set(number,mode);
+        }
+        if([...allowedBlessingNumbers].some(number=>!indexedModes.has(number)))complete=false;
+        if(complete)expectedNumberModes=indexedModes;
+      }
+      const excludedPhotoNames=reviewExcludedPhotoNames(cachedPhotoPlan);
+      manifest=await scanPhotoWorkday(root,photoDate,photoRunDir,{runOcr:false,expectedNumbers:allowedBlessingNumbers,expectedNumberModes,excludedPhotoNames});
+      if(writePhotoAction&&quickImageCount>0) assertPhotoFilesMatchPlan(cachedPhotoPlan,preparationReceipt,
+        Object.entries(manifest.fileHashes||{}).map(([name,sha256])=>({name,sha256})));
     }
-    const excludedPhotoNames=reviewExcludedPhotoNames(cachedPhotoPlan);
-    const manifest = await scanPhotoWorkday(root,photoDate,photoRunDir,{runOcr:false,expectedNumbers:allowedBlessingNumbers,expectedNumberModes,excludedPhotoNames});
-    if(writePhotoAction&&quickImageCount>0) assertPhotoFilesMatchPlan(cachedPhotoPlan,preparationReceipt,
-      Object.entries(manifest.fileHashes||{}).map(([name,sha256])=>({name,sha256})));
     photoTiming.setCount('photo_count',manifest.counts.allImages);
     photoTiming.setCount('pdf_page_count',manifest.counts.pdfPages);
     photoTiming.count('manual_review_count',manifest.counts.unexpected);
     atomic(path.join(photoRunDir,'photo-manifest.json'),manifest);
     photoTiming.end();
-    log(`发现本日可上传福单图 ${manifest.counts.blessing} 张，供灯场景图 ${manifest.counts.lampScene} 张，供水场景图 ${manifest.counts.waterScene} 张，PDF ${manifest.counts.pdfPages} 页。${manifest.counts.foreignBlessing ? ` 已隔离跨日/范围外纯数字照片 ${manifest.counts.foreignBlessing} 张。` : ''}`);
+    log(manifest.manualNumberedMode
+      ? `人工编号清单：可上传福单图 ${manifest.counts.blessing} 张，供灯场景图 ${manifest.counts.lampScene} 张，供水场景图 ${manifest.counts.waterScene} 张；未读取 PDF。`
+      : `发现本日可上传福单图 ${manifest.counts.blessing} 张，供灯场景图 ${manifest.counts.lampScene} 张，供水场景图 ${manifest.counts.waterScene} 张，PDF ${manifest.counts.pdfPages} 页。${manifest.counts.foreignBlessing ? ` 已隔离跨日/范围外纯数字照片 ${manifest.counts.foreignBlessing} 张。` : ''}`);
     if (manifest.warnings.length) {
       log(`规格/待核对提醒 ${manifest.warnings.length} 项，已写入照片清单。`);
       for (const message of manifest.warnings) log(`提醒：${message}`);
@@ -569,10 +622,10 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
     }
     if (blockingErrors.length) {
       for (const message of blockingErrors) log(`硬性阻断：${message}`);
-      if (args.action === 'photo-upload' || args.action === 'photo-scenes') throw new Error('已确认照片的安全预检未通过，未打开上传页面。');
+      if (args.action === 'photo-manual-prepare' || args.action === 'photo-upload' || args.action === 'photo-scenes') throw new Error('人工编号照片的安全预检未通过，未打开上传页面。');
       log('照片预检完成：没有可安全上传的福单图。处理硬性问题后重新预检。');
     } else {
-      log(manifest.counts.missingBlessing > 0
+      log(manifest.manualNumberedMode ? '人工编号照片预检通过：文件名和上传规格均合格，未读取 PDF。' : manifest.counts.missingBlessing > 0
         ? `照片增量预检通过：现有 ${manifest.counts.blessing} 张可先上传；${manifest.photoAvailability.summary}。`
         : '照片预检通过：编号命名、PDF页数、重复项和图片硬性规格均通过。');
     }
@@ -619,7 +672,7 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
         schemaVersion:3,
         businessDate:photoDate,
         fileSetHash:manifest.fileSetHash,
-        expectedBlessingCount:manifest.counts.pdfPages,
+        expectedBlessingCount:manifest.manualNumberedMode?manifest.counts.blessing:manifest.counts.pdfPages,
         missingBlessingCount:manifest.counts.missingBlessing,
         startedAt:previous?.startedAt || new Date().toISOString(),
         resumedAt:previous ? new Date().toISOString() : null,
@@ -648,8 +701,10 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
       photoTiming.start('upload');
       photoSite = new PrayerSite(photoRunDir,photoTiming,log,siteOptions);
       await photoSite.open();
-      const pdfReceipt = readJson(path.join(workdaysRoot,photoDate,'pdf-receipt.json'),null);
-      const uploadOrderScope = resolvePdfBoundPhotoOrderScope({businessDate:photoDate,photoManifest:manifest,pdfReceipt});
+      const pdfReceipt = manifest.manualNumberedMode?null:readJson(path.join(workdaysRoot,photoDate,'pdf-receipt.json'),null);
+      const uploadOrderScope = manifest.manualNumberedMode
+        ? {proven:false,reason:'manual-numbered-mode-no-pdf'}
+        : resolvePdfBoundPhotoOrderScope({businessDate:photoDate,photoManifest:manifest,pdfReceipt});
       let latestOrderState = null;
       const orderStateEvidence = (state) => ({
         state:state.state,
@@ -726,7 +781,8 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
           const alreadyUploaded = await photoSite.queryUploadedOrders(photoDate,{productMode:'all',allStates:true});
           const notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all',allStates:true});
           if (alreadyUploaded.length !== 0 || notUploaded.length !== 0) {
-            throw new Error(`当前 PDF 缺少可验证的订单 ID 绑定凭据，线上同时存在 ${alreadyUploaded.length} 条已上传、${notUploaded.length} 条未上传记录；禁止根据照片编号末段重传。`);
+            const bindingLabel = manifest.manualNumberedMode ? '人工编号模式没有 PDF 订单绑定凭据' : '当前 PDF 缺少可验证的订单 ID 绑定凭据';
+            throw new Error(`${bindingLabel}，线上同时存在 ${alreadyUploaded.length} 条已上传、${notUploaded.length} 条未上传记录；禁止根据照片编号末段重传。`);
           }
           const pendingRegular = await photoSite.queryLamp(photoDate);
           const pendingTablet = await photoSite.queryDailyTablet(photoDate);
@@ -833,7 +889,10 @@ if (args.action === 'photo-prepare' || args.action === 'photo-recheck' || args.a
             receipt.uncertainSubmission=true;
             atomic(receiptFile,receipt);
             if (!uploadOrderScope.proven || !beforeOrderState) {
-              throw new Error(`${uploadError.message} 当前 PDF 没有可验证的“PDF文件哈希＋订单ID集合”绑定凭据，禁止自动重试。`);
+              const retryEvidence = manifest.manualNumberedMode
+                ? '人工编号模式没有 PDF 订单绑定凭据'
+                : '当前 PDF 没有可验证的“PDF文件哈希＋订单ID集合”绑定凭据';
+              throw new Error(`${uploadError.message} ${retryEvidence}，禁止自动重试。`);
             }
             let afterOrderState;
             try {

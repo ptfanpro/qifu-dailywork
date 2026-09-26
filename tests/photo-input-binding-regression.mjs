@@ -19,6 +19,8 @@ try {
   assert.throws(()=>assertPhotoInputBinding({...plan,photoInputBinding:undefined}),/缺少原图/);
   assert.throws(()=>assertPhotoInputBinding({...plan,assignments:[{source:a,targetName:'../1.jpg'}]}),/路径无效/);
   assert.throws(()=>assertPhotoInputBinding({...plan,assignments:[...plan.assignments,...plan.assignments]}),/不唯一/);
+  assert.throws(()=>assertPhotoInputBinding({...plan,unresolvedStandardizations:[{source:a,targetName:'a.jpg',kind:'unresolved-standardized'}]}),/来源不唯一/);
+  assert.throws(()=>assertPhotoInputBinding({...plan,assignments:[],duplicateSources:[],unresolvedStandardizations:[{source:a,targetName:'../a.jpg',kind:'unresolved-standardized'}]}),/路径无效/);
   const changed=Buffer.from(image);changed[changed.length-1]^=1;fs.writeFileSync(a,changed);
   await assert.rejects(applyPhotoPreparation(plan,work),/发生变化/);
   assert.equal(fs.existsSync(work),false,'stale plans fail before backups or writes');

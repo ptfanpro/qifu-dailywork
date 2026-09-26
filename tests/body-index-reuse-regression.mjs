@@ -91,7 +91,8 @@ test('source change after preparing the batch index invalidates every apparent p
     const result=await review.reviewCurrentPdfBodies({...f.options,loadPages:async()=>f.pages,claims,
       createReader:async()=>({read:async()=>{if(++reads===3)fs.writeFileSync(f.pdf,'changed PDF');return views('山川日月春风秋雨');},release:async()=>{}})});
     assert.equal(reads,3);assert.equal(result.blocked,3);
-    assert(result.results.every(r=>r.status==='body-reader-unavailable'));
+    assert(result.results.every(r=>r.status==='source-changed'&&r.failureCode==='pdf-source-changed'));
+    assert.equal(result.positionedLayoutReview.status,'source-changed');
     assert(claims.every(p=>!p.reliable&&p.number===null));
   } finally {fs.rmSync(f.root,{recursive:true,force:true});}
 });

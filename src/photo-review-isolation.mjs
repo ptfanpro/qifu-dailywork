@@ -59,7 +59,7 @@ export function assertPhotoReviewIsolation(plan) {
   const names=reviewExcludedPhotoNames(plan);
   if(!names.size)return;
   const excludedNumbers=new Set([...names].filter(name=>/^\d+\.(?:jpe?g|png)$/i.test(name)).map(name=>Number(path.parse(name).name)));
-  for(const item of [...(plan.assignments||[]),...(plan.duplicateSources||[])]) {
+  for(const item of [...(plan.assignments||[]),...(plan.unresolvedStandardizations||[]),...(plan.duplicateSources||[])]) {
     if(names.has(key(path.basename(item.source)))||(item.targetName&&names.has(key(item.targetName)))
       ||(item.kind==='blessing'&&excludedNumbers.has(Number(path.parse(item.targetName||'').name)))
       ||(item.duplicateOfNumber!==undefined&&excludedNumbers.has(item.duplicateOfNumber)))

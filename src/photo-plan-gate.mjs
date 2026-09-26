@@ -15,11 +15,11 @@ function reviewedPhotoHashes(plan,receipt) {
     if(!validName(file.name)||!validHash(file.sha256)||originals.has(key(file.name)))return null;
     originals.set(key(file.name),file.sha256);
   }
-  const assignments=plan.assignments||[],duplicates=plan.duplicateSources||[];
-  if(!Array.isArray(assignments)||!Array.isArray(duplicates))return null;
+  const assignments=plan.assignments||[],standardizations=plan.unresolvedStandardizations||[],duplicates=plan.duplicateSources||[];
+  if(!Array.isArray(assignments)||!Array.isArray(standardizations)||!Array.isArray(duplicates))return null;
   const before=new Map(originals);
   // A numeric source awaiting renumbering is not eligible under its old name.
-  for(const item of assignments) {
+  for(const item of [...assignments,...standardizations]) {
     if(typeof item.source!=='string'||!validName(item.targetName))return null;
     if(key(path.basename(item.source))!==key(item.targetName))before.delete(key(path.basename(item.source)));
   }
@@ -28,19 +28,28 @@ function reviewedPhotoHashes(plan,receipt) {
   if(!Number.isFinite(plannedAt)||!Number.isFinite(completedAt)||completedAt<plannedAt
     ||receipt.businessDate!==plan.businessDate||!Array.isArray(receipt.files)
     ||receipt.files.length!==assignments.length||!Array.isArray(receipt.duplicates)
-    ||receipt.duplicates.length!==duplicates.length||typeof plan.photoDir!=='string')return before;
+    ||receipt.duplicates.length!==duplicates.length
+    ||!Array.isArray(receipt.standardizedUnresolvedFiles||[])
+    ||(receipt.standardizedUnresolvedFiles||[]).length!==standardizations.length
+    ||typeof plan.photoDir!=='string')return before;
   const moved=new Set(),targets=new Map();
-  for(const [items,records,isDuplicate] of [[assignments,receipt.files,false],[duplicates,receipt.duplicates,true]]) {
+  for(const [items,records,group] of [
+    [assignments,receipt.files,'assigned'],
+    [standardizations,receipt.standardizedUnresolvedFiles||[],'unresolved'],
+    [duplicates,receipt.duplicates,'duplicate'],
+  ]) {
     for(const item of items) {
       if(typeof item.source!=='string'||pathKey(path.dirname(item.source))!==pathKey(plan.photoDir))return before;
       const source=key(path.basename(item.source));
       const matching=records.filter(record=>typeof record.source==='string'&&pathKey(record.source)===pathKey(item.source));
       if(moved.has(source)||matching.length!==1||!originals.has(source)||matching[0].beforeSha256!==originals.get(source))return before;
       moved.add(source);
-      if(isDuplicate)continue;
+      if(group==='duplicate')continue;
       const record=matching[0];
-      if(!validName(record.targetName)||!standardized(record.targetName)||record.targetName!==item.targetName
+      const validTarget=group==='assigned'?standardized(record.targetName):/\.jpg$/i.test(record.targetName||'');
+      if(!validName(record.targetName)||!validTarget||record.targetName!==item.targetName
         ||record.kind!==item.kind||!validHash(record.afterSha256)||targets.has(key(record.targetName)))return before;
+      if(group==='unresolved'&&record.kind!=='unresolved-standardized')return before;
       targets.set(key(record.targetName),record.afterSha256);
     }
   }

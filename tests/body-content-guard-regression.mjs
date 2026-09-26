@@ -65,11 +65,12 @@ try {
   assert.equal(actual.results[0].status,'conflicting-body');
   assert.equal(targets[0].number,null,'never automatically assign the body candidate');
   assert.equal(released,1);
-  for(const loadPages of [async()=>pages.slice(0,1),async()=>[pages[0],pages[0]],async()=>{
+  for(const [index,loadPages] of [async()=>pages.slice(0,1),async()=>[pages[0],pages[0]],async()=>{
     fs.writeFileSync(pdf,'changed pdf');return pages;
-  }]) {
+  }].entries()) {
     const bad=await reviewCurrentPdfBodies({appRoot:scratch,pdfFiles:[pdf],pdfPages,pdfIndexBinding:binding,claims:claims(),createReader:fakeReader,loadPages});
-    assert.equal(bad.results[0].status,'body-reader-unavailable');
+    assert.equal(bad.results[0].status,index===2?'source-changed':'body-reader-unavailable');
+    if(index===2)assert.equal(bad.results[0].failureCode,'pdf-source-changed');
     assert.equal(bad.blocked,1);
   }
   fs.writeFileSync(pdf,'synthetic pdf');

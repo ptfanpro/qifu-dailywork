@@ -5,6 +5,8 @@ import {codeBodyTestInput,freshItem,views} from './code-body-adjudication-regres
 import {observeCodeModel,codeModelReviewEvidence} from '../src/code-model-review.mjs';
 import {CHINESE_BODY_MODEL_SHA256} from '../src/chinese-body-reader.mjs';
 import {adjudicateCodeBody,codeBodyCandidateForItem,codeBodyModelReviewEligible,retainCodeBodyResolution,codeBodyResolution} from '../src/code-body-adjudication.mjs';
+import {buildVisualBodyPages} from '../src/pdf-visual-body-evidence.mjs';
+import {assessBodyClaim} from '../src/body-content-review.mjs';
 const require=createRequire(import.meta.url),sharp=require('sharp');
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
 const source=await sharp({create:{width:200,height:100,channels:3,background:'red'}}).png().toBuffer();
@@ -38,6 +40,32 @@ assert.notEqual(adjudicateCodeBody({...x,alternateCodeReview:structuredClone(x.a
 assert.notEqual(adjudicateCodeBody({...x,views:views('海月澄明\n竹影清幽')}).status,'resolved','opposite physical page body vetoes stable code');
 assert.notEqual(adjudicateCodeBody({...x,views:views('阖家平安')}).status,'resolved','shared body is not page identity');
 assert.notEqual(adjudicateCodeBody({...x,pages:x.pages.slice(0,1)}).status,'resolved','incomplete current corpus');
+
+// A low-confidence one-padding outlier still blocks the fast path. A fresh
+// second model must read the same complete word in both original paddings, and
+// paired current-PDF body views must contain at least four corroborated unique
+// grams from that exact page before the outlier can be cleared.
+{
+ const weak=codeBodyTestInput();weak.photoSha256=weak.read.inputSha256=sha(source);weak.read.expectedPrefix=weak.expectedPrefix;
+ const weakItem=freshItem(weak);weakItem.sourceSha256=weak.photoSha256;weakItem.detectedCodeRead=weak.read;
+ assert.equal(codeBodyCandidateForItem(weakItem,weak.index).status,'candidate');
+ assert.equal(codeBodyModelReviewEligible(weakItem,weak.index),true,'weak opposite complete words need the bounded fresh model review');
+ weak.alternateCodeReview=await review(weak);
+ const targetText='松风清境晨光普',otherText='海月澄明竹影静';
+ weak.pages=buildVisualBodyPages([targetText,otherText].map((text,i)=>({pdfSha256:weak.index[i].pdfSha256,pageNumber:i+1,fieldTexts:[text]})),
+  [targetText,otherText].map((text,i)=>({pdfSha256:weak.index[i].pdfSha256,pageNumber:i+1,views:views(text)})));
+ weak.views=views(targetText);
+ const bodyAssessment=assessBodyClaim(weak.views,weak.pages,weak.pages[0]);
+ assert.equal(bodyAssessment.status,'observed-body-consistent',JSON.stringify(bodyAssessment));
+ assert(bodyAssessment.results.slice(0,2).every(result=>result.ranked.find(page=>page.pageNumber===1).corroboratedUniqueMatchedGrams>=4),JSON.stringify(bodyAssessment));
+ const resolved=adjudicateCodeBody(weak);
+ assert.equal(resolved.status,'resolved',JSON.stringify(resolved));assert.equal(resolved.policy,'two-model-code-plus-paired-current-body-grams-v1');
+ assert.notEqual(adjudicateCodeBody({...weak,views:views('海月澄明竹影')}).status,'resolved');
+ const oneView=structuredClone(weak);oneView.views[1]={...oneView.views[1],text:''};
+ assert.notEqual(adjudicateCodeBody(oneView).status,'resolved');
+ const noReview={...weak};delete noReview.alternateCodeReview;
+ assert.notEqual(adjudicateCodeBody(noReview).status,'resolved');
+}
 for(const kind of ['low-score','foreign','opposite-consensus','another-region','more-than-one-edit','missing-correct-original']){
  const y=input();
  if(kind==='opposite-consensus'||kind==='missing-correct-original')for(const o of [...y.read.observations,...y.read.readings.filter(r=>r.engine==='paddle')]){o.fullCode='283-1-17';o.prefix='283';}
@@ -65,6 +93,21 @@ for(const o of [...tessSeed.read.independent,...tessSeed.read.readings.filter(r=
 tessSeed.alternateCodeReview=await review(tessSeed);
 assert.equal(adjudicateCodeBody(tessSeed).status,'resolved');
 assert.notEqual(adjudicateCodeBody({...tessSeed,views:views('海月澄明\n竹影清幽')}).status,'resolved');
+
+// Production counterexample: Paddle and the fresh third model both read the
+// same complete word twice, while Tesseract produced one moderate-confidence
+// two-digit corruption on only one padding of that physical region. The lone
+// contrary observation stays in the audit, but may reach the current-PDF body
+// gate; two contrary paddings remain blocked by the rejection matrix above.
+const singleTwoEdit=input(),opposite='299-1-92';
+singleTwoEdit.read.independent=[{...singleTwoEdit.read.independent[0],fullCode:opposite,prefix:'299',number:92,confidence:36}];
+for(const row of singleTwoEdit.read.readings.filter(row=>row.engine==='tesseract')){
+  if(row.padding===.45)Object.assign(row,{fullCode:opposite,prefix:'299',number:92,confidence:36,codeCount:1});
+  else {delete row.fullCode;delete row.prefix;delete row.number;row.confidence=0;row.codeCount=0;}
+}
+singleTwoEdit.alternateCodeReview=await review(singleTwoEdit);
+assert.equal(adjudicateCodeBody(singleTwoEdit).status,'resolved','one unsupported two-edit OCR outlier may proceed only through fresh model plus current body');
+assert.notEqual(adjudicateCodeBody({...singleTwoEdit,views:views('海月澄明\n竹影清幽')}).status,'resolved','fresh code agreement cannot replace the physical PDF body gate');
 const missingCrop=input();missingCrop.read.readings=missingCrop.read.readings.filter(r=>!(r.engine==='paddle'&&r.padding===.75));
 await assert.rejects(()=>review(missingCrop),/alternate-code-crop-coverage/);
 const native=input();native.read.nativeScaleReview={read:structuredClone(native.read)};

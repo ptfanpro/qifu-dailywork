@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import {adjudicateCodeBody,codeBodyModelReviewEligible,codeBodyResolution,retainCodeBodyResolution} from '../src/code-body-adjudication.mjs';
-import {photoCodeAuditBlockReason} from '../src/photo-prepare.mjs';
+import {adjudicateCodeBody,codeBodyCandidateForItem,codeBodyModelReviewEligible,codeBodyResolution,retainCodeBodyResolution} from '../src/code-body-adjudication.mjs';
+import {photoCodeAuditBlockReason,prepareExistingNumericConflictCandidate} from '../src/photo-prepare.mjs';
 import {visualBodyViewNames,buildVisualBodyPages} from '../src/pdf-visual-body-evidence.mjs';
 import {horizontalBodyCrop,verticalBodyCrop} from '../src/vertical-body-regions.mjs';
 const hash='a'.repeat(64),pdfHash='b'.repeat(64);
@@ -290,6 +290,32 @@ function freshItem(x){return {number:null,reliable:false,sourceSha256:hash,detec
     observations:[...x.read.observations,...x.read.independent].map(o=>({...o,cropBounds:o.crop}))}]};}
 const subject=freshItem(x),history=JSON.stringify(subject.codeAuditHistory);
 assert.ok(photoCodeAuditBlockReason(subject));
+
+// A numeric filename is only a claim. When its first source-bound detected-code
+// audit is blocked by an engine disagreement, strip the filename/PDF decision
+// before sending the immutable raw reads through the existing strict alternate
+// model + current-PDF-body route. A prior portable read or unrelated rejection
+// remains a veto and cannot be silently discarded.
+{
+  const existing={...structuredClone(subject),file:'17.jpg',reliable:false,number:17,evidence:{method:'existing-numeric-filename-claim'},
+    pdfRecheck:{status:'rejected',reason:'detected-code-number-conflict',claimedNumber:17},
+    pdfReviewHistory:[{status:'rejected',reason:'detected-code-number-conflict',claimedNumber:17}]};
+  const before=JSON.stringify(existing),prepared=prepareExistingNumericConflictCandidate(existing,x.index);
+  assert(prepared,'a source-bound detected-code disagreement should reach strict adjudication');
+  assert.equal(prepared.filenameNumber,17);
+  assert.equal(prepared.item.number,null);assert.equal(prepared.item.reliable,false);
+  assert.equal(prepared.item.evidence,undefined);assert.equal(prepared.item.pdfRecheck,undefined);
+  assert.equal(prepared.item.pdfReviewHistory,undefined);assert.equal(prepared.item.portableCodeRead,undefined);
+  assert.equal(JSON.stringify(existing),before,'preparing a fresh adjudication must not rewrite the rejected audit');
+  assert(codeBodyCandidateForItem(prepared.item,x.index).status==='candidate'
+    ||codeBodyModelReviewEligible(prepared.item,x.index)===true);
+  const unrelated=structuredClone(existing);unrelated.pdfRecheck.reason='claimed-pdf-page-not-unique';
+  assert.equal(prepareExistingNumericConflictCandidate(unrelated,x.index),null);
+  const portable=structuredClone(existing);portable.portableCodeRead={status:'unavailable',observations:[]};
+  assert.equal(prepareExistingNumericConflictCandidate(portable,x.index),null);
+  const renamed=structuredClone(existing);renamed.file='18.jpg';
+  assert.equal(prepareExistingNumericConflictCandidate(renamed,x.index),null);
+}
 const joined=retainCodeBodyResolution(subject,{...x,pdfSetDigest:'d'.repeat(64)});
 assert.equal(joined.status,'resolved',JSON.stringify(joined));
 assert.equal(photoCodeAuditBlockReason(subject),null);

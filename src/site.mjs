@@ -1289,6 +1289,45 @@ export class PrayerSite {
   async queryNotUploadedTabletPhotoOrders(date) {
     return this.queryOrdersByBlessingUploadStatus(date, '未上传', { url:TABLET_LIST_URL, allStates:true });
   }
+  async queryHistoricalRows(startDate, endDateExclusive, { url = LIST_URL, state, uploadStatus = null } = {}) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDateExclusive) || startDate >= endDateExclusive) {
+      throw new Error('历史线上检查日期范围无效。');
+    }
+    if (!state) throw new Error('历史线上检查缺少订单状态。');
+    await this.page.goto(url, { waitUntil:'domcontentloaded', timeout:30000 });
+    this.timing.count('browser_action_count');
+    await this.waitForLogin(url);
+    await this.preparePageSize1000();
+    for (const selector of ['#bCode','#orderCode','#userId','#receiveBlessing','#aTd']) {
+      if (await this.page.locator(selector).count()) await this.page.locator(selector).fill('');
+    }
+    for (const selector of ['#bType','#supportName','#upload','#upload1','#video1']) {
+      if (await this.page.locator(selector).count()) await this.page.locator(selector).selectOption('').catch(() => {});
+    }
+    await this.page.locator('#startTime').evaluate((element,value) => {
+      element.removeAttribute('readonly'); element.value=value;
+      element.dispatchEvent(new Event('input',{bubbles:true})); element.dispatchEvent(new Event('change',{bubbles:true}));
+    },startDate);
+    await this.page.locator('#endTime').evaluate((element,value) => {
+      element.removeAttribute('readonly'); element.value=value;
+      element.dispatchEvent(new Event('input',{bubbles:true})); element.dispatchEvent(new Event('change',{bubbles:true}));
+    },endDateExclusive);
+    await this.selectOptionByVisibleText('#state',state);
+    if (uploadStatus) await this.selectOptionByVisibleText('#upload',uploadStatus);
+    await this.submitListSearch();
+    const rows=await this.readRows();
+    const total=await this.readListPageTotal();
+    if(total===null||total!==rows.length)throw new Error(`历史线上检查分页数量与读取行数不一致，不能把异常列表当作零待办；已停止。`);
+    if(rows.some(row=>normalizeText(row.status)!==normalizeText(state)))throw new Error(`历史线上检查的“${state}”筛选混入了其他状态。`);
+    return rows;
+  }
+  async queryHistoricalUnresolved(endDateExclusive, startDate = '2000-01-01') {
+    const pendingRegular=await this.queryHistoricalRows(startDate,endDateExclusive,{url:LAMP_LIST_URL,state:'待祈福'});
+    const pendingTablet=await this.queryHistoricalRows(startDate,endDateExclusive,{url:TABLET_LIST_URL,state:'待祈福'});
+    const prayingWithoutPhotoRegular=await this.queryHistoricalRows(startDate,endDateExclusive,{url:LIST_URL,state:'祈福中',uploadStatus:'未上传'});
+    const prayingWithoutPhotoTablet=await this.queryHistoricalRows(startDate,endDateExclusive,{url:TABLET_LIST_URL,state:'祈福中',uploadStatus:'未上传'});
+    return {pendingRegular,pendingTablet,prayingWithoutPhotoRegular,prayingWithoutPhotoTablet};
+  }
   async queryUploadedTabletOrders(date) {
     // 牌位没有场景图。回传图片由统一福单图入口匹配后，在牌位福单页表现为
     // “祈福中 + 牌位图已上传”；此时即可批量完成，不应再套用场景图条件。

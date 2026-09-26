@@ -78,7 +78,7 @@ export function codeBodyModelReviewEligible(item,index){
   // A weak single-view nomination still gets the stronger alternate model
   // review first. The strict body route is a fallback, not a replacement that
   // may suppress an already-proven alternate-code path.
-  return (candidate.status!=='candidate'||candidate.requiresStrictBodySupport)&&rows.some(credible)
+  return (candidate.status!=='candidate'||candidate.requiresStrictBodySupport||candidate.weakAlternatives>0)&&rows.some(credible)
     &&new Set(rows.map(o=>o.index)).size<=4;
 }
 
@@ -167,7 +167,15 @@ function alternateCandidate(read,photoSha256,expectedPrefix,all,report){
   if(!sameRegion.some(a=>sameRegion.some(b=>a.padding!==b.padding&&!sameCrop(a.crop,b.crop))))return null;
   const strong=all.filter(credible);
   if(!strong.some(o=>o.index===code.index&&o.fullCode===code.fullCode&&o.confidence>=(o.engine==='paddle'?.85:30)))return null;
-  if(strong.some(o=>o.index!==code.index||!oneEdit(o.fullCode,code.fullCode)))return null;
+  if(strong.some(o=>o.index!==code.index))return null;
+  // One moderate-confidence outlier from one padding can differ by several
+  // glyphs (for example a decorative prefix and suffix corruption). It stays
+  // in the audit, but fresh two-padding model agreement may nominate the page
+  // for strict current-body verification. Repeated support for that distant
+  // word from either original engine is still a hard veto.
+  for(const opposite of new Set(strong.filter(o=>o.fullCode!==code.fullCode&&!oneEdit(o.fullCode,code.fullCode)).map(o=>o.fullCode))){
+    if(['paddle','tesseract'].some(engine=>new Set(strong.filter(o=>o.engine===engine&&o.fullCode===opposite).map(o=>o.padding)).size>=2))return null;
+  }
   // Repeated agreement of BOTH original engines on an opposite complete word
   // remains a veto. Two paddings or two models from one family are not votes
   // that can outnumber an independently established opposite-code consensus.
@@ -215,6 +223,7 @@ export function codeBodyCandidate({read,expectedPrefix,photoSha256,index,alterna
     ...(alternate?.requiresPrintedDate?{requiresPrintedDate:true,fullCodeObserved:false,
       codePolicy:alternate.codePolicy,observedFullCodes:alternate.observedFullCodes}:{}),
     weakAlternatives:all.filter(o=>o.fullCode!==code.fullCode).length,
+    credibleAlternatives:strong.filter(o=>o.fullCode!==code.fullCode).length,
     ...(requiresStrictBodySupport?{requiresStrictBodySupport:true}:{}),bindingVerified:false};
 }
 
@@ -270,6 +279,19 @@ function shortFieldConjunction(views,fields,target,{mixed=false,minDistinct=3,re
   return support;
 }
 
+function pairedBodyGramSupport(assessment,target,minCorroborated=4){
+  if(assessment?.status!=='observed-body-consistent'||!Array.isArray(assessment.results))return null;
+  for(const offset of [0,2]){
+    const pair=assessment.results.slice(offset,offset+2);
+    if(pair.length!==2)continue;
+    const matches=pair.map(result=>result.ranked?.find(page=>id(page)===id(target)));
+    if(matches.every(match=>Number(match?.corroboratedUniqueMatchedGrams||0)>=minCorroborated))
+      return {views:pair.map(result=>result.view),minimumCorroboratedUniqueGrams:minCorroborated,
+        evidenceSha256:matches.map(match=>match.corroboratedUniqueEvidenceSha256)};
+  }
+  return null;
+}
+
 export function adjudicateCodeBody(input) {
   const candidate=codeBodyCandidate(input);
   if(candidate.status!=='candidate')return candidate;
@@ -288,6 +310,20 @@ export function adjudicateCodeBody(input) {
       if(support)return {...candidate,status:'resolved',policy:support.policy,
         bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),positionedSupport:support,assessment,
         pageCorrespondenceVerified:true,bindingVerified:false};
+    }
+    // Two fresh recognition models agreeing on both immutable paddings can
+    // clear one sub-threshold opposite reading only when paired current-PDF
+    // body views independently point to the same physical page. This route
+    // cannot clear a credible opposite code, a one-view body match, or an
+    // uncorroborated/template-only body observation.
+    if(candidate.modelReviewSha256&&candidate.credibleAlternatives===0&&candidate.weakAlternatives>0){
+      const original=input.read.observations.filter(o=>o.fullCode===candidate.fullCode&&o.confidence>=.85);
+      const originalPair=original.some(a=>original.some(b=>a.index===b.index&&a.padding!==b.padding&&!sameCrop(a.crop,b.crop)));
+      const bodyGramSupport=pairedBodyGramSupport(assessment,candidate.target);
+      if(originalPair&&candidate.codeSupport?.length>=2&&bodyGramSupport)
+        return {...candidate,status:'resolved',policy:'two-model-code-plus-paired-current-body-grams-v1',
+          bodyCorpusSha256:sha(pages),bodyViewsSha256:sha(views),bodyGramSupport,assessment,
+          pageCorrespondenceVerified:true,bindingVerified:false};
     }
     if(assessment.status!=='observed-body-consistent')return unresolved(`body-${assessment.status}`);
     const fields=assessment.fieldEvidence;
