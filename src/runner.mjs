@@ -375,16 +375,24 @@ if (args.action === 'photo-online-recheck') {
     photoTiming.start('order-processing');
     photoSite = new PrayerSite(photoRunDir,photoTiming,log,siteOptions);
     await photoSite.open();
-    const uploaded = await photoSite.queryUploadedOrders(photoDate,{productMode:'all'});
-    const notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all'});
+    const uploaded = await photoSite.queryUploadedOrders(photoDate,{productMode:'all',allStates:true});
+    const notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all',allStates:true});
+    const uploadedTablet = await photoSite.queryUploadedTabletPhotoOrders(photoDate);
+    const notUploadedTablet = await photoSite.queryNotUploadedTabletPhotoOrders(photoDate);
+    const onlineRows = [...uploaded,...notUploaded,...uploadedTablet,...notUploadedTablet];
+    const historicalIds = new Set((historicalManifest?.rows || []).map((row) => String(row.id)));
+    const matchedHistoricalCount = new Set(onlineRows.filter((row) => historicalIds.has(String(row.id))).map((row) => String(row.id))).size;
+    const onlineUnfinishedCount = onlineRows.filter((row) => !/^(已完成|祈福完成|已祈福)$/.test(String(row.status || '').trim())).length;
     const pendingRegular = await photoSite.queryLamp(photoDate);
     const pendingTablet = await photoSite.queryDailyTablet(photoDate);
     const result = evaluatePhotoOnlineRecheck({
-      onlineUploadedCount:uploaded.length,
-      onlineNotUploadedCount:notUploaded.length,
+      onlineUploadedCount:uploaded.length+uploadedTablet.length,
+      onlineNotUploadedCount:notUploaded.length+notUploadedTablet.length,
       pendingRegularCount:pendingRegular.length,
       pendingTabletCount:pendingTablet.length,
-      historicalEvidenceProven:closureEvidence.proven,
+      historicalEvidenceProven:closureEvidence.proven && (!historicalIds.size || matchedHistoricalCount === historicalIds.size),
+      onlineScopeCount:new Set(onlineRows.map((row) => String(row.id))).size,
+      onlineUnfinishedCount,
     });
     const checkedAt = new Date().toISOString();
     atomic(path.join(photoRunDir,'photo-online-closure.json'),{
@@ -394,6 +402,7 @@ if (args.action === 'photo-online-recheck') {
       ...result,
       closureEvidenceSource:closureEvidence.source,
       historicalOrderCount:closureEvidence.historicalOrderCount,
+      matchedHistoricalCount,
       legacyPdfPageCount:closureEvidence.legacyPdfPageCount,
       readOnly:true,
       platformModified:false,
@@ -402,9 +411,9 @@ if (args.action === 'photo-online-recheck') {
     if (result.complete) {
       log(`线上闭环复核通过：${photoDate} 的福单未上传 0 条、供灯待祈福 0 条、牌位待祈福 0 条；已写入本机终态回执，以后不再因旧的部分回执误报。平台未作任何修改。`);
     } else if (!result.historicalEvidenceProven) {
-      throw new Error('线上待办虽已查询，但本机缺少该日期历史订单清单或完整 PDF/照片凭据，不能把空查询误记为闭环。');
+      log(`线上订单与本机历史清单未完整对应：原清单 ${historicalIds.size} 条、当前匹配 ${matchedHistoricalCount} 条；不能确认 ${photoDate} 已闭环。未修改平台。`);
     } else {
-      log(`线上仍有待处理：福单未上传 ${result.onlineNotUploadedCount} 条、供灯待祈福 ${result.pendingRegularCount} 条、牌位待祈福 ${result.pendingTabletCount} 条；将继续按原业务日期处理，不采用旧断点猜测。`);
+      log(`线上尚未闭环：祈福状态未完成 ${result.onlineUnfinishedCount ?? '未知'} 条、福单未上传 ${result.onlineNotUploadedCount} 条、供灯待祈福 ${result.pendingRegularCount} 条、牌位待祈福 ${result.pendingTabletCount} 条；只读复核未修改平台。`);
     }
     await photoSite.close();
     photoSite = null;
@@ -1007,7 +1016,8 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       if (fs.existsSync(sceneReceiptFile)) {
         const previous = JSON.parse(fs.readFileSync(sceneReceiptFile,'utf8'));
         priorCompletionBatches = Array.isArray(previous.completedBatches) ? previous.completedBatches : [];
-        if (previous.fileSetHash === manifest.fileSetHash && previous.complete && previous.tabletCompletionVerified === true) {
+        if (previous.fileSetHash === manifest.fileSetHash && previous.complete && previous.tabletCompletionVerified === true
+          && previous.onlineVerifiedAt && Number(previous.completedOrderCount) > 0) {
           log(`相同图片集合的照片业务已经全部完成：供灯/供水 ${previous.regularCompletedOrderCount ?? previous.completedOrderCount ?? 0} 条，牌位 ${previous.tabletCompletedOrderCount ?? 0} 条；本次不会重复提交。`);
           photoTiming.finish();
           process.exit(0);
@@ -1017,12 +1027,17 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
           photoTiming.finish();
           process.exit(0);
         }
-        if (previous.fileSetHash === manifest.fileSetHash && previous.complete) {
+        if (previous.fileSetHash === manifest.fileSetHash && previous.complete
+          && Number(previous.completedOrderCount || 0) > 0 && !previous.onlineVerifiedAt) {
+          throw new Error('旧版批量完成回执缺少线上终态核查，不能直接重跑或覆盖；请先使用照片主按钮只读核对该业务日期。');
+        }
+        if (previous.fileSetHash === manifest.fileSetHash && previous.complete && previous.onlineVerifiedAt
+          && Number(previous.regularCompletedOrderCount || 0) > 0) {
           regularAlreadyComplete = true;
           previousSceneReceipt = previous;
           log(`供灯/供水 ${previous.completedOrderCount ?? 0} 条已有完成回执；继续补做牌位“图片上传后批量完成”，不会重复处理前述订单。`);
         }
-        if (previous.fileSetHash === manifest.fileSetHash && !previous.complete) {
+        if (previous.fileSetHash === manifest.fileSetHash && (!previous.complete || Number(previous.completedOrderCount || 0) === 0)) {
           log('检测到上次场景图流程中断；本次将按线上“场景图未上传”状态逐类复核并安全续跑，不会重传已成功的订单。');
           previousSceneReceipt = previous;
         }
@@ -1044,17 +1059,16 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       photoSite = new PrayerSite(photoRunDir,photoTiming,log,siteOptions);
       await photoSite.open();
       photoTiming.start('upload');
-      let onlineNotUploadedCount = 0;
+      let onlineNotUploadedCount = null;
       const manualReviewCount = Array.isArray(manifest.manualIssues) ? manifest.manualIssues.length : 0;
-      let photoOrderClosure = evaluatePhotoOrderClosure({missingBlessingCount:manifest.counts.missingBlessing,onlineNotUploadedCount:0,manualReviewCount});
-      if (manifest.counts.missingBlessing > 0 || manifest.batchCompleteReady !== true) {
-        const notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all'});
-        onlineNotUploadedCount = notUploaded.length;
-        photoOrderClosure = evaluatePhotoOrderClosure({missingBlessingCount:manifest.counts.missingBlessing,onlineNotUploadedCount,manualReviewCount});
+      {
+        const notUploaded = await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all',allStates:true});
+        const notUploadedTablet = await photoSite.queryNotUploadedTabletPhotoOrders(photoDate);
+        onlineNotUploadedCount = notUploaded.length + notUploadedTablet.length;
         uploadReceipt.onlineNotUploadedCount = onlineNotUploadedCount;
         uploadReceipt.onlineBusinessDateVerified = photoDate;
         uploadReceipt.onlineClosureCheckReady = false;
-        if (photoOrderClosure.complete) {
+        if (onlineNotUploadedCount === 0) {
           const preparePlanFile = path.join(photoRunDir,'photo-prepare-plan.json');
           const preparePlan = fs.existsSync(preparePlanFile) ? JSON.parse(fs.readFileSync(preparePlanFile,'utf8')) : null;
           uploadReceipt.localMissingSupersededByOnline = Array.isArray(preparePlan?.missingExpected) ? preparePlan.missingExpected : [];
@@ -1088,7 +1102,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
           onRetry(remaining) { photoTiming.count('retry_count'); log(`复核仍有 ${remaining} 条场景图未上传，按当前缺失集合安全续跑，不重复处理已成功订单。`); },
         });
       }
-      const completableRows = regularAlreadyComplete ? [] : await photoSite.queryUploadedOrders(photoDate,{productMode:'all',sceneStatus:'已上传'});
+      const completableRows = regularAlreadyComplete ? [] : await photoSite.queryUploadedOrders(photoDate,{productMode:'all',sceneStatus:'已上传',state:'祈福中'});
       const completableManifest = completableRows.length ? PrayerSite.manifest(completableRows,photoDate) : null;
       const expectedOrderCount = regularAlreadyComplete
         ? Number(previousSceneReceipt?.regularCompletedOrderCount ?? previousSceneReceipt?.completedOrderCount ?? 0)
@@ -1117,6 +1131,11 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         pendingTabletRows.length ? tabletManifest.orderIdHash : null,
       );
       photoTiming.end();
+      const photoOrderClosure = evaluatePhotoOrderClosure({
+        missingBlessingCount:manifest.counts.missingBlessing,
+        onlineNotUploadedCount,manualReviewCount,
+        completedOrderCount:regularCompletedOrderCount+tabletCompletedOrderCount,
+      });
       const completedAt = new Date().toISOString();
       const completionBatch = {
         fileSetHash:manifest.fileSetHash,
@@ -1133,12 +1152,14 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       sceneReceipt.completedBatches = upsertPhotoCompletionBatch(sceneReceipt.completedBatches,completionBatch);
       sceneReceipt.complete = photoOrderClosure.complete;
       sceneReceipt.partialComplete = photoOrderClosure.partial;
+      sceneReceipt.onlineNotUploadedCount = onlineNotUploadedCount;
       sceneReceipt.stage = photoOrderClosure.stage;
       sceneReceipt.tabletCompletionVerified = true;
       sceneReceipt.tabletCompletedOrderCount = tabletCompletedOrderCount;
       sceneReceipt.completedOrderCount = regularCompletedOrderCount + tabletCompletedOrderCount;
       sceneReceipt.cumulativeCompletedOrderCount = sceneReceipt.completedBatches.reduce((sum,item) => sum + Number(item?.regularCompletedOrderCount || 0) + Number(item?.tabletCompletedOrderCount || 0),0);
       sceneReceipt.completedAt = completedAt;
+      sceneReceipt.onlineVerifiedAt = photoOrderClosure.complete ? completedAt : null;
       atomic(sceneReceiptFile,sceneReceipt);
       log(photoOrderClosure.complete
         ? `照片业务闭环完成：供灯/供水 ${regularCompletedOrderCount} 条、牌位 ${tabletCompletedOrderCount} 条均已批量完成，总计 ${sceneReceipt.completedOrderCount} 条。`

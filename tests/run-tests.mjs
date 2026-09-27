@@ -233,15 +233,19 @@ assert.equal(resolveHistoricalPhotoClosureEvidence({manifest:{...completeLegacyM
 assert.equal(resolveHistoricalPhotoClosureEvidence({manifest:{...completeLegacyManifest,counts:{...completeLegacyManifest.counts,missingBlessing:1}}}).proven,false);
 assert.equal(resolveHistoricalPhotoClosureEvidence({manifest:{...completeLegacyManifest,pdfs:[]}}).proven,false);
 assert.deepEqual(evaluatePhotoOnlineRecheck({
-  onlineUploadedCount:32,onlineNotUploadedCount:0,pendingRegularCount:0,pendingTabletCount:0,historicalEvidenceProven:true,
+  onlineUploadedCount:32,onlineNotUploadedCount:0,pendingRegularCount:0,pendingTabletCount:0,historicalEvidenceProven:true,onlineScopeCount:32,onlineUnfinishedCount:0,
 }),{
   complete:true,onlineUploadedCount:32,onlineNotUploadedCount:0,pendingRegularCount:0,pendingTabletCount:0,
-  onlinePendingCount:0,historicalEvidenceProven:true,reason:'online-zero-pending-verified',
+  onlinePendingCount:0,onlineScopeCount:32,onlineUnfinishedCount:0,historicalEvidenceProven:true,reason:'online-zero-pending-verified',
 });
 assert.equal(evaluatePhotoOnlineRecheck({onlineNotUploadedCount:1,historicalEvidenceProven:true}).complete,false);
-assert.equal(evaluatePhotoOnlineRecheck({pendingRegularCount:1,historicalEvidenceProven:true}).reason,'online-pending-remains');
-assert.equal(evaluatePhotoOnlineRecheck({pendingTabletCount:1,historicalEvidenceProven:true}).onlinePendingCount,1);
+assert.equal(evaluatePhotoOnlineRecheck({pendingRegularCount:1,historicalEvidenceProven:true,onlineScopeCount:1,onlineUnfinishedCount:1}).reason,'online-orders-unfinished');
+assert.equal(evaluatePhotoOnlineRecheck({pendingTabletCount:1,historicalEvidenceProven:true,onlineScopeCount:1,onlineUnfinishedCount:1}).onlinePendingCount,1);
 assert.equal(evaluatePhotoOnlineRecheck({historicalEvidenceProven:false}).reason,'missing-historical-evidence');
+assert.equal(evaluatePhotoOnlineRecheck({historicalEvidenceProven:true,onlineUploadedCount:449,onlineScopeCount:449,onlineUnfinishedCount:449}).complete,false,
+  '已上传图片但订单仍为祈福中，不能记作线上闭环');
+assert.equal(evaluatePhotoOnlineRecheck({historicalEvidenceProven:true,onlineScopeCount:0,onlineUnfinishedCount:0}).complete,false,
+  '历史订单在线上当前筛选中完全消失，也不能仅凭空查询记作闭环');
 
 const cloudVisionItems=[{file:'opaque-local-file.jpg',reliable:false,number:null,paperGeometry:{},visualMetrics:{},candidates:[]}];
 const cloudVisionResult=await resolvePhotoNumbersWithCloudVision({items:cloudVisionItems});
@@ -536,9 +540,13 @@ assert.equal(normalizeText('供水\u00ad养净'), '供水养净');
 assert.deepEqual(evaluatePhotoOrderClosure({missingBlessingCount:2,onlineNotUploadedCount:7}),{
   complete:false,partial:true,missingBlessingCount:2,onlineNotUploadedCount:7,manualReviewCount:0,stage:'available-orders-complete-waiting-for-supplement',
 });
-assert.equal(evaluatePhotoOrderClosure({missingBlessingCount:2,onlineNotUploadedCount:0}).complete,true);
+assert.equal(evaluatePhotoOrderClosure({missingBlessingCount:2,onlineNotUploadedCount:0,completedOrderCount:10}).complete,true);
 assert.equal(evaluatePhotoOrderClosure({missingBlessingCount:0,onlineNotUploadedCount:0,manualReviewCount:1}).complete,false);
 assert.equal(evaluatePhotoOrderClosure({missingBlessingCount:0,onlineNotUploadedCount:0,manualReviewCount:1}).partial,true);
+assert.equal(evaluatePhotoOrderClosure({missingBlessingCount:0}).complete,false,
+  '人工编号模式不能跳过线上未上传查询并把未知当成零');
+assert.equal(evaluatePhotoOrderClosure({missingBlessingCount:0,onlineNotUploadedCount:0,completedOrderCount:0}).complete,false,
+  '没有完成任何订单时不能用零待办假设生成完成回执');
 assert.deepEqual(upsertPhotoCompletionBatch([{fileSetHash:'old',regularCompletedOrderCount:10}],{fileSetHash:'new',regularCompletedOrderCount:2}).map((item)=>item.fileSetHash),['old','new']);
 assert.equal(upsertPhotoCompletionBatch([{fileSetHash:'same',regularCompletedOrderCount:1}],{fileSetHash:'same',regularCompletedOrderCount:2})[0].regularCompletedOrderCount,2);
 const totals = calculateQuantities([
@@ -985,7 +993,11 @@ assert.match(runnerSource,/receipt\.currentBatchStartedAt = new Date\(\)\.toISOS
 assert.match(runnerSource,/available-files-complete-waiting-for-supplement/);
 assert.match(runnerSource,/个 PDF 编号待匹配.*这些照片不会猜号或上传/);
 assert.match(runnerSource,/localMissingSupersededByOnline/);
-assert.match(runnerSource,/queryNotUploadedOrders\(photoDate,\{productMode:'all'\}\)/);
+assert.match(runnerSource,/queryNotUploadedOrders\(photoDate,\{productMode:'all',allStates:true\}\)/);
+assert.match(siteSource,/sceneStatus: '未上传', state:'祈福中'/);
+assert.match(siteSource,/sceneStatus:'已上传', state:'祈福中'/);
+assert.match(runnerSource,/onlineUnfinishedCount/);
+assert.match(runnerSource,/旧版批量完成回执缺少线上终态核查，不能直接重跑或覆盖/);
 assert.match(runnerSource,/历史补图线上闭环已确认/);
 assert.match(runnerSource,/祈福运行数据/);
 assert.doesNotMatch(runnerSource,/@自动化处理/);

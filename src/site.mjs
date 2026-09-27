@@ -1349,7 +1349,7 @@ export class PrayerSite {
     // 平台的供养物下拉筛选会把含不可见字符的“供水养净”数据漏成 0 条。
     // 始终查询完整的“福单已上传 + 场景图未上传”集合，再用已统一清洗的
     // 产品名称在本地分出供水/供灯；全选仍由 selectRows(mode) 按同一规则执行。
-    const rows = await this.queryUploadedOrders(date, { productMode: 'all', sceneStatus: '未上传' });
+    const rows = await this.queryUploadedOrders(date, { productMode: 'all', sceneStatus: '未上传', state:'祈福中' });
     const expectedRows = mode === 'water' ? rows.filter((row) => normalizeText(row.productName).includes('供水养净')) : rows.filter((row) => !normalizeText(row.productName).includes('供水养净'));
     if (!expectedRows.length) {
       this.log(`${label}：没有“福单已上传且场景图未上传”的订单，跳过。`);
@@ -1419,18 +1419,18 @@ export class PrayerSite {
       this.page.off('response', trackUpdate);
     }
     await sleep(500);
-    const remaining = await this.queryUploadedOrders(date, { productMode: 'all', sceneStatus: '未上传' });
+    const remaining = await this.queryUploadedOrders(date, { productMode: 'all', sceneStatus: '未上传', state:'祈福中' });
     const remainingMode = mode === 'water' ? remaining.filter((row) => normalizeText(row.productName).includes('供水养净')) : remaining.filter((row) => !normalizeText(row.productName).includes('供水养净'));
     if (remainingMode.length) throw new Error(`${label}场景图上传后仍有 ${remainingMode.length} 条未上传，已停止。`);
     this.log(`${label}场景图上传并复核完成：${selected} 条订单，${files.length} 张场景图。`);
     return { mode, selectedCount: selected, skipped: false, files: files.map((file) => path.basename(file)) };
   }
   async countUploadedWithoutScene(date) {
-    const rows = await this.queryUploadedOrders(date, { productMode:'all', sceneStatus:'未上传' });
+    const rows = await this.queryUploadedOrders(date, { productMode:'all', sceneStatus:'未上传', state:'祈福中' });
     return rows.length;
   }
   async completeUploadedPhotoOrders(date, expectedOrderCount = null, expectedOrderIdHash = null) {
-    const rows = await this.queryUploadedOrders(date, { productMode:'all', sceneStatus:'已上传' });
+    const rows = await this.queryUploadedOrders(date, { productMode:'all', sceneStatus:'已上传', state:'祈福中' });
     if (!rows.length) {
       const recoveredCount = Number(expectedOrderCount || 0);
       this.log(`线上已没有待批量完成的订单；判定上次提交已经成功，本次只复核并补记 ${recoveredCount} 条完成回执。`);
@@ -1464,7 +1464,7 @@ export class PrayerSite {
     let lastError = null;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        remaining = await this.queryUploadedOrders(date, { productMode:'all', sceneStatus:'已上传' });
+        remaining = await this.queryUploadedOrders(date, { productMode:'all', sceneStatus:'已上传', state:'祈福中' });
         break;
       } catch (error) {
         lastError = error;

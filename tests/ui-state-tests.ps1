@@ -107,7 +107,7 @@ try {
 
     Write-TestJson (Join-Path $photoRunDir 'photo-online-closure.json') ([ordered]@{
         schemaVersion=1;businessDate='2026-08-10';checkedAt='2026-08-31T02:00:00Z';complete=$true;
-        onlineNotUploadedCount=0;pendingRegularCount=0;pendingTabletCount=0;readOnly=$true;platformModified=$false
+        onlineNotUploadedCount=0;pendingRegularCount=0;pendingTabletCount=0;onlineScopeCount=164;onlineUnfinishedCount=0;readOnly=$true;platformModified=$false
     })
     Refresh-PhotoCard
     if (-not [string]::IsNullOrWhiteSpace($script:photoNextAction)) { throw '线上零待办闭环后不应再安排本地旧断点动作' }
@@ -118,9 +118,18 @@ try {
 
     Write-TestJson (Join-Path $photoRunDir 'scene-upload-receipt.json') ([ordered]@{complete=$true;partialComplete=$false;fileSetHash='hash-1';completedOrderCount=164;tabletCompletionVerified=$true})
     Refresh-PhotoCard
-    if (-not [string]::IsNullOrWhiteSpace($script:photoNextAction)) { throw '照片闭环完成后不应再安排动作' }
-    Assert-Equal $photoProgress.Value 100 '照片完成进度错误'
-    Assert-Equal $photoMainButton.Enabled $false '照片完成后主按钮应禁用'
+    Assert-Equal $script:photoNextAction 'photo-online-recheck' '旧场景回执没有线上核查凭据时必须允许重新核查'
+    Assert-Equal $photoMainButton.Enabled $true '旧场景回执不应禁用照片主按钮'
+    if ($photoStatus.Text -notmatch '线上未核实') { throw '旧场景回执不应显示线上已完成' }
+    Write-TestJson (Join-Path $photoRunDir 'photo-online-closure.json') ([ordered]@{businessDate='2026-08-10';complete=$false;onlineScopeCount=449;onlineUnfinishedCount=449;historicalOrderCount=449})
+    Refresh-PhotoCard
+    Assert-Equal $script:photoNextAction 'photo-scenes' '线上仍为祈福中的订单应能继续处理'
+    if ($photoStatus.Text -notmatch '449 条祈福未完成') { throw '线上未完成数没有显示在照片卡片' }
+    Write-TestJson (Join-Path $photoRunDir 'photo-online-closure.json') ([ordered]@{businessDate='2026-08-10';complete=$false;onlineScopeCount=0;onlineUnfinishedCount=0;historicalOrderCount=184})
+    Refresh-PhotoCard
+    Assert-Equal $script:photoNextAction 'photo-online-recheck' '线上当前查询无订单时不能直接续跑'
+    if ($photoStatus.Text -notmatch '本地旧清单有 184 条订单') { throw '空查询没有说明旧订单与线上不一致' }
+    Remove-Item -LiteralPath (Join-Path $photoRunDir 'photo-online-closure.json') -Force
     $manifest.counts.unexpected = 1
     $manifest.errors = @('发现新增原图')
     $manifest.blockingErrors = @('微信补图.jpg：尚未识别编号或场景类别')

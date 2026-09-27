@@ -32,18 +32,19 @@ export function markOnlineCompletionVerified(state, businessDate, checkedAt = ne
   };
 }
 
-export function evaluatePhotoOrderClosure({ missingBlessingCount = 0, onlineNotUploadedCount = 0, manualReviewCount = 0 } = {}) {
+export function evaluatePhotoOrderClosure({ missingBlessingCount = 0, onlineNotUploadedCount = null, manualReviewCount = 0, completedOrderCount = 0 } = {}) {
   const missingPhotos = Math.max(0,Number(missingBlessingCount || 0));
-  const onlinePending = Math.max(0,Number(onlineNotUploadedCount || 0));
+  const onlineVerified = Number.isFinite(onlineNotUploadedCount) && onlineNotUploadedCount >= 0;
+  const onlinePending = onlineVerified ? onlineNotUploadedCount : null;
   const manualPending = Math.max(0,Number(manualReviewCount || 0));
-  const complete = onlinePending === 0 && manualPending === 0;
+  const complete = onlineVerified && onlinePending === 0 && manualPending === 0 && Number(completedOrderCount) > 0;
   return {
     complete,
     partial: !complete,
     missingBlessingCount: missingPhotos,
     onlineNotUploadedCount: onlinePending,
     manualReviewCount: manualPending,
-    stage: complete ? 'complete' : 'available-orders-complete-waiting-for-supplement',
+    stage: complete ? 'complete' : onlineVerified ? 'available-orders-complete-waiting-for-supplement' : 'online-verification-required',
   };
 }
 
@@ -115,6 +116,8 @@ export function evaluatePhotoOnlineRecheck({
   pendingRegularCount = 0,
   pendingTabletCount = 0,
   historicalEvidenceProven = false,
+  onlineScopeCount = null,
+  onlineUnfinishedCount = null,
 } = {}) {
   const uploaded = Math.max(0, Number(onlineUploadedCount || 0));
   const notUploaded = Math.max(0, Number(onlineNotUploadedCount || 0));
@@ -122,7 +125,9 @@ export function evaluatePhotoOnlineRecheck({
   const tablet = Math.max(0, Number(pendingTabletCount || 0));
   const evidenceProven = historicalEvidenceProven === true;
   const onlinePendingCount = notUploaded + regular + tablet;
-  const complete = evidenceProven && onlinePendingCount === 0;
+  const scopeVerified = Number.isFinite(onlineScopeCount) && onlineScopeCount > 0;
+  const unfinishedVerified = Number.isFinite(onlineUnfinishedCount) && onlineUnfinishedCount >= 0;
+  const complete = evidenceProven && scopeVerified && unfinishedVerified && onlineUnfinishedCount === 0 && onlinePendingCount === 0;
   return {
     complete,
     onlineUploadedCount: uploaded,
@@ -130,9 +135,15 @@ export function evaluatePhotoOnlineRecheck({
     pendingRegularCount: regular,
     pendingTabletCount: tablet,
     onlinePendingCount,
+    onlineScopeCount: scopeVerified ? onlineScopeCount : 0,
+    onlineUnfinishedCount: unfinishedVerified ? onlineUnfinishedCount : null,
     historicalEvidenceProven: evidenceProven,
     reason: !evidenceProven
       ? 'missing-historical-evidence'
+      : !scopeVerified || !unfinishedVerified
+        ? 'online-scope-unverified'
+        : onlineUnfinishedCount > 0
+          ? 'online-orders-unfinished'
       : onlinePendingCount > 0
         ? 'online-pending-remains'
         : 'online-zero-pending-verified',

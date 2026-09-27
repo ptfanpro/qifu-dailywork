@@ -512,7 +512,8 @@ function Refresh-PhotoCard {
     $hasNewRaw = Test-PhotoInboxHasPendingWork $currentInbox $manifest
     $hasResumeEvidence = Test-PhotoRunHasResumeEvidence $photoRunDir $manifest $checkpoint
     $onlineClosure = Read-JsonFile (Join-Path $photoRunDir 'photo-online-closure.json')
-    if ($onlineClosure -and $onlineClosure.complete -eq $true -and [string]$onlineClosure.businessDate -eq $date -and -not $hasNewRaw) {
+    if ($onlineClosure -and $onlineClosure.complete -eq $true -and [string]$onlineClosure.businessDate -eq $date -and
+        [int]$onlineClosure.onlineScopeCount -gt 0 -and [int]$onlineClosure.onlineUnfinishedCount -eq 0 -and -not $hasNewRaw) {
         $checkedAtText = if ($onlineClosure.checkedAt) { ([DateTime]$onlineClosure.checkedAt).ToLocalTime().ToString('yyyy-MM-dd HH:mm') } else { '最近一次复核' }
         Set-PhotoResult "$date 线上闭环已复核（$checkedAtText）：福单未上传 0、供灯待祈福 0、牌位待祈福 0。本地旧断点或旧规格提醒不再列为未闭环。" ([System.Drawing.Color]::DarkGreen) 100 '线上已确认闭环' $false $null
         return
@@ -533,7 +534,19 @@ function Refresh-PhotoCard {
     } else { '请核对尚未确认的图片及场景类别' }
     $firstPhotoIssue = Get-FirstPhotoIssue $manifest
     if ($sceneReceipt -and $sceneReceipt.complete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash -and $blockingErrorCount -eq 0 -and $manualIssueCount -eq 0) {
-        Set-PhotoResult "$date 照片业务已完成：福单图 $blessingCount 张，场景图 $sceneCount 张。" ([System.Drawing.Color]::DarkGreen) 100 '照片业务已完成' $false $null
+        if ($sceneReceipt.onlineVerifiedAt -and [int]$sceneReceipt.completedOrderCount -gt 0 -and [int]$sceneReceipt.onlineNotUploadedCount -eq 0) {
+            Set-PhotoResult "$date 照片业务线上完成：福单图 $blessingCount 张，场景图 $sceneCount 张，已完成 $([int]$sceneReceipt.completedOrderCount) 条订单。" ([System.Drawing.Color]::DarkGreen) 100 '照片业务已完成' $false $null
+            return
+        }
+        if ($onlineClosure -and [string]$onlineClosure.businessDate -eq $date -and [int]$onlineClosure.onlineUnfinishedCount -gt 0) {
+            Set-PhotoResult "$date 本地照片有上传回执，但线上仍有 $([int]$onlineClosure.onlineUnfinishedCount) 条祈福未完成；继续按线上状态处理。" ([System.Drawing.Color]::DarkOrange) 75 '继续处理线上照片业务' $true 'photo-scenes'
+            return
+        }
+        if ($onlineClosure -and [string]$onlineClosure.businessDate -eq $date -and [int]$onlineClosure.onlineScopeCount -eq 0 -and [int]$onlineClosure.historicalOrderCount -gt 0) {
+            Set-PhotoResult "$date 本地旧清单有 $([int]$onlineClosure.historicalOrderCount) 条订单，但线上当前日期筛选为 0；线上未核实完成，需先核对后台业务日期。" ([System.Drawing.Color]::DarkOrange) 75 '重新核实线上状态' $true 'photo-online-recheck'
+            return
+        }
+        Set-PhotoResult "$date 本地照片有上传回执，线上未核实完成；先只读复核对应日期订单，再决定是否继续处理。" ([System.Drawing.Color]::DarkOrange) 75 '核实线上照片状态' $true 'photo-online-recheck'
         return
     }
     if ($sceneReceipt -and $sceneReceipt.partialComplete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash -and ($missingCount -gt 0 -or $manualIssueCount -gt 0)) {
@@ -883,6 +896,11 @@ function Complete-Runner([int]$code) {
         }
         Write-WorkflowCheckpoint 'photo' 'stage-completed' $completedAction 0
         Refresh-PhotoCard
+        if ($completedAction -eq 'photo-online-recheck') {
+            $globalStatus.Text = $photoStatus.Text
+            $globalStatus.ForeColor = $photoStatus.ForeColor
+            return
+        }
         if ($script:photoNextAction -eq 'photo-manual-prepare') {
             Write-WorkflowCheckpoint 'photo' 'waiting-supplement' $completedAction 0
             $globalStatus.Text = "现有照片及其已上传订单已分批完成。$($photoStatus.Text)再次点击照片主按钮只处理新增图片和剩余订单。"
