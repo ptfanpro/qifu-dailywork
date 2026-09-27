@@ -39,6 +39,21 @@ try {
     $script:running = $false
 
     $photoRunDir = Join-Path (Join-Path (Join-Path $script:localStateRoot 'workdays') '2026-08-10') 'photos'
+    $manualInbox = Join-Path $testRoot '8月10日\1'
+    New-Item -ItemType Directory -Force -Path $manualInbox | Out-Null
+    $manualPhoto = Join-Path $manualInbox '101.jpg'
+    [System.IO.File]::WriteAllBytes($manualPhoto,[byte[]](1,2,3))
+    $manualHash = (Get-FileHash -LiteralPath $manualPhoto -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') ([ordered]@{
+        businessDate='2026-08-10';manualNumberedMode=$true;blessingReady=$false;fileSetHash='manual-hash';
+        counts=[ordered]@{allImages=1;blessing=1;lampScene=0;waterScene=0;missingBlessing=0;extraBlessing=0};
+        blockingErrors=@('101.jpg：尺寸必须为 1800×1350');
+        inputFileHashes=[ordered]@{'101.jpg'=$manualHash}
+    })
+    Refresh-PhotoCard
+    Assert-Equal $script:photoNextAction 'photo-manual-prepare' '人工编号照片不合规格时应允许先压缩'
+    Assert-Equal $photoMainButton.Enabled $true '人工编号照片待压缩时主按钮不能被历史成品规则禁用'
+    Remove-Item -LiteralPath $manualInbox -Recurse -Force
     $manifest = [ordered]@{
         businessDate = '2026-08-10'
         blessingReady = $true

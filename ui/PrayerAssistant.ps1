@@ -515,7 +515,7 @@ function Refresh-PhotoCard {
         Set-PhotoResult "$date 线上闭环已复核（$checkedAtText）：福单未上传 0、供灯待祈福 0、牌位待祈福 0。本地旧断点或旧规格提醒不再列为未闭环。" ([System.Drawing.Color]::DarkGreen) 100 '线上已确认闭环' $false $null
         return
     }
-    if ($blockingErrorCount -gt 0 -and $manifest.blessingReady -ne $true -and -not $hasNewRaw -and -not $hasResumeEvidence -and $blessingCount -gt 0 -and [int]$manifest.counts.missingBlessing -eq 0 -and [int]$manifest.counts.extraBlessing -eq 0) {
+    if ($manifest.manualNumberedMode -ne $true -and $blockingErrorCount -gt 0 -and $manifest.blessingReady -ne $true -and -not $hasNewRaw -and -not $hasResumeEvidence -and $blessingCount -gt 0 -and [int]$manifest.counts.missingBlessing -eq 0 -and [int]$manifest.counts.extraBlessing -eq 0) {
         Set-PhotoResult "$date 仅发现历史成品：福单图 $blessingCount 张；旧小数编号场景图和旧规格文件不作为新增待办，NAS 文件未修改。后续补图进入 1 文件夹后再重新检测。" ([System.Drawing.Color]::DimGray) 0 '历史成品目录' $false $null
         return
     }
@@ -541,7 +541,8 @@ function Refresh-PhotoCard {
     }
     if ($blockingErrorCount -gt 0 -or $manifest.blessingReady -ne $true) {
         $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
-        Set-PhotoResult "$prefix 具体问题：$firstPhotoIssue 请先人工完成编号，软件只负责压缩和上传，不读取 PDF。" ([System.Drawing.Color]::DarkOrange) 15 '检查并压缩照片' $true 'photo-manual-prepare'
+        $nextStep = if ($manifest.manualNumberedMode -eq $true -and [int]$manifest.counts.unexpected -eq 0) { '点击“一键处理照片”统一规格，然后继续上传；不会读取 PDF。' } else { '请先人工完成编号，软件只负责压缩和上传，不读取 PDF。' }
+        Set-PhotoResult "$prefix 具体问题：$firstPhotoIssue $nextStep" ([System.Drawing.Color]::DarkOrange) 15 '检查并压缩照片' $true 'photo-manual-prepare'
         return
     }
     $uploadReceipt = Read-JsonFile (Join-Path $photoRunDir 'photo-upload-receipt.json')
