@@ -363,11 +363,13 @@ function Refresh-PendingPhotoDates {
 function Test-NeedAutomaticPdfInspect {
     if (-not (Validate-Root $false)) { return $false }
     $date = $pdfDate.Value.ToString('yyyy-MM-dd')
+    $runDir = Get-WorkdayRoot $date
+    $state = Read-JsonFile (Join-Path $runDir 'run-state.json')
+    if ($state -and $state.pdfVerified -eq $true -and ($state.stateChanged -eq $true -or $state.completionVerified -eq $true)) { return $false }
     $folder = Join-Path $rootBox.Text.Trim() ("{0}月{1}日" -f $pdfDate.Value.Month,$pdfDate.Value.Day)
     if (Test-Path -LiteralPath $folder) {
         if (@(Get-ChildItem -LiteralPath $folder -File -Filter '*.pdf' -ErrorAction SilentlyContinue).Count -gt 0) { return $true }
     }
-    $runDir = Get-WorkdayRoot $date
     foreach ($name in @('run-state.json','pdf-receipt.json','online-verification.json')) {
         if (Test-Path -LiteralPath (Join-Path $runDir $name)) { return $true }
     }

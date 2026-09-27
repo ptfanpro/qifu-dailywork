@@ -150,6 +150,7 @@ try {
     [System.IO.File]::WriteAllBytes((Join-Path $pdfFolder '811红纸1.pdf'),[byte[]](37,80,68,70,45))
     $pdfRunDir = Join-Path (Join-Path $script:localStateRoot 'workdays') '2026-08-11'
     Write-TestJson (Join-Path $pdfRunDir 'run-state.json') ([ordered]@{pdfVerified=$true;stateChanged=$true;orderCount=170})
+    Assert-Equal (Test-NeedAutomaticPdfInspect) $false 'PDF 已完成时启动初始化不应再次登录并锁住照片按钮'
     Refresh-PdfCard
     Assert-Equal $script:pdfWorkflowComplete $true 'PDF 完成状态未识别'
     Assert-Equal $pdfProgress.Value 100 'PDF 完成进度错误'
