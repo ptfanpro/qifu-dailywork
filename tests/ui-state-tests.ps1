@@ -25,6 +25,8 @@ if ($null -ne $photoRefreshButton -or $null -ne $pdfRefreshButton) { throw '照�
 if ($null -ne $pendingPhotoPicker) { throw '历史未解决业务仍要求选择日期' }
 Assert-Equal $pendingProcessButton.Text '检查历史未解决业务' '历史线上检查按钮名称不正确'
 Assert-Equal $manualPhotoPrepare.Text '人工编号照片压缩' '高级工具仍然显示自动识别入口'
+Assert-Equal $refreshLocalButton.Text '刷新照片和PDF状态' '缺少无需重启的本地状态刷新入口'
+Assert-Equal $script:availabilityTimer.Interval 15000 '照片和 PDF 时间状态没有定时检查'
 
 $originalRoot = $rootBox.Text
 $originalLocalStateRoot = $script:localStateRoot
@@ -41,8 +43,25 @@ try {
     $photoRunDir = Join-Path (Join-Path (Join-Path $script:localStateRoot 'workdays') '2026-08-10') 'photos'
     $manualInbox = Join-Path $testRoot '8月10日\1'
     New-Item -ItemType Directory -Force -Path $manualInbox | Out-Null
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') ([ordered]@{
+        businessDate='2026-08-10';manualNumberedMode=$true;blessingReady=$false;fileSetHash='empty-hash';
+        counts=[ordered]@{allImages=0;blessing=0;lampScene=0;waterScene=0};inputFileHashes=[ordered]@{}
+    })
+    Refresh-PhotoCard
+    Assert-Equal $photoMainButton.Enabled $false '照片目录为空时应显示等待状态'
     $manualPhoto = Join-Path $manualInbox '101.jpg'
     [System.IO.File]::WriteAllBytes($manualPhoto,[byte[]](1,2,3))
+    Refresh-LocalAvailability
+    Assert-Equal $script:photoNextAction 'photo-manual-prepare' '放入照片后应自动解锁照片主按钮'
+    Assert-Equal $photoMainButton.Enabled $true '放入照片后仍不能点击照片主按钮'
+    $savedBeijingHour = (Get-Command Get-BeijingHour).ScriptBlock
+    function Get-BeijingHour { return 9 }
+    Refresh-LocalAvailability
+    Assert-Equal $pdfMainButton.Enabled $false '北京时间 10 点前 PDF 按钮应保持禁用'
+    function Get-BeijingHour { return 10 }
+    Refresh-LocalAvailability
+    Assert-Equal $pdfMainButton.Enabled $true '北京时间到 10 点后应无需重启解锁 PDF 按钮'
+    Set-Item Function:Get-BeijingHour $savedBeijingHour
     $manualHash = (Get-FileHash -LiteralPath $manualPhoto -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') ([ordered]@{
         businessDate='2026-08-10';manualNumberedMode=$true;blessingReady=$false;fileSetHash='manual-hash';
@@ -130,6 +149,16 @@ try {
     Assert-Equal $script:photoNextAction 'photo-online-recheck' '线上当前查询无订单时不能直接续跑'
     if ($photoStatus.Text -notmatch '本地旧清单有 184 条订单') { throw '空查询没有说明旧订单与线上不一致' }
     Remove-Item -LiteralPath (Join-Path $photoRunDir 'photo-online-closure.json') -Force
+    $manifest.manualNumberedMode = $true
+    $manifest.inputFileHashes = [ordered]@{'101.jpg'=$manualHash}
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
+    New-Item -ItemType Directory -Force -Path $manualInbox | Out-Null
+    [System.IO.File]::WriteAllBytes($manualPhoto,[byte[]](1,2,3))
+    $newNumberedPhoto = Join-Path $manualInbox '102.jpg'
+    [System.IO.File]::WriteAllBytes($newNumberedPhoto,[byte[]](4,5,6))
+    Refresh-LocalAvailability
+    Assert-Equal $script:photoNextAction 'photo-manual-prepare' '已有完成回执后新增纯数字照片仍应先重新预检'
+    Remove-Item -LiteralPath $newNumberedPhoto -Force
     $manifest.counts.unexpected = 1
     $manifest.errors = @('发现新增原图')
     $manifest.blockingErrors = @('微信补图.jpg：尚未识别编号或场景类别')

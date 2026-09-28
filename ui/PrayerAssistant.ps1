@@ -152,6 +152,7 @@ $pdfGroup.Controls.Add($pdfProgress)
 $refreshAllButton = Add-Button $form '重新初始化全部状态' 20 457 185 38
 $copyButton = Add-Button $form '复制数量通知' 215 457 160 38
 $copyButton.Enabled = $false
+$refreshLocalButton = Add-Button $form '刷新照片和PDF状态' 385 457 205 38
 $advancedToggle = Add-Button $form '展开高级/故障工具 ▼' 600 457 260 38
 
 $advancedPanel = New-Object System.Windows.Forms.Panel
@@ -215,6 +216,10 @@ $script:uiLogPath = Join-Path $script:localStateRoot ('logs\ui-{0}-{1}.log' -f (
 $script:uiLogLength = 0
 $script:processTimer = New-Object System.Windows.Forms.Timer
 $script:processTimer.Interval = 250
+$script:availabilityTimer = New-Object System.Windows.Forms.Timer
+$script:availabilityTimer.Interval = 15000
+$script:lastPhotoInboxSnapshot = $null
+$script:lastPdfTimeGate = $null
 
 function Save-Settings {
     Write-PrayerAtomicJson -Path $settingsPath -Value @{
@@ -454,6 +459,7 @@ function Set-Running([bool]$value) {
     $photoMainButton.Enabled = -not $value
     $pdfMainButton.Enabled = -not $value
     $refreshAllButton.Enabled = -not $value
+    $refreshLocalButton.Enabled = -not $value
     foreach ($button in @($manualPhotoPrepare,$manualPhotoScan,$manualPhotoUpload,$manualSceneUpload,$manualPdfInspect,$manualPdfExport,$manualState,$credentialButton)) { $button.Enabled = -not $value }
     Update-CredentialButtons
 }
@@ -494,8 +500,14 @@ function Refresh-PhotoCard {
     $photoRunDir = Join-Path (Get-WorkdayRoot $date) 'photos'
     $manifest = Read-JsonFile (Join-Path $photoRunDir 'photo-manifest.json')
     $checkpoint = Read-JsonFile (Join-Path $photoRunDir 'ui-workflow-state.json')
+    $currentInbox = Get-PhotoInboxForBusinessDate $date
     if ($null -eq $manifest) {
-        Set-PhotoResult '尚未检查人工编号照片。请先把福单照片改成纯数字文件名。' ([System.Drawing.Color]::DimGray) 0 '压缩并上传照片' $true 'photo-manual-prepare'
+        $newImageCount = if (Test-Path -LiteralPath $currentInbox -PathType Container) { @(Get-ChildItem -LiteralPath $currentInbox -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(jpg|jpeg|png)$' }).Count } else { 0 }
+        if ($newImageCount -gt 0) {
+            Set-PhotoResult "$date 发现 $newImageCount 张照片；点击【一键处理照片】检查人工编号和规格。" ([System.Drawing.Color]::DarkBlue) 10 '检查并压缩照片' $true 'photo-manual-prepare'
+        } else {
+            Set-PhotoResult "$date 未发现照片，等待照片进入日期目录的 1 文件夹。" ([System.Drawing.Color]::DarkOrange) 5 '等待照片' $false $null
+        }
         return
     }
     $allCount = [int]$manifest.counts.allImages
@@ -505,11 +517,19 @@ function Refresh-PhotoCard {
     $manualIssueCount = if ($null -ne $manifest.manualIssues) { @($manifest.manualIssues).Count } else { 0 }
     $sceneManualIssueCount = if ($null -ne $manifest.sceneManualIssues) { @($manifest.sceneManualIssues).Count } else { 0 }
     if ($allCount -eq 0) {
-        Set-PhotoResult "$date 未发现照片，等待照片进入日期目录的 1 文件夹。" ([System.Drawing.Color]::DarkOrange) 5 '等待照片' $false $null
+        $newImageCount = if (Test-Path -LiteralPath $currentInbox -PathType Container) { @(Get-ChildItem -LiteralPath $currentInbox -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(jpg|jpeg|png)$' }).Count } else { 0 }
+        if ($newImageCount -gt 0) {
+            Set-PhotoResult "$date 新放入 $newImageCount 张照片；点击【一键处理照片】重新检查并压缩。" ([System.Drawing.Color]::DarkBlue) 10 '检查并压缩照片' $true 'photo-manual-prepare'
+        } else {
+            Set-PhotoResult "$date 未发现照片，等待照片进入日期目录的 1 文件夹。" ([System.Drawing.Color]::DarkOrange) 5 '等待照片' $false $null
+        }
         return
     }
-    $currentInbox = Get-PhotoInboxForBusinessDate $date
     $hasNewRaw = Test-PhotoInboxHasPendingWork $currentInbox $manifest
+    if ($hasNewRaw) {
+        Set-PhotoResult "$date 照片目录有新增或改动；点击【一键处理照片】重新检查人工编号和规格。" ([System.Drawing.Color]::DarkBlue) 10 '重新检查照片' $true 'photo-manual-prepare'
+        return
+    }
     $hasResumeEvidence = Test-PhotoRunHasResumeEvidence $photoRunDir $manifest $checkpoint
     $onlineClosure = Read-JsonFile (Join-Path $photoRunDir 'photo-online-closure.json')
     if ($onlineClosure -and $onlineClosure.complete -eq $true -and [string]$onlineClosure.businessDate -eq $date -and
@@ -665,6 +685,26 @@ function Refresh-PdfCard {
     $pdfMainButton.Enabled = -not $script:running
 }
 function Refresh-AllCards { Refresh-PhotoCard; Refresh-PendingPhotoBar; Refresh-PdfCard }
+function Get-PhotoInboxSnapshot {
+    $date = $photoDate.Value.ToString('yyyy-MM-dd')
+    $inbox = Get-PhotoInboxForBusinessDate $date
+    if (-not (Test-Path -LiteralPath $inbox -PathType Container)) { return "$date|missing" }
+    $files = @(Get-ChildItem -LiteralPath $inbox -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(jpg|jpeg|png)$' } | Sort-Object Name)
+    return "$date|" + (($files | ForEach-Object { "$($_.Name)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }) -join ';')
+}
+function Refresh-LocalAvailability([bool]$force = $false) {
+    if ($script:running) { return }
+    $photoSnapshot = Get-PhotoInboxSnapshot
+    if ($force -or $photoSnapshot -ne $script:lastPhotoInboxSnapshot) {
+        $script:lastPhotoInboxSnapshot = $photoSnapshot
+        Refresh-PhotoCard
+    }
+    $pdfTimeGate = "$($pdfDate.Value.ToString('yyyy-MM-dd'))|$((Get-BeijingHour) -ge 10)"
+    if ($force -or $pdfTimeGate -ne $script:lastPdfTimeGate) {
+        $script:lastPdfTimeGate = $pdfTimeGate
+        Refresh-PdfCard
+    }
+}
 
 function Test-ShouldAutoResumePhoto {
     if ([string]::IsNullOrWhiteSpace($script:photoNextAction)) { return $false }
@@ -965,12 +1005,23 @@ $pendingProcessButton.Add_Click({
     $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
     Start-Runner 'historical-backlog-check' $false 'historical-backlog' $true
 })
+$script:availabilityTimer.Add_Tick({
+    try { Refresh-LocalAvailability } catch {
+        $globalStatus.Text = "本地状态自动刷新失败：$($_.Exception.Message)；可点击【刷新照片和PDF状态】重试。"
+        $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
+    }
+})
 $pdfMainButton.Add_Click({
     if (-not $script:running) {
         Start-Runner $script:pdfNextAction $true 'pdf' $true
     }
 })
 $refreshAllButton.Add_Click({ Start-Initialization 'all' })
+$refreshLocalButton.Add_Click({
+    Refresh-LocalAvailability $true
+    $globalStatus.Text = '已重新检查照片目录和北京时间；照片与 PDF 按钮状态已更新。'
+    $globalStatus.ForeColor = [System.Drawing.Color]::DarkBlue
+})
 
 $browseButton.Add_Click({
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -1041,6 +1092,7 @@ $pdfDate.Add_ValueChanged({
 })
 $form.Add_FormClosing({
     param($sender,$eventArgs)
+    $script:availabilityTimer.Stop()
     if ($script:running) {
         $answer = [System.Windows.Forms.MessageBox]::Show('任务仍在运行。关闭窗口会中断当前步骤，但已完成阶段仍可续跑。确定关闭吗？','任务运行中','YesNo','Warning')
         if ($answer -ne 'Yes') { $eventArgs.Cancel = $true }
@@ -1050,7 +1102,7 @@ $form.Add_FormClosing({
 $form.Add_Shown({
     Update-CredentialButtons
     if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') { $form.Close() }
-    else { Start-Initialization 'all' }
+    else { $script:availabilityTimer.Start(); Start-Initialization 'all' }
 })
 try {
     # State tests exercise the constructed controls without a desktop message
