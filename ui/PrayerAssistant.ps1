@@ -574,8 +574,12 @@ function Refresh-PhotoCard {
     if ($sceneReceipt -and $sceneReceipt.partialComplete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash) {
         $completedOrders = [int]$sceneReceipt.completedOrderCount
         $onlinePending = [int]$sceneReceipt.onlineNotUploadedCount
-        if ($manifest.manualNumberedMode -eq $true -and $onlinePending -gt 0 -and $missingCount -eq 0 -and $manualIssueCount -eq 0) {
-            Set-PhotoResult "$date 已上传照片对应 $completedOrders 条订单已分批完成；线上还有 $onlinePending 条福单未上传，等待新增照片。放入新照片后按钮会自动解锁。" ([System.Drawing.Color]::DarkOrange) 78 '等待补图' $false 'photo-manual-prepare'
+        if ($onlineClosure -and [string]$onlineClosure.businessDate -eq $date -and $null -ne $onlineClosure.onlineNotUploadedCount) {
+            $onlinePending = [int]$onlineClosure.onlineNotUploadedCount
+        }
+        if ($manifest.manualNumberedMode -eq $true -and $missingCount -eq 0 -and $manualIssueCount -eq 0) {
+            $onlinePendingText = if ($onlinePending -gt 0) { "线上还有 $onlinePending 条福单未上传" } else { '最近复核显示福单未上传 0 条，但线上闭环尚未确认' }
+            Set-PhotoResult "$date 已上传照片对应 $completedOrders 条订单已分批完成；$onlinePendingText。点击按钮只读复核线上状态一次；新增照片后会自动切换为压缩上传。" ([System.Drawing.Color]::DarkOrange) 78 '只读复核线上状态' $true 'photo-online-recheck'
             return
         }
         if ($missingCount -eq 0 -and $manualIssueCount -eq 0) {
@@ -961,6 +965,12 @@ function Complete-Runner([int]$code) {
         Write-WorkflowCheckpoint 'photo' 'stage-completed' $completedAction 0
         Refresh-PhotoCard
         if ($completedAction -eq 'photo-online-recheck') {
+            $globalStatus.Text = $photoStatus.Text
+            $globalStatus.ForeColor = $photoStatus.ForeColor
+            return
+        }
+        if ($completedAction -eq 'photo-scenes' -and $script:photoNextAction -eq 'photo-online-recheck') {
+            Write-WorkflowCheckpoint 'photo' 'waiting-review' $completedAction 0
             $globalStatus.Text = $photoStatus.Text
             $globalStatus.ForeColor = $photoStatus.ForeColor
             return

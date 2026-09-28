@@ -130,17 +130,28 @@ try {
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
     Write-TestJson (Join-Path $photoRunDir 'scene-upload-receipt.json') ([ordered]@{complete=$false;partialComplete=$true;fileSetHash='hash-1';completedOrderCount=142;onlineNotUploadedCount=142;tabletCompletionVerified=$true})
     Refresh-PhotoCard
-    Assert-Equal $script:photoNextAction 'photo-manual-prepare' '人工编号模式线上仍缺图时应停下等待新照片'
-    Assert-Equal $photoMainButton.Enabled $false '没有新增照片时不得反复启动场景完成'
-    if ($photoStatus.Text -notmatch '142 条') { throw '等待补图状态没有说明线上未上传订单数' }
+    Assert-Equal $script:photoNextAction 'photo-online-recheck' '没有新增照片时主按钮只能执行线上只读复核'
+    Assert-Equal $photoMainButton.Enabled $true '部分完成且没有新增照片时仍应允许点击主按钮复核线上状态'
+    if ($photoStatus.Text -notmatch '142 条' -or $photoStatus.Text -notmatch '只读复核') { throw '等待补图状态应说明线上未上传数及按钮的只读作用' }
     $savedStartRunner = (Get-Command Start-Runner).ScriptBlock
     $script:testRunnerCalls = 0
-    function Start-Runner { $script:testRunnerCalls += 1 }
+    function Start-Runner { $script:testRunnerCalls += 1; $script:testRunnerAction = [string]$args[0] }
     $script:activeAction = 'photo-scenes'
     $script:activeFlow = 'photo'
     Complete-Runner 0
     Assert-Equal $script:testRunnerCalls 0 '部分完成回执不得再次自动启动场景步骤'
-    Assert-Equal (Read-JsonFile (Join-Path $photoRunDir 'ui-workflow-state.json')).state 'waiting-supplement' '部分完成后应保存等待补图状态'
+    Assert-Equal (Read-JsonFile (Join-Path $photoRunDir 'ui-workflow-state.json')).state 'waiting-review' '部分完成后应停下等待人工触发一次只读复核'
+    Continue-PhotoFlow $false
+    Assert-Equal $script:testRunnerCalls 1 '手动点击后只应启动一次线上复核'
+    Assert-Equal $script:testRunnerAction 'photo-online-recheck' '没有新照片时不能重新启动上传或场景处理'
+    $script:activeAction = 'photo-online-recheck'
+    $script:activeFlow = 'photo'
+    Complete-Runner 0
+    Assert-Equal $script:testRunnerCalls 1 '线上只读复核结束后不得自动循环重跑'
+    Write-TestJson (Join-Path $photoRunDir 'photo-online-closure.json') ([ordered]@{businessDate='2026-08-10';complete=$false;onlineNotUploadedCount=120;onlineScopeCount=262;onlineUnfinishedCount=120;readOnly=$true;platformModified=$false})
+    Refresh-PhotoCard
+    Assert-Equal $script:photoNextAction 'photo-online-recheck' '线上复核未闭环且没有新照片时不得重新进入上传流程'
+    if ($photoStatus.Text -notmatch '120 条' -or $photoStatus.Text -match '线上还有 142 条') { throw '照片卡片应显示最近线上只读复核的待上传数' }
     Set-Item Function:Start-Runner $savedStartRunner
 
     Write-TestJson (Join-Path $photoRunDir 'photo-online-closure.json') ([ordered]@{
