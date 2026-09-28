@@ -208,6 +208,8 @@ $script:activeProcess = $null
 $script:initQueue = New-Object System.Collections.Queue
 $script:initFailures = New-Object System.Collections.Generic.List[string]
 $script:photoNextAction = $null
+$script:photoAutoStepCount = 0
+$script:backlogAutoStepCount = 0
 $script:pdfWorkflowComplete = $false
 $script:pdfNextAction = 'export'
 $script:lastSummary = $null
@@ -569,8 +571,17 @@ function Refresh-PhotoCard {
         Set-PhotoResult "$date 本地照片有上传回执，线上未核实完成；先只读复核对应日期订单，再决定是否继续处理。" ([System.Drawing.Color]::DarkOrange) 75 '核实线上照片状态' $true 'photo-online-recheck'
         return
     }
-    if ($sceneReceipt -and $sceneReceipt.partialComplete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash -and ($missingCount -gt 0 -or $manualIssueCount -gt 0)) {
+    if ($sceneReceipt -and $sceneReceipt.partialComplete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash) {
         $completedOrders = [int]$sceneReceipt.completedOrderCount
+        $onlinePending = [int]$sceneReceipt.onlineNotUploadedCount
+        if ($manifest.manualNumberedMode -eq $true -and $onlinePending -gt 0 -and $missingCount -eq 0 -and $manualIssueCount -eq 0) {
+            Set-PhotoResult "$date 已上传照片对应 $completedOrders 条订单已分批完成；线上还有 $onlinePending 条福单未上传，等待新增照片。放入新照片后按钮会自动解锁。" ([System.Drawing.Color]::DarkOrange) 78 '等待补图' $false 'photo-manual-prepare'
+            return
+        }
+        if ($missingCount -eq 0 -and $manualIssueCount -eq 0) {
+            Set-PhotoResult "$date 已完成现有 $completedOrders 条订单，但照片业务仍未闭环；自动续跑已停止，请核对线上缺图状态。" ([System.Drawing.Color]::DarkOrange) 78 '重新检查照片' $true 'photo-manual-prepare'
+            return
+        }
         Set-PhotoResult "$date 已确定福单图 $blessingCount 张及其 $completedOrders 条订单已分批完成。具体问题：$pendingPhotoText" ([System.Drawing.Color]::DarkOrange) 78 '检查人工编号照片' $true 'photo-manual-prepare'
         return
     }
@@ -782,6 +793,7 @@ function Start-NextInitialization {
 }
 function Start-Initialization([string]$scope = 'all') {
     if ($script:running -or -not (Validate-Root)) { return }
+    $script:photoAutoStepCount = 0
     if ($scope -eq 'all' -or $scope -eq 'photo-backlog') { [void](Refresh-PendingPhotoDates) }
     $script:initQueue.Clear()
     $script:initFailures.Clear()
@@ -809,7 +821,12 @@ function Continue-PhotoFlow([bool]$clearLog = $false) {
         $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
         return
     }
+    $script:photoAutoStepCount += 1
     Start-Runner $script:photoNextAction $true 'photo' $clearLog
+}
+function Test-PhotoAutoAdvance([string]$completedAction, [string]$nextAction, [int]$stepsCompleted) {
+    return (-not [string]::IsNullOrWhiteSpace($nextAction) -and
+        $completedAction -ne $nextAction -and $stepsCompleted -lt 4)
 }
 function Restore-BacklogPhotoDate {
     if ($null -eq $script:backlogOriginalPhotoDate) { return }
@@ -832,6 +849,7 @@ function Continue-BacklogPhotoFlow([bool]$clearLog = $false) {
         $globalStatus.ForeColor = [System.Drawing.Color]::DarkGreen
         return
     }
+    $script:backlogAutoStepCount += 1
     Start-Runner $script:photoNextAction $true 'backlog-photo' $clearLog
 }
 function Complete-Runner([int]$code) {
@@ -915,6 +933,12 @@ function Complete-Runner([int]$code) {
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
             return
         }
+        if ($script:photoNextAction -and -not (Test-PhotoAutoAdvance $completedAction $script:photoNextAction $script:backlogAutoStepCount)) {
+            Write-WorkflowCheckpoint 'photo' 'waiting-review' $completedAction 0
+            $globalStatus.Text = '历史照片步骤没有前进或达到自动续跑上限，已停止重复执行；请核对当前日期状态。'
+            $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
+            return
+        }
         if ($script:photoNextAction) {
             Continue-BacklogPhotoFlow $false
         } else {
@@ -944,6 +968,12 @@ function Complete-Runner([int]$code) {
         if ($script:photoNextAction -eq 'photo-manual-prepare') {
             Write-WorkflowCheckpoint 'photo' 'waiting-supplement' $completedAction 0
             $globalStatus.Text = "现有照片及其已上传订单已分批完成。$($photoStatus.Text)再次点击照片主按钮只处理新增图片和剩余订单。"
+            $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
+            return
+        }
+        if ($script:photoNextAction -and -not (Test-PhotoAutoAdvance $completedAction $script:photoNextAction $script:photoAutoStepCount)) {
+            Write-WorkflowCheckpoint 'photo' 'waiting-review' $completedAction 0
+            $globalStatus.Text = "照片步骤【$(Get-ActionLabel $completedAction)】没有前进或达到自动续跑上限，已停止重复执行。$($photoStatus.Text)"
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
             return
         }
@@ -994,6 +1024,7 @@ $script:processTimer.Add_Tick({
 
 $photoMainButton.Add_Click({
     if (-not $script:running) {
+        $script:photoAutoStepCount = 0
         Clear-PrayerUiLog
         $script:uiLogLength = 0; $logBox.Clear()
         Continue-PhotoFlow $false

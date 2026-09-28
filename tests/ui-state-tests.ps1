@@ -27,6 +27,9 @@ Assert-Equal $pendingProcessButton.Text '检查历史未解决业务' '历史线
 Assert-Equal $manualPhotoPrepare.Text '人工编号照片压缩' '高级工具仍然显示自动识别入口'
 Assert-Equal $refreshLocalButton.Text '刷新照片和PDF状态' '缺少无需重启的本地状态刷新入口'
 Assert-Equal $script:availabilityTimer.Interval 15000 '照片和 PDF 时间状态没有定时检查'
+Assert-Equal (Test-PhotoAutoAdvance 'photo-scenes' 'photo-scenes' 2) $false '同一步骤不得自动无限重试'
+Assert-Equal (Test-PhotoAutoAdvance 'photo-upload' 'photo-scenes' 4) $false '照片自动续跑必须有次数上限'
+Assert-Equal (Test-PhotoAutoAdvance 'photo-upload' 'photo-scenes' 2) $true '正常上传后仍应自动进入场景步骤'
 
 $originalRoot = $rootBox.Text
 $originalLocalStateRoot = $script:localStateRoot
@@ -123,6 +126,22 @@ try {
     $manifest.photoAvailability = $null
     $manifest.manualIssues = @()
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
+    $manifest.manualNumberedMode = $true
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $manifest
+    Write-TestJson (Join-Path $photoRunDir 'scene-upload-receipt.json') ([ordered]@{complete=$false;partialComplete=$true;fileSetHash='hash-1';completedOrderCount=142;onlineNotUploadedCount=142;tabletCompletionVerified=$true})
+    Refresh-PhotoCard
+    Assert-Equal $script:photoNextAction 'photo-manual-prepare' '人工编号模式线上仍缺图时应停下等待新照片'
+    Assert-Equal $photoMainButton.Enabled $false '没有新增照片时不得反复启动场景完成'
+    if ($photoStatus.Text -notmatch '142 条') { throw '等待补图状态没有说明线上未上传订单数' }
+    $savedStartRunner = (Get-Command Start-Runner).ScriptBlock
+    $script:testRunnerCalls = 0
+    function Start-Runner { $script:testRunnerCalls += 1 }
+    $script:activeAction = 'photo-scenes'
+    $script:activeFlow = 'photo'
+    Complete-Runner 0
+    Assert-Equal $script:testRunnerCalls 0 '部分完成回执不得再次自动启动场景步骤'
+    Assert-Equal (Read-JsonFile (Join-Path $photoRunDir 'ui-workflow-state.json')).state 'waiting-supplement' '部分完成后应保存等待补图状态'
+    Set-Item Function:Start-Runner $savedStartRunner
 
     Write-TestJson (Join-Path $photoRunDir 'photo-online-closure.json') ([ordered]@{
         schemaVersion=1;businessDate='2026-08-10';checkedAt='2026-08-31T02:00:00Z';complete=$true;
