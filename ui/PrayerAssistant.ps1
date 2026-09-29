@@ -57,7 +57,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-09-29.1（人工编号·自动压缩上传）'
+$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-09-29.2（人工编号·自动压缩上传）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -318,11 +318,14 @@ function Test-PhotoInboxHasNewRaw([string]$inbox) {
 function Test-PhotoInboxHasPendingWork([string]$inbox, $manifest) {
     if ([string]::IsNullOrWhiteSpace($inbox) -or -not (Test-Path -LiteralPath $inbox -PathType Container)) { return $false }
     if ($manifest -and $manifest.manualNumberedMode -eq $true -and $null -ne $manifest.inputFileHashes) {
+        if ($manifest.localMirror -eq $true -and [string]$manifest.sourcePhotoDir -ne [string]$inbox) { return $true }
+        $expectedHashes = if ($manifest.localMirror -eq $true) { $manifest.sourceInputFileHashes } else { $manifest.inputFileHashes }
+        if ($null -eq $expectedHashes) { return $true }
         $current = @(Get-ChildItem -LiteralPath $inbox -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(jpg|jpeg|png)$' })
-        $savedNames = @($manifest.inputFileHashes.PSObject.Properties.Name)
+        $savedNames = @($expectedHashes.PSObject.Properties.Name)
         if ($current.Count -ne $savedNames.Count) { return $true }
         foreach ($file in $current) {
-            $property = $manifest.inputFileHashes.PSObject.Properties[$file.Name]
+            $property = $expectedHashes.PSObject.Properties[$file.Name]
             if ($null -eq $property) { return $true }
             if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne ([string]$property.Value).ToLowerInvariant()) { return $true }
         }

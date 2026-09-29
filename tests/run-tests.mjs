@@ -76,6 +76,7 @@ import './photo-upload-body-gate-regression.mjs';
 import './photo-upload-input-regression.mjs';
 import './photo-upload-receipt-integration.mjs';
 import './manual-numbered-photo-regression.mjs';
+import './manual-photo-mirror-regression.mjs';
 import './manual-photo-timing-regression.mjs';
 import './historical-backlog-regression.mjs';
 import './ocr-long-path-regression.mjs';

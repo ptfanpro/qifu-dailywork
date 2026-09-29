@@ -8,7 +8,7 @@ import { Timing } from './timing.mjs';
 import { calculateQuantities, normalizeText, venueMessage } from './quantity.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolder as photoDayFolder, scanPhotoWorkday, splitUploadBatches } from './photos.mjs';
 import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs';
-import {planManualNumberedPreparation,scanManualNumberedWorkday} from './manual-photo-workflow.mjs';
+import {ensureManualPhotoMirror,planManualNumberedPreparation,scanManualNumberedWorkday} from './manual-photo-workflow.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,canReusePdfIndex,createPhotoInputBinding} from './recognition-provenance.mjs';
 import {mustRebuildPhotoPlan,assertWritePlanReady,photoFilesMatchPlan,photoFilesExactlyMatchPlan,trustedPreparedOutputs,retainVerifiedUploadEvidence,assertPhotoFilesMatchPlan} from './photo-plan-gate.mjs';
 import {reviewExcludedPhotoNames} from './photo-review-isolation.mjs';
@@ -438,9 +438,13 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
     photoTiming.start('date-resolution');
     log(`照片业务日期：${photoDate}。只处理该日期目录，不自动关联 PDF 业务日期。`);
     photoTiming.end();
+    const manualNumberedMode=!['photo-prepare','photo-recheck'].includes(args.action);
+    const mirror=manualNumberedMode?ensureManualPhotoMirror({root,date:photoDate,workDir:photoRunDir}):null;
+    const activePhotoRoot=mirror?.root||root;
+    if(mirror)log(`人工编号照片使用本机工作副本${mirror.reused?'（已复用）':''}；原始同步目录照片保持不变。来源：${mirror.sourcePhotoDir}`);
     if(args.action==='photo-manual-prepare') {
       if(args.authorized!=='yes')throw Error('人工编号照片规格处理会修改照片目录，缺少本次按钮授权。');
-      const photoDir=path.join(photoDayFolder(root,photoDate),'1');
+      const photoDir=path.join(photoDayFolder(activePhotoRoot,photoDate),'1');
       photoTiming.start('photo-manual-prepare');
       const plan=await planManualNumberedPreparation({photoDir,date:photoDate});
       atomic(path.join(photoRunDir,'photo-manual-prepare-plan.json'),plan);
@@ -453,7 +457,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       if(plan.assignments.length) {
         const receipt=await applyPhotoPreparation(plan,photoRunDir);
         atomic(path.join(photoRunDir,'photo-prepare-receipt.json'),receipt);
-        log(`人工编号照片规格处理完成：${receipt.processedCount} 张已统一为 1800×1350、JPG、且不超过 1.5 MiB；编号保持不变。`);
+        log(`人工编号照片规格处理完成：本机上传副本 ${receipt.processedCount} 张已统一为 1800×1350、JPG、且不超过 1.5 MiB；编号保持不变，原始同步目录照片未修改。`);
       } else log('人工编号照片已经全部符合 1800×1350、JPG、且不超过 1.5 MiB，本次无需重复压缩。');
       photoTiming.end();
     }
@@ -553,9 +557,8 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         }
       }
     }
-    const manualNumberedMode=!['photo-prepare','photo-recheck'].includes(args.action);
     photoTiming.start(manualNumberedMode?'photo-manual-scan':'pdf-index');
-    const photoInbox = path.join(photoDayFolder(root, photoDate), '1');
+    const photoInbox = path.join(photoDayFolder(activePhotoRoot, photoDate), '1');
     const photoFileNames = fs.existsSync(photoInbox)
       ? fs.readdirSync(photoInbox).filter((name) => /\.(?:jpe?g|png)$/i.test(name)) : [];
     const currentPhotoInputBinding=createPhotoInputBinding(photoInbox,photoFileNames.map(name=>path.join(photoInbox,name)));
@@ -563,7 +566,11 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
     let manifest;
     if(manualNumberedMode) {
       log(`人工编号模式：发现 ${quickImageCount} 张图片；不运行 OCR，不读取或比对 PDF。`);
-      manifest=await scanManualNumberedWorkday(root,photoDate);
+      manifest=await scanManualNumberedWorkday(activePhotoRoot,photoDate);
+      manifest.sourcePhotoDir=mirror.sourcePhotoDir;
+      manifest.sourceInputFileHashes=mirror.sourceFileHashes;
+      manifest.localMirror=true;
+      manifest.mirrorIdentity=mirror.identity;
     } else {
       log(`照片目录快速清点：发现 ${quickImageCount} 张图片。初始化预检不读取未编号原图做 OCR；正式识别和编号由照片处理阶段完成。`);
       const cachedPlanFile = path.join(photoRunDir,'photo-prepare-plan.json');
@@ -990,9 +997,11 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       }
       const sceneSourceEvidence = {
         businessDate: photoDate,
-        photoDir: fs.realpathSync.native(path.join(photoDayFolder(root, photoDate), '1')),
-        water: assertSceneFilesBelongToBusinessDate(root, photoDate, manifest.files.waterScenes, 'water'),
-        lamp: assertSceneFilesBelongToBusinessDate(root, photoDate, manifest.files.lampScenes, 'lamp'),
+        photoDir: fs.realpathSync.native(path.join(photoDayFolder(activePhotoRoot, photoDate), '1')),
+        originalPhotoDir:mirror?.sourcePhotoDir||null,
+        mirrorIdentity:mirror?.identity||null,
+        water: assertSceneFilesBelongToBusinessDate(activePhotoRoot, photoDate, manifest.files.waterScenes, 'water'),
+        lamp: assertSceneFilesBelongToBusinessDate(activePhotoRoot, photoDate, manifest.files.lampScenes, 'lamp'),
         verifiedAt: new Date().toISOString(),
       };
       const uploadReceiptFile = path.join(photoRunDir,'photo-upload-receipt.json');

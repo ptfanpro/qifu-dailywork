@@ -44,7 +44,9 @@ function classify(files) {
 async function inspect(file,kind) {
   const errors=[];
   let metadata={};
-  try {metadata=await sharp(file).metadata();}
+  // Reading from a Buffer avoids libvips retaining a Windows file handle
+  // while the preparation transaction later renames this same file.
+  try {metadata=await sharp(fs.readFileSync(file)).metadata();}
   catch {errors.push('图片无法读取');}
   const {width,height}=orientedSize(metadata),ext=path.extname(file).toLowerCase(),bytes=fs.statSync(file).size;
   if(ext!=='.jpg'||metadata.format!=='jpeg')errors.push('必须输出为 JPG');
@@ -75,7 +77,7 @@ export async function planManualNumberedPreparation({photoDir,date}) {
   const assignments=[];
   for(const file of accepted) {
     let metadata;
-    try {metadata=await sharp(file).metadata();}
+    try {metadata=await sharp(fs.readFileSync(file)).metadata();}
     catch {issues.push(`${path.basename(file)}：图片无法读取。`);continue;}
     const {width,height}=orientedSize(metadata),name=targetName(file),sameTarget=path.resolve(file)===path.resolve(photoDir,name);
     if(conflicts.has(name.toLowerCase()))continue;
@@ -107,6 +109,54 @@ function hashManifestFiles(files) {
     hash.update(`${path.basename(file)}\0${stat.size}\0${sha256(file)}\n`);
   }
   return hash.digest('hex');
+}
+
+// Some synchronizers expose readable files that refuse rename/unlink.  Keep a
+// source-bound, date-shaped working copy in local state so preparation never
+// needs to delete the customer's originals. A changed source set gets a new
+// immutable snapshot; an unchanged set reuses its already-normalized copy.
+export function ensureManualPhotoMirror({root,date,workDir}) {
+  const sourceRoot=path.resolve(root),localWorkDir=path.resolve(workDir);
+  const relative=path.relative(sourceRoot,localWorkDir);
+  if(!relative.startsWith('..')&&!path.isAbsolute(relative))throw Error('照片本机工作目录不能位于原始照片目录内部。');
+  const sourcePhotoDir=path.join(dayFolder(sourceRoot,date),'1');
+  const files=imageFiles(sourcePhotoDir);
+  const sourceFileHashes=Object.fromEntries(files.map(file=>[path.basename(file),sha256(file)]));
+  const identity=crypto.createHash('sha256').update(JSON.stringify({sourceRoot,date,sourceFileHashes})).digest('hex');
+  const mirrorBase=path.join(localWorkDir,'manual-photo-mirrors');
+  const mirrorRoot=path.join(mirrorBase,identity);
+  const mirrorPhotoDir=path.join(dayFolder(mirrorRoot,date),'1');
+  const marker=path.join(mirrorRoot,'mirror-source.json');
+  if(fs.existsSync(mirrorRoot)) {
+    if(!fs.existsSync(marker))throw Error(`本机照片工作副本不完整，请检查：${mirrorRoot}`);
+    const saved=JSON.parse(fs.readFileSync(marker,'utf8'));
+    if(saved.identity!==identity||saved.sourceRoot!==sourceRoot||saved.businessDate!==date)
+      throw Error('本机照片工作副本来源校验失败，已停止处理。');
+    for(const file of files) {
+      const name=path.basename(file),normalized=`${path.parse(name).name}.jpg`;
+      if(!fs.existsSync(path.join(mirrorPhotoDir,name))&&!fs.existsSync(path.join(mirrorPhotoDir,normalized)))
+        throw Error(`本机照片工作副本缺少 ${name}，已停止处理；原图保持不变。`);
+    }
+    return {root:mirrorRoot,sourceRoot,sourcePhotoDir,sourceFileHashes,identity,reused:true};
+  }
+  fs.mkdirSync(mirrorBase,{recursive:true});
+  const temporary=fs.mkdtempSync(path.join(mirrorBase,'.copy-'));
+  try {
+    const targetDir=path.join(dayFolder(temporary,date),'1');
+    fs.mkdirSync(targetDir,{recursive:true});
+    for(const source of files) {
+      const name=path.basename(source),target=path.join(targetDir,name);
+      fs.copyFileSync(source,target,fs.constants.COPYFILE_EXCL);
+      if(sha256(target)!==sourceFileHashes[name]||sha256(source)!==sourceFileHashes[name])
+        throw Error(`复制 ${name} 时原图发生变化；本机副本未启用。`);
+    }
+    fs.writeFileSync(path.join(temporary,'mirror-source.json'),JSON.stringify({schemaVersion:1,identity,sourceRoot,sourcePhotoDir,businessDate:date,sourceFileHashes,createdAt:new Date().toISOString()},null,2));
+    fs.renameSync(temporary,mirrorRoot);
+  } catch(error) {
+    try {fs.rmSync(temporary,{recursive:true,force:true});} catch {}
+    throw error;
+  }
+  return {root:mirrorRoot,sourceRoot,sourcePhotoDir,sourceFileHashes,identity,reused:false};
 }
 
 export async function scanManualNumberedWorkday(root,date) {
