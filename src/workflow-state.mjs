@@ -191,7 +191,7 @@ export function resolveHistoricalPhotoClosureEvidence({ historicalManifest = nul
   };
 }
 
-export function decideManualPhotoSingleFileRetry({
+export function decideManualPhotoResume({
   blessingCount = 0,
   verifiedReceiptCount = 0,
   pendingFiles = [],
@@ -199,24 +199,43 @@ export function decideManualPhotoSingleFileRetry({
   onlineUploadedCount = 0,
   onlinePendingRows = [],
 } = {}) {
-  const safe = Number.isInteger(blessingCount) && blessingCount > 1
-    && verifiedReceiptCount === blessingCount - 1
-    && Array.isArray(pendingFiles) && pendingFiles.length === 1
+  const filenames = Array.isArray(pendingFiles) ? pendingFiles.map((file) => path.basename(String(file))) : [];
+  const orderKeys = Array.isArray(onlinePendingRows)
+    ? onlinePendingRows.map((row) => `${row?.kind}:${String(row?.id || '')}`) : [];
+  const safe = Number.isInteger(blessingCount) && blessingCount > 0
+    && Number.isInteger(verifiedReceiptCount) && verifiedReceiptCount >= 0
+    && filenames.length > 0 && verifiedReceiptCount + filenames.length === blessingCount
+    && filenames.every(Boolean) && new Set(filenames).size === filenames.length
     && !uncertainSubmission
-    && onlineUploadedCount > 0
-    && Array.isArray(onlinePendingRows) && onlinePendingRows.length === 1
-    && String(onlinePendingRows[0]?.id || '').length > 0
-    && ['lamp','tablet'].includes(onlinePendingRows[0]?.kind);
+    && Number.isInteger(onlineUploadedCount) && onlineUploadedCount >= 0
+    && (verifiedReceiptCount === 0 ? onlineUploadedCount === 0 : onlineUploadedCount > 0)
+    && Array.isArray(onlinePendingRows) && onlinePendingRows.length > 0
+    && onlinePendingRows.every((row) => String(row?.id || '').length > 0 && ['lamp','tablet'].includes(row?.kind))
+    && new Set(orderKeys).size === orderKeys.length;
   return safe
-    ? { allowed:true, file:path.basename(pendingFiles[0]), pendingOrderId:String(onlinePendingRows[0].id), kind:onlinePendingRows[0].kind }
+    ? { allowed:true, pendingFiles:filenames, pendingOrderRows:onlinePendingRows.map((row) => ({ id:String(row.id),kind:row.kind })) }
     : { allowed:false };
 }
 
-export function manualPhotoTargetOrderUploaded(targetId, uploadedRows, pendingRows) {
-  const id = String(targetId || '');
-  return Boolean(id)
-    && Array.isArray(uploadedRows) && uploadedRows.some((row) => String(row.id) === id)
-    && Array.isArray(pendingRows) && !pendingRows.some((row) => String(row.id) === id);
+export function manualPhotoUploadProgress(beforePendingRows, afterUploadedRows, afterPendingRows) {
+  const failure = { confirmed:false, movedCount:0, remainingRows:[] };
+  if (!Array.isArray(beforePendingRows) || !Array.isArray(afterUploadedRows) || !Array.isArray(afterPendingRows)) return failure;
+  const key = (row) => `${row?.kind}:${String(row?.id || '')}`;
+  const valid = (row) => String(row?.id || '').length > 0 && ['lamp','tablet'].includes(row?.kind);
+  if (!beforePendingRows.length || ![...beforePendingRows,...afterUploadedRows,...afterPendingRows].every(valid)) return failure;
+  const beforeKeys = beforePendingRows.map(key);
+  const uploadedKeys = afterUploadedRows.map(key);
+  const pendingKeys = afterPendingRows.map(key);
+  if (new Set(beforeKeys).size !== beforeKeys.length
+    || new Set(uploadedKeys).size !== uploadedKeys.length
+    || new Set(pendingKeys).size !== pendingKeys.length) return failure;
+  const uploaded = new Set(uploadedKeys);
+  const pending = new Set(pendingKeys);
+  if (beforeKeys.some((item) => uploaded.has(item) === pending.has(item))) return failure;
+  const movedCount = beforeKeys.filter((item) => uploaded.has(item)).length;
+  return movedCount > 0
+    ? { confirmed:true, movedCount, remainingRows:afterPendingRows.map((row) => ({ id:String(row.id),kind:row.kind })) }
+    : failure;
 }
 
 export function upsertPhotoCompletionBatch(batches, batch) {

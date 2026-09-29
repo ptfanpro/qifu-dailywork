@@ -13,7 +13,7 @@ import {ensureManualPhotoMirror,planManualNumberedPreparation,scanManualNumbered
 import {createPdfIndexBinding,recognitionSourceFingerprint,canReusePdfIndex,createPhotoInputBinding} from './recognition-provenance.mjs';
 import {mustRebuildPhotoPlan,assertWritePlanReady,photoFilesMatchPlan,photoFilesExactlyMatchPlan,trustedPreparedOutputs,retainVerifiedUploadEvidence,assertPhotoFilesMatchPlan} from './photo-plan-gate.mjs';
 import {reviewExcludedPhotoNames} from './photo-review-isolation.mjs';
-import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch, decideManualPhotoSingleFileRetry, manualPhotoTargetOrderUploaded } from './workflow-state.mjs';
+import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch, decideManualPhotoResume, manualPhotoUploadProgress } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
 import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
@@ -724,7 +724,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         ? {proven:false,reason:'manual-numbered-mode-no-pdf'}
         : resolvePdfBoundPhotoOrderScope({businessDate:photoDate,photoManifest:manifest,pdfReceipt});
       let latestOrderState = null;
-      let manualLastFileRetry = null;
+      let manualResume = null;
       const orderStateEvidence = (state) => ({
         state:state.state,
         expectedCount:state.expectedCount,
@@ -807,8 +807,8 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             ...notUploadedTablet.map((row) => ({ ...row,kind:'tablet' })),
           ];
           if (onlineUploadedCount !== 0 || onlinePendingRows.length !== 0) {
-            manualLastFileRetry = manifest.manualNumberedMode
-              ? decideManualPhotoSingleFileRetry({
+            manualResume = manifest.manualNumberedMode
+              ? decideManualPhotoResume({
                 blessingCount:manifest.counts.blessing,
                 verifiedReceiptCount:verifiedCurrentBlessingCount,
                 pendingFiles,
@@ -816,14 +816,16 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
                 onlineUploadedCount,
                 onlinePendingRows,
               }) : null;
-            if (manualLastFileRetry?.allowed) {
-              receipt.stage='manual-single-file-retry-ready';
-              receipt.pendingOrderIdHash=crypto.createHash('sha256').update(manualLastFileRetry.pendingOrderId).digest('hex');
+            if (manualResume?.allowed) {
+              receipt.stage='manual-photo-resume-ready';
+              receipt.pendingOrderCount=manualResume.pendingOrderRows.length;
+              receipt.pendingOrderIdHash=crypto.createHash('sha256')
+                .update(manualResume.pendingOrderRows.map((row)=>`${row.kind}:${row.id}`).sort().join('\n')).digest('hex');
               atomic(receiptFile,receipt);
-              log(`本机已有 ${verifiedCurrentBlessingCount} 张当前照片的逐文件哈希回执，线上还有 1 条未上传；本次只补传 ${manualLastFileRetry.file}，上传后将核对这条订单是否变为已上传。`);
+              log(`本机已有 ${verifiedCurrentBlessingCount} 张当前照片的逐文件哈希回执，剩余 ${manualResume.pendingFiles.length} 张；线上还有 ${manualResume.pendingOrderRows.length} 条未上传。本次只提交无回执照片，每批完成后核对线上订单变化。`);
             } else {
               const bindingLabel = manifest.manualNumberedMode ? '人工编号模式没有 PDF 订单绑定凭据' : '当前 PDF 缺少可验证的订单 ID 绑定凭据';
-              throw new Error(`${bindingLabel}，线上供灯/牌位共 ${onlineUploadedCount} 条已上传、${onlinePendingRows.length} 条未上传；本机逐文件回执不足以安全定位唯一待补照片，禁止盲目重传。`);
+              throw new Error(`${bindingLabel}，线上供灯/牌位共 ${onlineUploadedCount} 条已上传、${onlinePendingRows.length} 条未上传；本机逐文件回执与待传照片或线上状态不一致，禁止盲目重传。`);
             }
           } else {
           const pendingRegular = await photoSite.queryLamp(photoDate);
@@ -891,6 +893,11 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         throw new Error('存在未确认的上传提交，当前证据不足以安全重传；请先复核线上状态。');
       }
       for (let index=0; index<batches.length; index++) {
+        if (manualResume?.allowed && !manualResume.pendingOrderRows.length) {
+          receipt.stage='manual-photo-no-online-pending-stop';
+          atomic(receiptFile,receipt);
+          throw new Error('剩余照片尚无回执，但线上已无未上传订单；已停止后续批次，避免重复提交。');
+        }
         log(`正在上传第 ${index+1}/${batches.length} 批，共 ${batches[index].length} 张。`);
         receipt.currentBatch = index + 1;
         receipt.currentBatchFiles = batches[index].map((file)=>path.basename(file));
@@ -975,29 +982,36 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             }
           }
         }
-        if (manualLastFileRetry) {
-          if (Number(result?.uploadedCount) !== 1) throw new Error(`单张补传 ${manualLastFileRetry.file} 未取得准确的 1 张上传回执，已停止。`);
-          receipt.stage='manual-single-file-online-verification';
-          atomic(receiptFile,receipt);
-          let targetUploaded=false;
-          for (let check=0;check<3 && !targetUploaded;check++) {
-            const afterUploaded=manualLastFileRetry.kind==='tablet'
-              ? await photoSite.queryUploadedTabletPhotoOrders(photoDate)
-              : await photoSite.queryUploadedOrders(photoDate,{productMode:'all',allStates:true});
-            const afterPending=manualLastFileRetry.kind==='tablet'
-              ? await photoSite.queryNotUploadedTabletPhotoOrders(photoDate)
-              : await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all',allStates:true});
-            targetUploaded=manualPhotoTargetOrderUploaded(manualLastFileRetry.pendingOrderId,afterUploaded,afterPending);
-            if (!targetUploaded && check<2) await new Promise((resolve)=>setTimeout(resolve,1000));
-          }
-          if (!targetUploaded) {
-            receipt.stage='manual-single-file-online-unconfirmed';
+        if (manualResume?.allowed) {
+          if (Number(result?.uploadedCount) !== batches[index].length) {
+            receipt.stage='manual-photo-upload-count-unconfirmed';
             receipt.uncertainSubmission=true;
             atomic(receiptFile,receipt);
-            throw new Error(`${manualLastFileRetry.file} 有上传数字回执，但原来唯一的线上未上传订单尚未变为已上传；已保留待核对状态，禁止再次自动提交。`);
+            throw new Error(`本批提交 ${batches[index].length} 张，但上传回执为 ${result?.uploadedCount} 张；结果不明，禁止自动重传。`);
+          }
+          receipt.stage='manual-photo-online-verification';
+          atomic(receiptFile,receipt);
+          let progress={confirmed:false};
+          for (let check=0;check<3 && !progress.confirmed;check++) {
+            const afterUploadedLamp=await photoSite.queryUploadedOrders(photoDate,{productMode:'all',allStates:true});
+            const afterPendingLamp=await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all',allStates:true});
+            const afterUploadedTablet=await photoSite.queryUploadedTabletPhotoOrders(photoDate);
+            const afterPendingTablet=await photoSite.queryNotUploadedTabletPhotoOrders(photoDate);
+            progress=manualPhotoUploadProgress(manualResume.pendingOrderRows,
+              [...afterUploadedLamp.map((row)=>({...row,kind:'lamp'})),...afterUploadedTablet.map((row)=>({...row,kind:'tablet'}))],
+              [...afterPendingLamp.map((row)=>({...row,kind:'lamp'})),...afterPendingTablet.map((row)=>({...row,kind:'tablet'}))]);
+            if (!progress.confirmed && check<2) await new Promise((resolve)=>setTimeout(resolve,1000));
+          }
+          if (!progress.confirmed) {
+            receipt.stage='manual-photo-online-unconfirmed';
+            receipt.uncertainSubmission=true;
+            atomic(receiptFile,receipt);
+            throw new Error(`本批 ${batches[index].length} 张有上传数字回执，但原有未上传订单没有可确认的状态变化；已保留待核对状态，禁止再次自动提交。`);
           }
           receipt.onlineVerifiedAt=new Date().toISOString();
-          log(`${manualLastFileRetry.file} 上传回执为 1 张，线上原唯一未上传订单也已变为已上传。`);
+          manualResume.pendingOrderRows=progress.remainingRows;
+          receipt.remainingPendingOrderCount=progress.remainingRows.length;
+          log(`本批 ${batches[index].length} 张获得上传回执，原有线上未上传订单有 ${progress.movedCount} 条转为已上传，仍有 ${progress.remainingRows.length} 条未上传。`);
         }
         receipt.batches.push(result);
         if (Number(result.uploadedCount) !== batches[index].length) throw new Error(`本批上传回执 ${result.uploadedCount} 与提交文件 ${batches[index].length} 不一致。`);
