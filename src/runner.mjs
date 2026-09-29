@@ -18,6 +18,7 @@ import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
 import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
 import {beijingDateToken,buildHistoricalBacklogReport,HISTORICAL_RANGE_START} from './historical-backlog.mjs';
+import {buildPhotoReadbackRaster,matchUploadedPhotoRaster} from './photo-readback.mjs';
 
 function parseArgs(argv) { const out = { action: argv[2] }; for (let i=3;i<argv.length;i+=2) out[argv[i].replace(/^--/,'')] = argv[i+1]; return out; }
 function atomic(file, value) {
@@ -701,6 +702,13 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         uploadedFiles,
         batches:Array.isArray(previous?.batches) ? previous.batches : [],
         uncertainSubmission:previous?.uncertainSubmission === true,
+        previousAttempt:previous?.uncertainSubmission === true ? {
+          stage:previous.stage,
+          files:Array.isArray(previous.currentBatchFiles) ? previous.currentBatchFiles : [],
+          pendingOrderIdHash:previous.pendingOrderIdHash || null,
+          pendingOrderCount:previous.pendingOrderCount || null,
+          uploadedCount:previous.currentBatchUploadCount || null,
+        } : null,
         stage:'not-started'
       };
       if (!pendingFiles.length) {
@@ -806,6 +814,72 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             ...notUploaded.map((row) => ({ ...row,kind:'lamp' })),
             ...notUploadedTablet.map((row) => ({ ...row,kind:'tablet' })),
           ];
+          if (manifest.manualNumberedMode && onlineUploadedCount > 0 && onlinePendingRows.length === 0 && pendingFiles.length) {
+            const candidates=[];
+            for (const file of manifest.files.blessing) {
+              const name=path.basename(file);
+              const bytes=fs.readFileSync(file);
+              if (crypto.createHash('sha256').update(bytes).digest('hex') !== manifest.fileHashes[name]) {
+                throw new Error(`${name} 与预检文件哈希不同；未回读线上照片，也未上传。`);
+              }
+              candidates.push({name,raster:await buildPhotoReadbackRaster(bytes)});
+            }
+            const missingNames=new Set(pendingFiles.map((file)=>path.basename(file)));
+            const matched=[];
+            let scanned=0;
+            try {
+              for (const kind of ['tablet','lamp']) {
+                const references=await photoSite.queryUploadedPhotoReferences(photoDate,kind);
+                for (const reference of references) {
+                  if (!reference.url) continue;
+                  scanned++;
+                  let onlineBytes;
+                  try { onlineBytes=await photoSite.readUploadedPhotoBytes(reference.url); }
+                  catch { continue; }
+                  let match;
+                  try { match=await matchUploadedPhotoRaster(onlineBytes,candidates,missingNames); }
+                  catch { continue; }
+                  if (!match) continue;
+                  missingNames.delete(match.name);
+                  matched.push({name:match.name,orderIdHash:crypto.createHash('sha256')
+                    .update(`${reference.kind}:${reference.id}`).digest('hex'),
+                  onlineImageSha256:crypto.createHash('sha256').update(onlineBytes).digest('hex')});
+                  if (!missingNames.size) break;
+                }
+                if (!missingNames.size) break;
+              }
+            } finally {
+              await photoSite.closePhotoReadback();
+            }
+            const matchedAt=new Date().toISOString();
+            for (const item of matched) receipt.uploadedFiles[item.name]={
+              sha256:manifest.fileHashes[item.name],uploadedAt:matchedAt,evidence:'online-image-readback',
+              onlineOrderIdHash:item.orderIdHash,onlineImageSha256:item.onlineImageSha256,
+            };
+            receipt.uploadedCount=manifest.files.blessing.filter((file)=>
+              receipt.uploadedFiles[path.basename(file)]?.sha256===manifest.fileHashes[path.basename(file)]).length;
+            receipt.readbackScannedOrderCount=scanned;
+            receipt.readbackMatchedCount=matched.length;
+            if (missingNames.size) {
+              receipt.stage='manual-photo-online-image-readback-incomplete';
+              atomic(receiptFile,receipt);
+              throw new Error(`线上 ${onlineUploadedCount} 条福单已上传、0 条未上传；回读线上图片后仍有 ${missingNames.size} 张本机照片缺少唯一匹配。没有重传，不能将这些照片记为完成。`);
+            }
+            if (receipt.uploadedCount !== manifest.counts.blessing) throw new Error('线上照片回读后，本地逐文件哈希回执仍不完整；已停止。');
+            receipt.batches.push({uploadedCount:matched.length,files:matched.map((item)=>item.name),evidence:'online-image-readback'});
+            receipt.complete=true;
+            receipt.batchCompleteReady=manifest.batchCompleteReady===true;
+            receipt.onlineClosureCheckReady=true;
+            receipt.uncertainSubmission=false;
+            receipt.stage='manual-photo-online-image-readback-complete';
+            receipt.completedAt=matchedAt;
+            atomic(receiptFile,receipt);
+            photoTiming.end();
+            log(`线上图片回读核对通过：${matched.length} 张本机缺回执照片逐张找到唯一对应图片，已补记哈希回执；线上未上传为 0，本次没有重复上传。`);
+            await photoSite.close();
+            photoTiming.finish();
+            process.exit(0);
+          }
           if (onlineUploadedCount !== 0 || onlinePendingRows.length !== 0) {
             manualResume = manifest.manualNumberedMode
               ? decideManualPhotoResume({
@@ -989,6 +1063,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             atomic(receiptFile,receipt);
             throw new Error(`本批提交 ${batches[index].length} 张，但上传回执为 ${result?.uploadedCount} 张；结果不明，禁止自动重传。`);
           }
+          receipt.currentBatchUploadCount=Number(result.uploadedCount);
           receipt.stage='manual-photo-online-verification';
           atomic(receiptFile,receipt);
           let progress={confirmed:false};
@@ -1025,6 +1100,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         receipt.uploadedCount = Object.keys(receipt.uploadedFiles).length;
         receipt.stage = 'batch-verified';
         receipt.currentBatchFiles = [];
+        receipt.currentBatchUploadCount = null;
         receipt.currentBatchCompletedAt = new Date().toISOString();
         atomic(receiptFile,receipt);
         if (allFilesReconciled) break;

@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { listFilesRecursive, waitForNewPdf, verifyPdf } from './pdf.mjs';
 import { normalizeText } from './quantity.mjs';
+import { parseUploadedPhotoPreview } from './photo-readback.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
@@ -1320,6 +1321,46 @@ export class PrayerSite {
   }
   async queryNotUploadedTabletPhotoOrders(date) {
     return this.queryOrdersByBlessingUploadStatus(date, '未上传', { url:TABLET_LIST_URL, allStates:true });
+  }
+  async queryUploadedPhotoReferences(date, kind) {
+    if (!['lamp','tablet'].includes(kind)) throw new Error('照片回读业务类别无效。');
+    const rows = kind === 'tablet'
+      ? await this.queryUploadedTabletPhotoOrders(date)
+      : await this.queryUploadedOrders(date,{productMode:'all',allStates:true});
+    const previews = await this.page.locator('table').evaluateAll((tables) => {
+      const table = tables.find((candidate) => {
+        const headers = [...candidate.querySelectorAll('th')].map((th) => (th.innerText || '').trim());
+        return headers.includes('福单编号') && headers.includes('供养物') && (headers.includes('祈福日期') || headers.includes('开始日期'));
+      });
+      if (!table) return [];
+      return [...table.querySelectorAll('tbody tr')].map((tr) => ({
+        id:tr.querySelector('input[name="ids"]')?.value || '',
+        onclick:tr.querySelector('a[onclick^="see("]')?.getAttribute('onclick') || '',
+      })).filter((row) => row.id);
+    });
+    const byId = new Map(previews.map((row) => [row.id,row.onclick]));
+    return rows.map((row) => ({id:String(row.id),kind,url:parseUploadedPhotoPreview(byId.get(String(row.id)))}));
+  }
+  async readUploadedPhotoBytes(url) {
+    if (parseUploadedPhotoPreview(`see('${url}')`) !== url) throw new Error('线上照片地址不属于已验证的上传目录。');
+    let response;
+    if (!this.photoDirectReadFailed) {
+      try { response = await this.page.context().request.get(url,{timeout:15000}); }
+      catch { this.photoDirectReadFailed = true; }
+    }
+    if (response && response.status() !== 200) { response = null; this.photoDirectReadFailed = true; }
+    if (!response) {
+      if (!this.readbackPage || this.readbackPage.isClosed()) this.readbackPage = await this.page.context().newPage();
+      response = await this.readbackPage.goto(url,{waitUntil:'load',timeout:20000});
+    }
+    if (!response || response.status() !== 200) throw new Error('线上照片回读失败。');
+    const bytes = await response.body();
+    if (!bytes.length || bytes.length > 8 * 1024 * 1024) throw new Error('线上照片回读数据无效或过大。');
+    return bytes;
+  }
+  async closePhotoReadback() {
+    if (this.readbackPage && !this.readbackPage.isClosed()) await this.readbackPage.close().catch(() => {});
+    this.readbackPage = null;
   }
   async queryHistoricalRows(startDate, endDateExclusive, { url = LIST_URL, state, uploadStatus = null } = {}) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDateExclusive) || startDate >= endDateExclusive) {
