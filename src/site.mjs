@@ -1310,10 +1310,10 @@ export class PrayerSite {
     return rows;
   }
   async queryUploadedOrders(date, options = {}) {
-    return this.queryOrdersByBlessingUploadStatus(date, '已上传', options);
+    return this.queryOrdersByBlessingUploadStatus(date, '已上传', { url:LAMP_LIST_URL, ...options });
   }
   async queryNotUploadedOrders(date, options = {}) {
-    return this.queryOrdersByBlessingUploadStatus(date, '未上传', options);
+    return this.queryOrdersByBlessingUploadStatus(date, '未上传', { url:LAMP_LIST_URL, ...options });
   }
   async queryUploadedTabletPhotoOrders(date) {
     return this.queryOrdersByBlessingUploadStatus(date, '已上传', { url:TABLET_LIST_URL, allStates:true });

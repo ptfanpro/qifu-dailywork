@@ -191,6 +191,34 @@ export function resolveHistoricalPhotoClosureEvidence({ historicalManifest = nul
   };
 }
 
+export function decideManualPhotoSingleFileRetry({
+  blessingCount = 0,
+  verifiedReceiptCount = 0,
+  pendingFiles = [],
+  uncertainSubmission = false,
+  onlineUploadedCount = 0,
+  onlinePendingRows = [],
+} = {}) {
+  const safe = Number.isInteger(blessingCount) && blessingCount > 1
+    && verifiedReceiptCount === blessingCount - 1
+    && Array.isArray(pendingFiles) && pendingFiles.length === 1
+    && !uncertainSubmission
+    && onlineUploadedCount > 0
+    && Array.isArray(onlinePendingRows) && onlinePendingRows.length === 1
+    && String(onlinePendingRows[0]?.id || '').length > 0
+    && ['lamp','tablet'].includes(onlinePendingRows[0]?.kind);
+  return safe
+    ? { allowed:true, file:path.basename(pendingFiles[0]), pendingOrderId:String(onlinePendingRows[0].id), kind:onlinePendingRows[0].kind }
+    : { allowed:false };
+}
+
+export function manualPhotoTargetOrderUploaded(targetId, uploadedRows, pendingRows) {
+  const id = String(targetId || '');
+  return Boolean(id)
+    && Array.isArray(uploadedRows) && uploadedRows.some((row) => String(row.id) === id)
+    && Array.isArray(pendingRows) && !pendingRows.some((row) => String(row.id) === id);
+}
+
 export function upsertPhotoCompletionBatch(batches, batch) {
   if (!batch?.fileSetHash) throw new Error('照片订单分批完成回执缺少图片集合哈希。');
   const result = Array.isArray(batches) ? batches.filter((item) => item?.fileSetHash !== batch.fileSetHash) : [];
