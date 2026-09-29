@@ -9,12 +9,12 @@ import { normalizeText } from './quantity.mjs';
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
 
-const LIST_URL = 'http://admin.stqifu.com/blessing/list?handelType=00&type=blessing';
-const TABLET_URL = 'http://admin.stqifu.com/blessing/recharge';
-const LAMP_LIST_URL = 'http://admin.stqifu.com/blessing/list?typeCode=qifudeng';
-const TABLET_LIST_URL = 'http://admin.stqifu.com/blessing/list?typeCode=paiwei';
-const MAIN_URL = 'http://admin.stqifu.com/main';
-const IMAGE_UPLOAD_URL = 'http://admin.stqifu.com/blessing/mind/toUpload/name';
+const LIST_URL = 'https://admin.stqifu.com/blessing/list?handelType=00&type=blessing';
+const TABLET_URL = 'https://admin.stqifu.com/blessing/recharge';
+const LAMP_LIST_URL = 'https://admin.stqifu.com/blessing/list?typeCode=qifudeng';
+const TABLET_LIST_URL = 'https://admin.stqifu.com/blessing/list?typeCode=paiwei';
+const MAIN_URL = 'https://admin.stqifu.com/main';
+const IMAGE_UPLOAD_URL = 'https://admin.stqifu.com/blessing/mind/toUpload/name';
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const SHARED_EDGE_PORT = 19227;
 const SHARED_EDGE_ENDPOINT = `http://127.0.0.1:${SHARED_EDGE_PORT}`;
@@ -93,6 +93,22 @@ export function isClosedBrowserError(error) {
 }
 export function isNavigationRaceError(error) {
   return /execution context was destroyed|cannot find context with specified id|interrupted by another navigation|ERR_ABORTED|navigation/i.test(String(error?.message || error || ''));
+}
+export function matchesBusinessPageIdentity(targetUrl, currentUrl, title = '') {
+  let target, current;
+  try { target=new URL(targetUrl); current=new URL(currentUrl); }
+  catch { return false; }
+  if(target.hostname.toLowerCase()!==current.hostname.toLowerCase() || target.pathname!==current.pathname)return false;
+  if(target.pathname!=='/blessing/list')return true;
+  for(const key of ['handelType','type','typeCode']) {
+    const actual=current.searchParams.get(key);
+    if(actual!==null && actual!==target.searchParams.get(key))return false;
+  }
+  const category=target.searchParams.get('typeCode');
+  if(category==='qifudeng')return /供灯福单/.test(title);
+  if(category==='paiwei')return /牌位福单/.test(title);
+  if(target.searchParams.get('type')==='blessing')return /(?:未处理|待处理)福单/.test(title);
+  return false;
 }
 const CONSUMED_CONFIRM_ATTRIBUTE = 'data-prayer-confirm-consumed';
 export async function scheduleSiteClick(locator, { markConsumed = false, timeoutMs = 3000, allowMissing = false } = {}) {
@@ -447,8 +463,11 @@ export class PrayerSite {
     try {
       await this.page.goto(LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30000 }); this.timing.count('browser_action_count');
     } catch (error) {
-      if (!isClosedBrowserError(error)) throw error;
-      await this.recoverClosedBrowser(LIST_URL, error);
+      if (isClosedBrowserError(error)) await this.recoverClosedBrowser(LIST_URL, error);
+      else if (isNavigationRaceError(error)) {
+        this.timing.count('retry_count');
+        this.log('后台正在跳转，等待页面稳定后核对目标业务页。');
+      } else throw error;
     }
     await this.waitForLogin(LIST_URL);
   }
@@ -463,8 +482,11 @@ export class PrayerSite {
         if (!this.browser?.isConnected?.() || !this.page || this.page.isClosed()) {
           await this.recoverClosedBrowser(targetUrl, new Error('Target page, context or browser has been closed'));
         }
-        if (await this.page.locator('#startTime, input[value="检索"], #file[type="file"]').count()) { this.log('登录成功。'); await this.cleanupTransientPages(); return; }
         const currentUrl = this.page.url();
+        const hasBusinessMarker = await this.page.locator('#startTime, input[value="检索"], #file[type="file"]').count();
+        if (hasBusinessMarker && matchesBusinessPageIdentity(targetUrl,currentUrl,await this.page.title().catch(()=>''))) {
+          this.log('登录成功，目标业务页面已核对。'); await this.cleanupTransientPages(); return;
+        }
         const passwordVisible = await this.page.locator('input[type="password"]').isVisible().catch(() => false);
         if (passwordVisible && !this.autoLoginAttempted) {
           const loginMode = await this.tryStoredLogin();
@@ -475,27 +497,37 @@ export class PrayerSite {
         if (passwordVisible && autoLoginSubmittedAt && Date.now() - autoLoginSubmittedAt > 15000) {
           throw new Error('自动登录未成功。请检查账号密码，或手动处理验证码；程序没有重复尝试。');
         }
-        if (!loginPromptLogged && (!passwordVisible || !this.credentialPath || !fs.existsSync(this.credentialPath))) {
-          this.log('请在 Edge 窗口登录。登录成功后程序会自动继续。');
-          loginPromptLogged = true;
-        }
         const authenticatedMarker =
           await this.page.getByText('退出', { exact: true }).count().catch(() => 0) +
           await this.page.getByText('日常管理', { exact: true }).count().catch(() => 0) +
           await this.page.getByText(/待处理福单/).count().catch(() => 0);
-        const reachedMainPage = /\/main(?:[/?#]|$)/i.test(currentUrl) || (!passwordVisible && authenticatedMarker > 0);
-        if (!passwordVisible && authenticatedMarker > 0 && currentUrl.startsWith(targetUrl.split('?')[0])) {
-          this.log('登录成功。');
-          await this.cleanupTransientPages();
-          return;
+        if (!passwordVisible && authenticatedMarker > 0
+          && matchesBusinessPageIdentity(targetUrl,currentUrl,await this.page.title().catch(()=>''))) {
+          this.log('登录成功，目标业务页面已核对。'); await this.cleanupTransientPages(); return;
         }
-        if (reachedMainPage && navigationAttempts < 2) {
+        if (!loginPromptLogged && authenticatedMarker === 0
+          && (!passwordVisible || !this.credentialPath || !fs.existsSync(this.credentialPath))) {
+          this.log('请在 Edge 窗口登录。登录成功后程序会自动继续。');
+          loginPromptLogged = true;
+        }
+        const reachedMainPage = /\/main(?:[/?#]|$)/i.test(currentUrl)
+          || (!passwordVisible && (authenticatedMarker > 0 || hasBusinessMarker > 0));
+        if (reachedMainPage && navigationAttempts < 3) {
           navigationAttempts += 1;
-          this.log('已检测到登录成功，正在进入待处理福单页面。');
-          await this.page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          this.timing.count('browser_action_count');
+          this.log('已检测到登录成功，正在进入目标业务页面。');
+          try {
+            await this.page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            this.timing.count('browser_action_count');
+          } catch (error) {
+            if (!isNavigationRaceError(error)) throw error;
+            this.timing.count('retry_count');
+            this.log(`目标业务页跳转被浏览器中断（${navigationAttempts}/3），正在核对落地页面。`);
+            await sleep(400);
+          }
           continue;
         }
+        if (reachedMainPage && navigationAttempts >= 3)
+          throw new Error('登录成功，但目标业务页连续 3 次跳转后仍未正确打开；没有提交任何图片。');
       } catch (error) {
         if (!isClosedBrowserError(error)) throw error;
         await this.recoverClosedBrowser(targetUrl, error);
