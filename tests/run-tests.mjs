@@ -585,6 +585,36 @@ try {
   fs.renameSync=originalRenameSync;
   fs.unlinkSync=originalUnlinkSync;
 }
+const busySource=path.join(dir,'busy-source.bin');
+const busyDestination=path.join(dir,'busy-destination.bin');
+fs.writeFileSync(busySource,Buffer.from('locked-but-readable-photo'));
+let busyRenameAttempts=0;
+let busyUnlinkAttempts=0;
+fs.renameSync=(source,destination)=>{
+  if(source===busySource&&destination===busyDestination){
+    busyRenameAttempts+=1;
+    const error=new Error('simulated sync-client rename lock');error.code='EBUSY';throw error;
+  }
+  return originalRenameSync(source,destination);
+};
+fs.unlinkSync=(file)=>{
+  if(file===busySource&&busyUnlinkAttempts<2){
+    busyUnlinkAttempts+=1;
+    const error=new Error('simulated temporary source lock');error.code='EBUSY';throw error;
+  }
+  return originalUnlinkSync(file);
+};
+try {
+  const busyMove=moveFileVerified(busySource,busyDestination);
+  assert.equal(busyMove.method,'verified-copy-unlink');
+  assert.ok(busyRenameAttempts>=1);
+  assert.equal(busyMove.unlinkAttempts,3);
+  assert.equal(fs.existsSync(busySource),false);
+  assert.equal(fs.readFileSync(busyDestination,'utf8'),'locked-but-readable-photo');
+} finally {
+  fs.renameSync=originalRenameSync;
+  fs.unlinkSync=originalUnlinkSync;
+}
 const uploadCacheRoot=path.join(dir,'upload-cache-root');
 fs.mkdirSync(uploadCacheRoot,{recursive:true});
 const cacheStages=[];

@@ -604,11 +604,17 @@ export function unlinkWithRetrySync(file, { attempts = 120, delayMs = 250 } = {}
 
 export function moveFileVerified(source, destination) {
   if (fs.existsSync(destination)) throw destinationExistsError(destination);
-  try {
-    fs.renameSync(source, destination);
-    return { method: 'rename', sha256: sha256(destination) };
-  } catch (error) {
-    if (error?.code !== 'EXDEV') throw error;
+  // Windows may report EBUSY before EXDEV when a sync client briefly holds
+  // the source handle. Retry the rename, then use the verified copy path.
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    try {
+      fs.renameSync(source, destination);
+      return { method: 'rename', sha256: sha256(destination) };
+    } catch (error) {
+      if (error?.code === 'EXDEV') break;
+      if (!transientFileLockCodes.has(error?.code)) throw error;
+      if (attempt < 12) waitSync(250);
+    }
   }
 
   const sourceHash = sha256(source);
@@ -620,6 +626,9 @@ export function moveFileVerified(source, destination) {
     try { fs.fsyncSync(handle); } finally { fs.closeSync(handle); }
     if (sha256(destination) !== sourceHash) {
       throw new Error(`跨盘复制校验失败，源文件保持不变：${path.basename(source)}`);
+    }
+    if (sha256(source) !== sourceHash) {
+      throw new Error(`移动时原图发生变化，源文件保持不变：${path.basename(source)}`);
     }
     const unlinkAttempts = unlinkWithRetrySync(source);
     return { method: 'verified-copy-unlink', sha256: sourceHash, unlinkAttempts };
