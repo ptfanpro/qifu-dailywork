@@ -18,7 +18,7 @@ import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
 import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
 import {beijingDateToken,buildHistoricalBacklogReport,HISTORICAL_RANGE_START} from './historical-backlog.mjs';
-import {buildPhotoReadbackRaster,matchUploadedPhotoRaster} from './photo-readback.mjs';
+import {buildPhotoReadbackRaster,inspectUploadedPhotoRaster} from './photo-readback.mjs';
 
 function parseArgs(argv) { const out = { action: argv[2] }; for (let i=3;i<argv.length;i+=2) out[argv[i].replace(/^--/,'')] = argv[i+1]; return out; }
 function atomic(file, value) {
@@ -831,24 +831,34 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             }
             const missingNames=new Set(pendingFiles.map((file)=>path.basename(file)));
             const matched=[];
+            const seenUrls=new Set();
+            const readbackDiagnostics={reasons:{},images:[]};
+            const recordReason=(reason)=>{readbackDiagnostics.reasons[reason]=(readbackDiagnostics.reasons[reason]||0)+1;};
             let scanned=0;
             try {
               for (const kind of ['tablet','lamp']) {
                 const references=await photoSite.queryUploadedPhotoReferences(photoDate,kind);
                 for (const reference of references) {
-                  if (!reference.url) continue;
+                  if (!reference.url) {recordReason('missing-preview');continue;}
+                  // Many orders share one photo. Read and compare each unique
+                  // image once instead of fetching it once for every order.
+                  if(seenUrls.has(reference.url))continue;
+                  seenUrls.add(reference.url);
                   scanned++;
                   let onlineBytes;
                   try { onlineBytes=await photoSite.readUploadedPhotoBytes(reference.url); }
-                  catch { continue; }
-                  let match;
-                  try { match=await matchUploadedPhotoRaster(onlineBytes,candidates,missingNames); }
-                  catch { continue; }
+                  catch {recordReason('read-failed');continue;}
+                  let comparison;
+                  try {comparison=await inspectUploadedPhotoRaster(onlineBytes,candidates,missingNames);}
+                  catch {recordReason('invalid-image');continue;}
+                  recordReason(comparison.reason);
+                  readbackDiagnostics.images.push({name:comparison.name,reason:comparison.reason,score:comparison.score,secondScore:comparison.secondScore});
+                  const match=comparison.match;
                   if (!match) continue;
                   missingNames.delete(match.name);
                   matched.push({name:match.name,orderIdHash:crypto.createHash('sha256')
                     .update(`${reference.kind}:${reference.id}`).digest('hex'),
-                  onlineImageSha256:crypto.createHash('sha256').update(onlineBytes).digest('hex')});
+                  onlineImageSha256:crypto.createHash('sha256').update(onlineBytes).digest('hex'),minimumDetailSeparation:match.minimumDetailSeparation});
                   if (!missingNames.size) break;
                 }
                 if (!missingNames.size) break;
@@ -860,15 +870,19 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             for (const item of matched) receipt.uploadedFiles[item.name]={
               sha256:manifest.fileHashes[item.name],uploadedAt:matchedAt,evidence:'online-image-readback',
               onlineOrderIdHash:item.orderIdHash,onlineImageSha256:item.onlineImageSha256,
+              minimumDetailSeparation:item.minimumDetailSeparation,
             };
             receipt.uploadedCount=manifest.files.blessing.filter((file)=>
               receipt.uploadedFiles[path.basename(file)]?.sha256===manifest.fileHashes[path.basename(file)]).length;
-            receipt.readbackScannedOrderCount=scanned;
+            receipt.readbackScannedImageCount=scanned;
+            receipt.readbackDiagnostics={...readbackDiagnostics,missingNames:[...missingNames]};
             receipt.readbackMatchedCount=matched.length;
             if (missingNames.size) {
               receipt.stage='manual-photo-online-image-readback-incomplete';
               atomic(receiptFile,receipt);
-              throw new Error(`线上 ${onlineUploadedCount} 条福单已上传、0 条未上传；回读线上图片后仍有 ${missingNames.size} 张本机照片缺少唯一匹配。没有重传，不能将这些照片记为完成。`);
+              const reasonLabels={'missing-preview':'缺少线上图片地址','read-failed':'线上图片读取失败','invalid-image':'线上图片规格异常','insufficient-candidates':'对照照片不足','different-image':'图片内容不一致','detail-mismatch':'图片细节不一致','invalid-candidate':'本机对照图片异常','indistinguishable-candidates':'本机照片无法区分','ambiguous-detail':'图片细节无法唯一对应'};
+              const problems=Object.entries(readbackDiagnostics.reasons).filter(([reason])=>reasonLabels[reason]).map(([reason,count])=>`${reasonLabels[reason]} ${count} 张`).join('、');
+              throw new Error(`线上 ${onlineUploadedCount} 条福单已上传、0 条未上传；回读线上图片后仍有 ${missingNames.size} 张本机照片缺少唯一匹配（${[...missingNames].join('、')}；${problems||'缺少对应图片'}）。没有重传，不能将这些照片记为完成。`);
             }
             if (receipt.uploadedCount !== manifest.counts.blessing) throw new Error('线上照片回读后，本地逐文件哈希回执仍不完整；已停止。');
             receipt.batches.push({uploadedCount:matched.length,files:matched.map((item)=>item.name),evidence:'online-image-readback'});
