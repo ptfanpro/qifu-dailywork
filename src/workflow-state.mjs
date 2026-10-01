@@ -217,6 +217,20 @@ export function decideManualPhotoResume({
     : { allowed:false };
 }
 
+export function retainManualPhotoAttemptEvidence(previous) {
+  if (previous?.uncertainSubmission !== true) return null;
+  const older=previous.previousAttempt || {};
+  return {
+    stage:older.stage || previous.stage || null,
+    files:Array.isArray(older.files) && older.files.length ? older.files
+      : Array.isArray(previous.currentBatchFiles) ? previous.currentBatchFiles : [],
+    startedAt:older.startedAt || previous.currentBatchStartedAt || previous.startedAt || null,
+    pendingOrderIdHash:older.pendingOrderIdHash || previous.pendingOrderIdHash || null,
+    pendingOrderCount:older.pendingOrderCount ?? previous.pendingOrderCount ?? null,
+    uploadedCount:previous.currentBatchUploadCount ?? older.uploadedCount ?? null,
+  };
+}
+
 export function decideManualPhotoUncertainRetry({
   blessingCount = 0, verifiedReceiptCount = 0, pendingFiles = [],
   previousAttempt = null, uncertainRetryCount = 0,

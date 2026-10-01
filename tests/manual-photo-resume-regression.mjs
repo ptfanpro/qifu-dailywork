@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { PrayerSite } from '../src/site.mjs';
-import { decideManualPhotoResume, decideManualPhotoUncertainRetry, manualPhotoUploadProgress } from '../src/workflow-state.mjs';
+import { decideManualPhotoResume, decideManualPhotoUncertainRetry, retainManualPhotoAttemptEvidence, manualPhotoUploadProgress } from '../src/workflow-state.mjs';
 
 for (const method of ['queryUploadedOrders', 'queryNotUploadedOrders']) {
   let call;
@@ -73,4 +73,15 @@ for(const override of [
 ]) assert.equal(decideManualPhotoUncertainRetry({...zero,...override}).allowed,false);
 assert.equal(decideManualPhotoUncertainRetry({...zero,
   previousAttempt:{...zero.previousAttempt,startedAt:null}}).allowed,false);
+const legacyAttempt=retainManualPhotoAttemptEvidence({
+  uncertainSubmission:true,startedAt:'2026-10-01T12:00:00.000Z',stage:'not-started',
+  previousAttempt:{stage:'month-submitted',files:zero.pendingFiles,uploadedCount:null},
+});
+assert.equal(legacyAttempt.startedAt,'2026-10-01T12:00:00.000Z');
+assert.equal(decideManualPhotoUncertainRetry({...zero,previousAttempt:legacyAttempt}).allowed,true);
+assert.equal(retainManualPhotoAttemptEvidence({
+  uncertainSubmission:true,startedAt:'2026-10-01T12:00:00.000Z',
+  previousAttempt:{stage:'month-submitted',files:zero.pendingFiles,uploadedCount:null},
+  currentBatchUploadCount:13,
+}).uploadedCount,13);
 console.log('Manual uncertain upload bounded recovery PASS');
