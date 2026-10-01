@@ -1130,7 +1130,8 @@ assert.equal(resolvePdfBoundPhotoOrderScope({
   pdfReceipt:{businessDate:'2026-09-03',outputs:[{sha256:'pdf-a',pageCount:4}]},
 }).proven,false);
 const transportPage=new EventEmitter();
-const transportWatcher=watchBlessingUploadTransport(transportPage,12);
+const transportEvidence=[];
+const transportWatcher=watchBlessingUploadTransport(transportPage,12,(stage,detail)=>transportEvidence.push({stage,detail}));
 const uploadRequest={method:()=> 'POST',url:()=> 'http://admin.stqifu.com/blessing/mind/uploadPic/name'};
 transportPage.emit('request',uploadRequest);
 transportPage.emit('response',{
@@ -1150,6 +1151,9 @@ transportPage.emit('response',{
 assert.equal(await transportWatcher.uploadedCount(),12);
 assert.equal(transportWatcher.state.requestCount,1);
 assert.equal(transportWatcher.state.responseCount,2);
+assert.deepEqual(transportEvidence.map((item)=>item.stage),
+  ['transport-request','transport-response','transport-response','transport-receipt']);
+assert.equal(transportEvidence.at(-1).detail.uploadedCount,12);
 transportWatcher.stop();
 assert.equal(transportPage.listenerCount('request'),0);
 assert.equal(transportPage.listenerCount('response'),0);

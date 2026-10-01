@@ -217,6 +217,39 @@ export function decideManualPhotoResume({
     : { allowed:false };
 }
 
+export function decideManualPhotoUncertainRetry({
+  blessingCount = 0, verifiedReceiptCount = 0, pendingFiles = [],
+  previousAttempt = null, uncertainRetryCount = 0,
+  onlineUploadedCount = 0, secondOnlineUploadedCount = 0,
+  firstPendingRows = [], secondPendingRows = [], now = new Date().toISOString(),
+} = {}) {
+  const rejected = { allowed:false };
+  const filenames = Array.isArray(pendingFiles) ? pendingFiles.map((file) => path.basename(String(file))) : [];
+  const attemptFiles = Array.isArray(previousAttempt?.files) ? previousAttempt.files : [];
+  const age = Date.parse(now) - Date.parse(previousAttempt?.startedAt || '');
+  if (!Number.isInteger(blessingCount) || blessingCount <= 0 || verifiedReceiptCount !== 0
+    || filenames.length !== blessingCount || new Set(filenames).size !== filenames.length
+    || attemptFiles.length !== filenames.length || !attemptFiles.every((name) => filenames.includes(name))
+    || !['submitting','month-submitted','upload-confirmed','transport-request','transport-response'].includes(previousAttempt?.stage)
+    || previousAttempt?.uploadedCount != null || uncertainRetryCount !== 0
+    || !Number.isFinite(age) || age < 15 * 60 * 1000
+    || onlineUploadedCount !== 0 || secondOnlineUploadedCount !== 0) return rejected;
+  const keys = (rows) => Array.isArray(rows) ? rows.map((row) =>
+    ['lamp','tablet'].includes(row?.kind) && String(row?.id || '') ? `${row.kind}:${row.id}` : '') : [];
+  const first = keys(firstPendingRows);
+  const second = keys(secondPendingRows);
+  first.sort();
+  second.sort();
+  if (!first.length || first.includes('') || second.includes('')
+    || new Set(first).size !== first.length || new Set(second).size !== second.length
+    || first.length !== second.length || first.some((key,index) => key !== second[index])) return rejected;
+  const pendingOrderIdHash = crypto.createHash('sha256').update(first.join('\n')).digest('hex');
+  if (previousAttempt?.pendingOrderIdHash && previousAttempt.pendingOrderIdHash !== pendingOrderIdHash) return rejected;
+  return {allowed:true,pendingFiles:filenames,
+    pendingOrderRows:secondPendingRows.map((row) => ({id:String(row.id),kind:row.kind})),
+    pendingOrderIdHash};
+}
+
 export function manualPhotoUploadProgress(beforePendingRows, afterUploadedRows, afterPendingRows) {
   const failure = { confirmed:false, movedCount:0, remainingRows:[] };
   if (!Array.isArray(beforePendingRows) || !Array.isArray(afterUploadedRows) || !Array.isArray(afterPendingRows)) return failure;

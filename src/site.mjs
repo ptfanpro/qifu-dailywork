@@ -246,20 +246,25 @@ export function resolveBlessingOrderSetUploadState(expectedRows, uploadedRows, n
     conflictOrderIds,
   };
 }
-export function watchBlessingUploadTransport(page, expectedCount) {
+export function watchBlessingUploadTransport(page, expectedCount, onEvidence = () => {}) {
   const state = { requestCount:0, responseCount:0, receipts:[], tasks:[] };
   const onRequest = (request) => {
-    if (isBlessingUploadTransport(request.method(), request.url())) state.requestCount += 1;
+    if (isBlessingUploadTransport(request.method(), request.url())) {
+      state.requestCount += 1;
+      onEvidence('transport-request');
+    }
   };
   const onResponse = (response) => {
     if (!isBlessingUploadTransport(response.request().method(), response.url())) return;
     state.responseCount += 1;
+    onEvidence('transport-response',{status:response.status()});
     const task = (async () => {
       const body = await response.text().catch(() => '');
       const receipt = response.ok()
         ? resolveBlessingUploadResponseCount(body, expectedCount)
         : { uploadedCount:undefined, numericMessages:[] };
       state.receipts.push({ ...receipt, ok:response.ok(), status:response.status() });
+      if (receipt.uploadedCount === Number(expectedCount)) onEvidence('transport-receipt',{uploadedCount:receipt.uploadedCount});
     })();
     state.tasks.push(task);
   };
@@ -1206,7 +1211,7 @@ export class PrayerSite {
     // Observe the complete upload transaction rather than resolving on the
     // first matching response. Some deployments emit an intermediate response
     // before the final numeric JSON receipt, and the endpoint may omit /name.
-    const uploadTransport = watchBlessingUploadTransport(this.page, files.length);
+    const uploadTransport = watchBlessingUploadTransport(this.page, files.length, onStage);
     // 这个按钮的处理函数会同步打开下一层确认框。CDP 复用 Edge 时，
     // Playwright 的常规 click 偶尔会一直等待该处理链结束并在 30 秒后超时，
     // 即使 DOM 元素本身已经可用。直接调用元素 click 可立即交还控制权，
@@ -1257,9 +1262,11 @@ export class PrayerSite {
           confirmationSeen,
           requestStarted:uploadTransport.state.requestCount > 0,
           responseSeen:uploadTransport.state.responseCount > 0,
+          responseStatuses:uploadTransport.state.receipts.map((item)=>item.status),
         };
         throw error;
       }
+      onStage('upload-receipt',{uploadedCount});
       onStage('verified');
       this.log(`福单图上传成功：${uploadedCount} 张，月份 ${monthText}。`);
       return { uploadedCount, month: monthText, files: files.map((file) => path.basename(file)) };
