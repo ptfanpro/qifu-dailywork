@@ -80,6 +80,7 @@ import './manual-photo-mirror-regression.mjs';
 import './manual-photo-resume-regression.mjs';
 import './manual-photo-readback-regression.mjs';
 import './pdf-before-ten-regression.mjs';
+import './confirmation-navigation-regression.mjs';
 import './login-navigation-regression.mjs';
 import './manual-photo-timing-regression.mjs';
 import './historical-backlog-regression.mjs';
@@ -1670,7 +1671,9 @@ assert.match(runnerSource,/queryTabletGroup\(pdfDate,'往生莲位','往生位�
 assert.doesNotMatch(runnerSource,/当前导出步骤尚未包含牌位模板/);
 assert.match(siteSource,/attempt < 3/);
 assert.match(siteSource,/线上已没有待批量完成的订单/);
-assert.match(siteSource,/ERR_ABORTED\|interrupted by another navigation/);
+assert.equal(isNavigationRaceError(new Error('page.goto: net::ERR_ABORTED')),true);
+assert.equal(isNavigationRaceError(new Error('Navigation interrupted by another navigation')),true);
+assert.match(siteSource,/if \(!isNavigationRaceError\(error\) \|\| attempt === 3\) throw error/);
 assert.match(siteSource,/isNavigationRaceError/);
 assert.match(siteSource,/状态变更后无法复核线上待祈福清单/);
 assert.match(siteSource,/ensurePageSize1000/);

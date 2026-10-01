@@ -38,4 +38,6 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $runtime.Node (Join-Path $root 'tests\list-query-browser.mjs')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $runtime.Node (Join-Path $root 'tests\manual-photo-upload-dialog-browser.mjs')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $runtime.Node (Join-Path $root 'tests\photo-completion-navigation-browser.mjs')
 exit $LASTEXITCODE

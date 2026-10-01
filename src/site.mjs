@@ -857,11 +857,17 @@ export class PrayerSite {
     // 用户已授权本次上传/导出时，最多处理两个紧随动作出现的普通确认层。
     const deadline = Date.now() + timeoutMs;
     let handled = 0;
-    while (Date.now() < deadline && handled < maxConfirmations) {
+    let navigated=false;
+    const onNavigation=(frame)=>{if(frame===this.page.mainFrame())navigated=true;};
+    this.page.on?.('framenavigated',onNavigation);
+    try {
+    while (Date.now() < deadline && handled < maxConfirmations && !navigated) {
+      let handles=[];
+      try {
       // innerText deliberately excludes hidden <script> text. The month layer
       // contains `$('#years').val(...)` inside its visible parent; textContent
       // used to leak that control script into the upload receipt collector.
-      const messages = await this.page.locator('.layui-layer-msg:visible .layui-layer-content, .layui-layer:visible .layui-layer-content').allInnerTexts().catch(() => []);
+      const messages = await this.page.locator('.layui-layer-msg:visible .layui-layer-content, .layui-layer:visible .layui-layer-content').allInnerTexts();
       for (const message of messages.map((value) => normalizeText(value)).filter(Boolean)) {
         if (!this.layerMessages.includes(message)) this.layerMessages.push(message);
       }
@@ -870,15 +876,16 @@ export class PrayerSite {
       );
       // Capture element handles once: nth() changes identity when the closing
       // month layer disappears, and its attribute read can then wait 30 seconds.
-      const handles = await button.elementHandles();
+      if(navigated)break;
+      handles = await button.elementHandles();
       let candidate = null;
-      try {
       for (const current of handles) {
         // Layui 关闭月份层时会保留一小段动画时间。已经触发过业务动作的
         // “确定”按钮带有消费标记，绝不能再当成后续确认层重复点击。
         const consumed = await current.getAttribute(CONSUMED_CONFIRM_ATTRIBUTE).catch(() => null);
         if (!consumed && await current.isVisible().catch(()=>false)) { candidate = current; break; }
       }
+      if(navigated)break;
       if (candidate && await candidate.isVisible().catch(()=>false)) {
         // 页面按钮可能同步弹出下一层 alert/confirm。普通 Playwright click 会等待
         // 整个处理链返回并在 CDP 复用 Edge 中超时；DOM click 能立即交还控制权，
@@ -902,10 +909,19 @@ export class PrayerSite {
       } else {
         await sleep(100);
       }
+      } catch(error) {
+        if(!isNavigationRaceError(error))throw error;
+        // Confirming can reload the page before the next handle snapshot.
+        // Stop here: clicking again could submit another operation. Callers
+        // must establish success from their response/online postcondition.
+        navigated=true;
+        break;
       } finally {
         await Promise.allSettled(handles.map((handle)=>handle.dispose()));
       }
     }
+    } finally {this.page.off?.('framenavigated',onNavigation);}
+    if(navigated)this.log('业务页面已切换，结束确认窗口检查；将核对实际处理结果，不重复点击。');
     if (handled) this.log(`已自动处理 ${handled} 个确认窗口。`);
     return handled;
   }
@@ -1578,7 +1594,7 @@ export class PrayerSite {
         break;
       } catch (error) {
         lastError = error;
-        if (!/ERR_ABORTED|interrupted by another navigation/i.test(String(error.message || error)) || attempt === 3) throw error;
+        if (!isNavigationRaceError(error) || attempt === 3) throw error;
         this.timing.count('retry_count');
         await sleep(1000);
       }
@@ -1629,7 +1645,7 @@ export class PrayerSite {
         break;
       } catch (error) {
         lastError = error;
-        if (!/ERR_ABORTED|interrupted by another navigation/i.test(String(error.message || error)) || attempt === 3) throw error;
+        if (!isNavigationRaceError(error) || attempt === 3) throw error;
         this.timing.count('retry_count');
         await sleep(1000);
       }
