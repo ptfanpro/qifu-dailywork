@@ -126,14 +126,22 @@ export async function scheduleSiteClick(locator, { markConsumed = false, timeout
     // 30 seconds for a replacement element even though another handler has
     // already accepted the dialog. Resolve one short-lived handle instead so a
     // disappearing confirmation is a bounded race, not a false upload failure.
-    handle = await locator.elementHandle({ timeout: timeoutMs });
+    handle = typeof locator.elementHandle === 'function' ? await locator.elementHandle({ timeout: timeoutMs }) : locator;
     if (!handle) {
       if (allowMissing) return 'skipped';
       throw new Error('要点击的网页按钮已经消失。');
     }
     return await handle.evaluate((element, token) => {
       if (token) element.setAttribute('data-prayer-confirm-consumed', token);
-      globalThis.setTimeout(() => element.click(), 0);
+      // MessageChannel tasks are not background-tab timers. A timer-based click
+      // can be postponed until after the short confirmation polling window.
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        channel.port2.close();
+        if (element.isConnected !== false) element.click();
+      };
+      channel.port2.postMessage(null);
       return 'scheduled';
     }, clickToken);
   } catch (error) {
@@ -844,12 +852,12 @@ export class PrayerSite {
     }
     return rows.length;
   }
-  async autoSiteConfirm(timeoutMs = 3000) {
+  async autoSiteConfirm(timeoutMs = 3000, { maxConfirmations = 2 } = {}) {
     // Layui/Bootstrap 确认层有时在点击业务按钮后异步出现，不能只在同一瞬间检查一次。
     // 用户已授权本次上传/导出时，最多处理两个紧随动作出现的普通确认层。
     const deadline = Date.now() + timeoutMs;
     let handled = 0;
-    while (Date.now() < deadline && handled < 2) {
+    while (Date.now() < deadline && handled < maxConfirmations) {
       // innerText deliberately excludes hidden <script> text. The month layer
       // contains `$('#years').val(...)` inside its visible parent; textContent
       // used to leak that control script into the upload receipt collector.
@@ -860,13 +868,16 @@ export class PrayerSite {
       const button = this.page.locator(
         '.layui-layer:visible .layui-layer-btn0, .layui-layer:visible .layui-layer-btn a:has-text("确定"), .layui-layer:visible .layui-layer-btn a:has-text("确认"), .modal:visible button:has-text("确定"), .modal:visible button:has-text("确认"), button:visible:has-text("确认")',
       );
+      // Capture element handles once: nth() changes identity when the closing
+      // month layer disappears, and its attribute read can then wait 30 seconds.
+      const handles = await button.elementHandles();
       let candidate = null;
-      for (let index = 0; index < await button.count(); index += 1) {
-        const current = button.nth(index);
+      try {
+      for (const current of handles) {
         // Layui 关闭月份层时会保留一小段动画时间。已经触发过业务动作的
         // “确定”按钮带有消费标记，绝不能再当成后续确认层重复点击。
         const consumed = await current.getAttribute(CONSUMED_CONFIRM_ATTRIBUTE).catch(() => null);
-        if (!consumed) { candidate = current; break; }
+        if (!consumed && await current.isVisible().catch(()=>false)) { candidate = current; break; }
       }
       if (candidate && await candidate.isVisible().catch(()=>false)) {
         // 页面按钮可能同步弹出下一层 alert/confirm。普通 Playwright click 会等待
@@ -890,6 +901,9 @@ export class PrayerSite {
         }
       } else {
         await sleep(100);
+      }
+      } finally {
+        await Promise.allSettled(handles.map((handle)=>handle.dispose()));
       }
     }
     if (handled) this.log(`已自动处理 ${handled} 个确认窗口。`);
@@ -1173,6 +1187,7 @@ export class PrayerSite {
     if (!files.length || files.length > 50) throw new Error('每批福单图必须为1至50张。');
     await this.openImageProcessing();
     this.dialogs = [];
+    this.layerMessages = [];
     // 必须先监听 Playwright filechooser，再触发网页自己的相机按钮。
     // 直接对隐藏 input 调用 locator.setInputFiles 会等待 onchange=upload() 的同步弹窗链，
     // 即使文件已经写入也可能在 30 秒后误报超时，造成下一次运行无法判断是否要重传。
@@ -1228,17 +1243,22 @@ export class PrayerSite {
       await sleep(150);
       // 月份窗口关闭有动画延迟。已点击按钮带消费标记，自动确认只会处理
       // 后续新出现的确认层，不会再次点击旧月份按钮。
-      const confirmedLayers = await this.autoSiteConfirm(5000);
+      let confirmedLayers = await this.autoSiteConfirm(1000);
       const confirmDialogs = this.dialogs.slice(dialogStart).filter((message) => /上传|确定|确认/.test(normalizeText(message)));
-      const confirmationSeen = confirmedLayers > 0 || confirmDialogs.length > 0;
+      let confirmationSeen = confirmedLayers > 0 || confirmDialogs.length > 0;
       if (confirmationSeen) onStage('upload-confirmed');
 
       // 上传完成数可能通过接口 JSON、原生 alert 或 Layui 消息层返回。
       // 持续读取全部匹配响应，不能让中间响应抢先结束监听。
-      const resultDeadline = Date.now() + 60000;
+      const resultDeadline = Date.now() + (this.uploadResultTimeoutMs || 60000);
       let uploadedCount;
       let interfaceReceiptLogged = false;
       while (Date.now() < resultDeadline && uploadedCount === undefined) {
+        if (uploadTransport.state.requestCount === 0 && confirmedLayers < 2) {
+          const late = await this.autoSiteConfirm(250,{maxConfirmations:2-confirmedLayers});
+          confirmedLayers += late;
+          if (late && !confirmationSeen) { confirmationSeen=true; onStage('upload-confirmed'); }
+        }
         uploadedCount = await uploadTransport.uploadedCount();
         if (uploadedCount === files.length && !interfaceReceiptLogged) {
           interfaceReceiptLogged = true;
@@ -1248,15 +1268,25 @@ export class PrayerSite {
         for (const message of resultMessages.map((value) => normalizeText(value)).filter(Boolean)) {
           if (!this.layerMessages.includes(message)) this.layerMessages.push(message);
         }
-        if (uploadedCount === undefined) {
-          const result = resolveBlessingUploadCount([...this.dialogs, ...this.layerMessages], files.length);
+        if (uploadedCount === undefined && uploadTransport.state.receipts.some((receipt)=>receipt.ok)) {
+          // This backend alerts the selected file count twice BEFORE the POST.
+          // Those alerts are never upload success evidence.
+          const result = resolveBlessingUploadCount(resultMessages, files.length);
           uploadedCount = result.uploadedCount;
         }
         if (uploadedCount === undefined) await sleep(100);
       }
       if (uploadedCount !== files.length) {
         const summary = [...this.dialogs,...this.layerMessages].join('；');
-        const error = new Error(`系统没有返回与本批一致的上传数量：本批 ${files.length} 张${summary ? `，提示：${summary}` : ''}。程序将按编号查询线上逐张对账。`);
+        if (uploadTransport.state.requestCount === 0) {
+          // Do not leave a live selection behind an unaccepted confirmation:
+          // clicking that stale dialog after the runner stops could submit it.
+          await this.page.locator('#file[type="file"]').evaluate((input)=>{input.value=''}).catch(()=>{});
+          const cancel=this.page.locator('.layui-layer:visible').filter({hasText:'确认要上传吗'})
+            .locator('.layui-layer-btn1').first();
+          if (await cancel.count().catch(()=>0)) await scheduleSiteClick(cancel,{allowMissing:true,timeoutMs:750});
+        }
+        const error = new Error(`系统没有返回与本批一致的上传数量：本批 ${files.length} 张${summary ? `，提示：${summary}` : ''}。本次结果尚未确认。`);
         error.code = 'BLESSING_UPLOAD_OUTCOME_UNCONFIRMED';
         error.uploadEvidence = {
           confirmationSeen,

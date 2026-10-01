@@ -231,6 +231,14 @@ export function retainManualPhotoAttemptEvidence(previous) {
   };
 }
 
+export function restoreUnusedManualUploadRetryCount(previous) {
+  const count=Number(previous?.uncertainRetryCount || 0);
+  const evidence=previous?.currentBatchUploadEvidence;
+  return count===1 && previous?.uncertainRetryEvidence?.originalAttempt
+    && previous?.currentBatchUploadCount == null
+    && evidence?.requestStarted === false && evidence?.responseSeen === false ? 0 : count;
+}
+
 export function decideManualPhotoUncertainRetry({
   blessingCount = 0, verifiedReceiptCount = 0, pendingFiles = [],
   previousAttempt = null, uncertainRetryCount = 0,

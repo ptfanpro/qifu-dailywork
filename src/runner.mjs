@@ -13,7 +13,7 @@ import {ensureManualPhotoMirror,planManualNumberedPreparation,scanManualNumbered
 import {createPdfIndexBinding,recognitionSourceFingerprint,canReusePdfIndex,createPhotoInputBinding} from './recognition-provenance.mjs';
 import {mustRebuildPhotoPlan,assertWritePlanReady,photoFilesMatchPlan,photoFilesExactlyMatchPlan,trustedPreparedOutputs,retainVerifiedUploadEvidence,assertPhotoFilesMatchPlan} from './photo-plan-gate.mjs';
 import {reviewExcludedPhotoNames} from './photo-review-isolation.mjs';
-import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch, decideManualPhotoResume, decideManualPhotoUncertainRetry, retainManualPhotoAttemptEvidence, manualPhotoUploadProgress } from './workflow-state.mjs';
+import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch, decideManualPhotoResume, decideManualPhotoUncertainRetry, retainManualPhotoAttemptEvidence, restoreUnusedManualUploadRetryCount, manualPhotoUploadProgress } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
 import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
@@ -702,7 +702,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         uploadedFiles,
         batches:Array.isArray(previous?.batches) ? previous.batches : [],
         uncertainSubmission:previous?.uncertainSubmission === true,
-        uncertainRetryCount:previous?.fileSetHash === manifest.fileSetHash ? Number(previous?.uncertainRetryCount || 0) : 0,
+        uncertainRetryCount:previous?.fileSetHash === manifest.fileSetHash ? restoreUnusedManualUploadRetryCount(previous) : 0,
         previousAttempt:retainManualPhotoAttemptEvidence(previous),
         stage:'not-started'
       };
@@ -1031,6 +1031,10 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         receipt.currentBatch = index + 1;
         receipt.currentBatchFiles = batches[index].map((file)=>path.basename(file));
         receipt.currentBatchStartedAt = new Date().toISOString();
+        receipt.currentBatchUploadEvidence=null;
+        receipt.currentBatchTransportRequestSeen=false;
+        receipt.currentBatchTransportResponseSeen=false;
+        receipt.currentBatchUploadCount=null;
         receipt.stage = 'starting';
         let beforeOrderState = null;
         if (uploadOrderScope.proven) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { PrayerSite } from '../src/site.mjs';
-import { decideManualPhotoResume, decideManualPhotoUncertainRetry, retainManualPhotoAttemptEvidence, manualPhotoUploadProgress } from '../src/workflow-state.mjs';
+import { decideManualPhotoResume, decideManualPhotoUncertainRetry, retainManualPhotoAttemptEvidence, restoreUnusedManualUploadRetryCount, manualPhotoUploadProgress } from '../src/workflow-state.mjs';
 
 for (const method of ['queryUploadedOrders', 'queryNotUploadedOrders']) {
   let call;
@@ -85,3 +85,11 @@ assert.equal(retainManualPhotoAttemptEvidence({
   currentBatchUploadCount:13,
 }).uploadedCount,13);
 console.log('Manual uncertain upload bounded recovery PASS');
+const unused={uncertainRetryCount:1,currentBatchUploadEvidence:{requestStarted:false,responseSeen:false},
+  uncertainRetryEvidence:{originalAttempt:zero.previousAttempt}};
+assert.equal(restoreUnusedManualUploadRetryCount(unused),0);
+for(const patch of [
+  {currentBatchUploadEvidence:{requestStarted:true,responseSeen:false}},
+  {currentBatchUploadEvidence:{requestStarted:false,responseSeen:true}},
+  {currentBatchUploadEvidence:null},{currentBatchUploadCount:13},{uncertainRetryEvidence:null},
+]) assert.equal(restoreUnusedManualUploadRetryCount({...unused,...patch}),1);

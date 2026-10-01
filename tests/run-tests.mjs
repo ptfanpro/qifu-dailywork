@@ -260,9 +260,7 @@ assert.equal(cloudVisionResult.attempted,1);
 let scheduledClickCount=0;
 let scheduleReturned=false;
 let consumedClickToken='';
-const originalSetTimeout=globalThis.setTimeout;
-globalThis.setTimeout=(callback)=>{ callback(); return 1; };
-try {
+{
   const result=await scheduleSiteClick({elementHandle:async()=>({
     evaluate:async(callback,token)=>callback({
       click:()=>{scheduledClickCount+=1;},
@@ -271,9 +269,8 @@ try {
     dispose:async()=>{},
   })},{markConsumed:true});
   scheduleReturned=result==='scheduled';
-} finally {
-  globalThis.setTimeout=originalSetTimeout;
 }
+await new Promise(resolve=>setTimeout(resolve,20));
 assert.equal(scheduleReturned,true);
 assert.equal(scheduledClickCount,1);
 assert.match(consumedClickToken,/^prayer-/);
@@ -288,13 +285,14 @@ await assert.rejects(
 const vanishedConfirmCandidate={
   getAttribute:async()=>null,
   isVisible:async()=>true,
-  elementHandle:async()=>{ throw new Error('locator.elementHandle: Timeout 750ms exceeded. waiting for locator'); },
+  evaluate:async()=>{ throw new Error('Element is detached'); },
+  dispose:async()=>{},
 };
 const transientConfirmSite=Object.create(PrayerSite.prototype);
 transientConfirmSite.page={
   locator:(selector)=>selector.includes('layui-layer-msg')
     ? {allInnerTexts:async()=>[]}
-    : {count:async()=>1,nth:()=>vanishedConfirmCandidate},
+    : {elementHandles:async()=>[vanishedConfirmCandidate]},
 };
 transientConfirmSite.layerMessages=[];
 transientConfirmSite.timing={count:()=>{ throw new Error('消失的确认层不应计为浏览器点击'); }};

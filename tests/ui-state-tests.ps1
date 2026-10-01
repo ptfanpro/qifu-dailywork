@@ -19,7 +19,7 @@ $testBeijingToday = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$testB
 Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.AddDays(-1).ToString('yyyy-MM-dd') '软件启动时照片业务日期必须固定为北京时间昨天'
 Assert-Equal $pdfDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.ToString('yyyy-MM-dd') '软件启动时 PDF 业务日期必须固定为北京时间今天'
 Assert-Equal $photoGroup.Text '照片业务（人工编号后，软件压缩并上传）' '照片界面没有切换到人工编号模式'
-if ($form.Text -notmatch '2026-10-01.2') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
+if ($form.Text -notmatch '2026-10-01.3') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
 Assert-Equal $photoMainButton.Text '一键处理照片' '照片主按钮名称不正确'
 Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称不正确'
 if ($null -ne $photoRefreshButton -or $null -ne $pdfRefreshButton) { throw '照片或 PDF 主区域仍保留重新检查按钮' }
