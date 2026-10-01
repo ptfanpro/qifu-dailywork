@@ -19,7 +19,7 @@ $testBeijingToday = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$testB
 Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.AddDays(-1).ToString('yyyy-MM-dd') '软件启动时照片业务日期必须固定为北京时间昨天'
 Assert-Equal $pdfDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.ToString('yyyy-MM-dd') '软件启动时 PDF 业务日期必须固定为北京时间今天'
 Assert-Equal $photoGroup.Text '照片业务（人工编号后，软件压缩并上传）' '照片界面没有切换到人工编号模式'
-if ($form.Text -notmatch '2026-10-01.3') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
+if ($form.Text -notmatch '2026-10-01.5') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
 Assert-Equal $photoMainButton.Text '一键处理照片' '照片主按钮名称不正确'
 Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称不正确'
 if ($null -ne $photoRefreshButton -or $null -ne $pdfRefreshButton) { throw '照片或 PDF 主区域仍保留重新检查按钮' }
@@ -58,14 +58,12 @@ try {
     Refresh-LocalAvailability
     Assert-Equal $script:photoNextAction 'photo-manual-prepare' '放入照片后应自动解锁照片主按钮'
     Assert-Equal $photoMainButton.Enabled $true '放入照片后仍不能点击照片主按钮'
-    $savedBeijingHour = (Get-Command Get-BeijingHour).ScriptBlock
-    function Get-BeijingHour { return 9 }
     Refresh-LocalAvailability
-    Assert-Equal $pdfMainButton.Enabled $false '北京时间 10 点前 PDF 按钮应保持禁用'
-    function Get-BeijingHour { return 10 }
-    Refresh-LocalAvailability
-    Assert-Equal $pdfMainButton.Enabled $true '北京时间到 10 点后应无需重启解锁 PDF 按钮'
-    Set-Item Function:Get-BeijingHour $savedBeijingHour
+    Assert-Equal $pdfMainButton.Enabled $true '未处理 PDF 按钮必须可点击，不受执行时间限制'
+    Assert-Equal $script:pdfNextAction 'export' '未处理 PDF 应正常进入导出流程'
+    if ($pdfStatus.Text -match '不到|10 点') { throw 'PDF 卡片仍显示十点前限制' }
+    Refresh-LocalAvailability $true
+    Assert-Equal $pdfMainButton.Enabled $true '手动刷新后 PDF 按钮仍应可点击'
     $manualHash = (Get-FileHash -LiteralPath $manualPhoto -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') ([ordered]@{
         businessDate='2026-08-10';manualNumberedMode=$true;blessingReady=$false;fileSetHash='manual-hash';

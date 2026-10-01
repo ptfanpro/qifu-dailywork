@@ -79,6 +79,7 @@ import './manual-numbered-photo-regression.mjs';
 import './manual-photo-mirror-regression.mjs';
 import './manual-photo-resume-regression.mjs';
 import './manual-photo-readback-regression.mjs';
+import './pdf-before-ten-regression.mjs';
 import './login-navigation-regression.mjs';
 import './manual-photo-timing-regression.mjs';
 import './historical-backlog-regression.mjs';

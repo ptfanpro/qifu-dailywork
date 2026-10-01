@@ -300,11 +300,6 @@ if (args.action === 'historical-backlog-check') {
   }
 }
 
-if (args.action === 'export') {
-  const beijingHour = Number(new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Shanghai',hour:'2-digit',hour12:false}).format(new Date()));
-  if (beijingHour < 10) { fail('北京时间10点前禁止执行 PDF 导出。'); process.exit(1); }
-}
-
 if (args.action === 'scan') {
   const photoDir = path.join(dayFolder(root, photoDate),'1'); const pdfDir = dayFolder(root,pdfDate);
   const images = fs.existsSync(photoDir) ? fs.readdirSync(photoDir).filter((x)=>/\.(jpe?g|png)$/i.test(x)) : [];

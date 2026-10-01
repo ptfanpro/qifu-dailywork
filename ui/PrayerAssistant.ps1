@@ -57,7 +57,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-01.4（人工编号·自动压缩上传）'
+$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-01.5（人工编号·自动压缩上传）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -221,7 +221,7 @@ $script:processTimer.Interval = 250
 $script:availabilityTimer = New-Object System.Windows.Forms.Timer
 $script:availabilityTimer.Interval = 15000
 $script:lastPhotoInboxSnapshot = $null
-$script:lastPdfTimeGate = $null
+$script:lastPdfDateSnapshot = $null
 
 function Save-Settings {
     Write-PrayerAtomicJson -Path $settingsPath -Value @{
@@ -617,9 +617,6 @@ function Refresh-PhotoCard {
     $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
     Set-PhotoResult "$prefix 福单图 $blessingCount 张已上传；下一步处理供水、供灯场景图，并直接完成已上传牌位图的牌位订单。" ([System.Drawing.Color]::DarkBlue) 70 '继续照片：场景图/牌位并完成' $true 'photo-scenes'
 }
-function Get-BeijingHour {
-    try { return [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::UtcNow,'China Standard Time').Hour } catch { return (Get-Date).Hour }
-}
 function Refresh-PdfCard {
     $script:pdfWorkflowComplete = $false
     $script:pdfNextAction = 'export'
@@ -681,12 +678,6 @@ function Refresh-PdfCard {
         $pdfProgress.Value = 100; $pdfMainButton.Text = '一键处理 PDF'; $pdfMainButton.Enabled = $false
         return
     }
-    if ((Get-BeijingHour) -lt 10) {
-        $pdfStatus.Text = "$date PDF 尚未处理；还不到北京时间 10 点。"
-        $pdfStatus.ForeColor = [System.Drawing.Color]::DarkOrange
-        $pdfProgress.Value = 10; $pdfMainButton.Text = '一键处理 PDF'; $pdfMainButton.Enabled = $false
-        return
-    }
     $pendingText = ''
     if ($verification) { $pendingText = "；线上福单 $([int]$verification.blessingPendingCount) 条、牌位 $([int]$verification.tabletPendingCount) 条待祈福" }
     $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
@@ -718,9 +709,9 @@ function Refresh-LocalAvailability([bool]$force = $false) {
         $script:lastPhotoInboxSnapshot = $photoSnapshot
         Refresh-PhotoCard
     }
-    $pdfTimeGate = "$($pdfDate.Value.ToString('yyyy-MM-dd'))|$((Get-BeijingHour) -ge 10)"
-    if ($force -or $pdfTimeGate -ne $script:lastPdfTimeGate) {
-        $script:lastPdfTimeGate = $pdfTimeGate
+    $pdfDateSnapshot = $pdfDate.Value.ToString('yyyy-MM-dd')
+    if ($force -or $pdfDateSnapshot -ne $script:lastPdfDateSnapshot) {
+        $script:lastPdfDateSnapshot = $pdfDateSnapshot
         Refresh-PdfCard
     }
 }
