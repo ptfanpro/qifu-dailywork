@@ -57,7 +57,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-01.6（人工编号·自动压缩上传）'
+$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-02.1（人工编号·自动压缩上传）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -536,6 +536,12 @@ function Refresh-PhotoCard {
         return
     }
     $hasResumeEvidence = Test-PhotoRunHasResumeEvidence $photoRunDir $manifest $checkpoint
+    $sourceCommit = Read-JsonFile (Join-Path $photoRunDir 'source-photo-commit.json')
+    $sourceSaveInterrupted = $sourceCommit -and [string]$sourceCommit.businessDate -eq $date -and -not $sourceCommit.completedAt
+    if ($manifest.manualNumberedMode -eq $true -and ([int]$manifest.sourceNormalizationPending -gt 0 -or $sourceSaveInterrupted)) {
+        Set-PhotoResult "$date 原目录压缩尚未核验完成；点击【一键处理照片】检查并保存压缩图，已有上传回执会保留。" ([System.Drawing.Color]::DarkOrange) 30 '压缩原目录照片' $true 'photo-manual-prepare'
+        return
+    }
     $onlineClosure = Read-JsonFile (Join-Path $photoRunDir 'photo-online-closure.json')
     if ($onlineClosure -and $onlineClosure.complete -eq $true -and [string]$onlineClosure.businessDate -eq $date -and
         [int]$onlineClosure.onlineScopeCount -gt 0 -and [int]$onlineClosure.onlineUnfinishedCount -eq 0 -and -not $hasNewRaw) {
@@ -602,7 +608,7 @@ function Refresh-PhotoCard {
     if (-not ($uploadReceipt -and $uploadReceipt.complete -eq $true -and [string]$uploadReceipt.fileSetHash -eq $manifestHash -and [int]$uploadReceipt.uploadedCount -eq $blessingCount)) {
         $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
         $manualText = if ($manualIssueCount -gt 0) { "待人工处理：$firstPhotoIssue" } else { '' }
-        $preparedText = if ($manifest.manualNumberedMode) { '压缩上传副本预检通过（原图保留）' } else { '预检通过' }
+        $preparedText = if ($manifest.manualNumberedMode) { '照片预检通过（上传前核验原目录压缩）' } else { '预检通过' }
         Set-PhotoResult "$prefix ${preparedText}：福单图 $blessingCount 张、场景图 $sceneCount 张；下一步上传福单图。$manualText" ([System.Drawing.Color]::DarkBlue) 40 '继续照片：上传福单图' $true 'photo-upload'
         return
     }

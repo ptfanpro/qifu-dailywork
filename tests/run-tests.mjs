@@ -77,6 +77,8 @@ import './photo-upload-input-regression.mjs';
 import './photo-upload-receipt-integration.mjs';
 import './manual-numbered-photo-regression.mjs';
 import './manual-photo-mirror-regression.mjs';
+import './manual-photo-source-commit-regression.mjs';
+import './manual-source-backup-retention-regression.mjs';
 import './manual-photo-resume-regression.mjs';
 import './manual-photo-readback-regression.mjs';
 import './pdf-before-ten-regression.mjs';

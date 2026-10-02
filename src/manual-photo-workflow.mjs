@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {MAX_IMAGE_BYTES} from './photos.mjs';
 import {createPhotoInputBinding} from './recognition-provenance.mjs';
 
@@ -12,6 +14,13 @@ const SCENE_STEMS=new Set(['2.1','2.2','2.5','2.6']);
 
 const byName=(a,b)=>path.basename(a).localeCompare(path.basename(b),'zh-CN');
 const sha256=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const sourceIdentity=(sourceRoot,date,sourceFileHashes)=>crypto.createHash('sha256').update(JSON.stringify({sourceRoot,date,sourceFileHashes})).digest('hex');
+function writeJson(file,value) {
+  fs.mkdirSync(path.dirname(file),{recursive:true});
+  const temporary=`${file}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temporary,JSON.stringify(value,null,2));
+  fs.renameSync(temporary,file);
+}
 const orientedSize=metadata=>[5,6,7,8].includes(Number(metadata.orientation||1))
   ? {width:Number(metadata.height||0),height:Number(metadata.width||0)}
   : {width:Number(metadata.width||0),height:Number(metadata.height||0)};
@@ -111,10 +120,9 @@ function hashManifestFiles(files) {
   return hash.digest('hex');
 }
 
-// Some synchronizers expose readable files that refuse rename/unlink.  Keep a
-// source-bound, date-shaped working copy in local state so preparation never
-// needs to delete the customer's originals. A changed source set gets a new
-// immutable snapshot; an unchanged set reuses its already-normalized copy.
+// Encode in local state and preserve the same upload bytes across restarts.
+// Verified source writeback creates a new source identity alias to this mirror;
+// unrelated synchronization revisions still get an independent snapshot.
 export function ensureManualPhotoMirror({root,date,workDir}) {
   const sourceRoot=path.resolve(root),localWorkDir=path.resolve(workDir);
   const relative=path.relative(sourceRoot,localWorkDir);
@@ -122,22 +130,27 @@ export function ensureManualPhotoMirror({root,date,workDir}) {
   const sourcePhotoDir=path.join(dayFolder(sourceRoot,date),'1');
   const files=imageFiles(sourcePhotoDir);
   const sourceFileHashes=Object.fromEntries(files.map(file=>[path.basename(file),sha256(file)]));
-  const identity=crypto.createHash('sha256').update(JSON.stringify({sourceRoot,date,sourceFileHashes})).digest('hex');
+  const identity=sourceIdentity(sourceRoot,date,sourceFileHashes);
   const mirrorBase=path.join(localWorkDir,'manual-photo-mirrors');
-  const mirrorRoot=path.join(mirrorBase,identity);
+  const aliasFile=path.join(mirrorBase,'source-bindings',`${identity}.json`);
+  const alias=fs.existsSync(aliasFile)?JSON.parse(fs.readFileSync(aliasFile,'utf8')):null;
+  if(alias&&!/^[a-f0-9]{64}$/.test(alias.mirrorIdentity))throw Error('本机照片工作副本来源别名无效。');
+  const mirrorRoot=path.join(mirrorBase,alias?.mirrorIdentity||identity);
   const mirrorPhotoDir=path.join(dayFolder(mirrorRoot,date),'1');
   const marker=path.join(mirrorRoot,'mirror-source.json');
   if(fs.existsSync(mirrorRoot)) {
     if(!fs.existsSync(marker))throw Error(`本机照片工作副本不完整，请检查：${mirrorRoot}`);
     const saved=JSON.parse(fs.readFileSync(marker,'utf8'));
-    if(saved.identity!==identity||saved.sourceRoot!==sourceRoot||saved.businessDate!==date)
+    const sourceMatches=saved.identity===identity||
+      (saved.sourceWriteback?.identity===identity&&JSON.stringify(saved.sourceWriteback.sourceFileHashes)===JSON.stringify(sourceFileHashes));
+    if(!sourceMatches||saved.sourceRoot!==sourceRoot||saved.businessDate!==date||saved.identity!==path.basename(mirrorRoot))
       throw Error('本机照片工作副本来源校验失败，已停止处理。');
     for(const file of files) {
       const name=path.basename(file),normalized=`${path.parse(name).name}.jpg`;
       if(!fs.existsSync(path.join(mirrorPhotoDir,name))&&!fs.existsSync(path.join(mirrorPhotoDir,normalized)))
         throw Error(`本机照片工作副本缺少 ${name}，已停止处理；原图保持不变。`);
     }
-    return {root:mirrorRoot,sourceRoot,sourcePhotoDir,sourceFileHashes,identity,reused:true};
+    return {root:mirrorRoot,sourceRoot,sourcePhotoDir,sourceFileHashes,identity:saved.identity,reused:true};
   }
   fs.mkdirSync(mirrorBase,{recursive:true});
   const temporary=fs.mkdtempSync(path.join(mirrorBase,'.copy-'));
@@ -157,6 +170,93 @@ export function ensureManualPhotoMirror({root,date,workDir}) {
     throw error;
   }
   return {root:mirrorRoot,sourceRoot,sourcePhotoDir,sourceFileHashes,identity,reused:false};
+}
+
+export function manualSourceNormalizationPending(mirror,date) {
+  const photoDir=path.join(dayFolder(mirror.root,date),'1');
+  return Object.entries(mirror.sourceFileHashes).filter(([name,hash])=>{
+    const target=path.join(photoDir,`${path.parse(name).name}.jpg`);
+    return fs.existsSync(target)&&hash!==sha256(target);
+  }).length;
+}
+
+// The old source transaction required DELETE sharing (rename/unlink), although
+// saving an existing numbered JPG requires only WRITE sharing. Use a Windows
+// handle that excludes competing writers while allowing compatible readers.
+export async function commitManualPhotoSources({mirror,date,workDir,attempts=8,delayMs=500}) {
+  const mirrorDir=path.join(dayFolder(mirror.root,date),'1');
+  const manifest=await scanManualNumberedWorkday(mirror.root,date);
+  if(!manifest.uploadReady)throw Error('上传副本尚未通过规格检查，原目录未修改。');
+  let originals=imageFiles(mirror.sourcePhotoDir);
+  const originalNames=originals.map(file=>path.basename(file));
+  if(JSON.stringify(originalNames)!==JSON.stringify(Object.keys(mirror.sourceFileHashes)))throw Error('原目录文件集合发生变化，请重新检查；未写回照片。');
+  for(const source of originals) {
+    const name=path.basename(source),prepared=path.join(mirrorDir,`${path.parse(name).name}.jpg`),current=sha256(source);
+    if(!fs.existsSync(prepared)||(current!==mirror.sourceFileHashes[name]&&current!==sha256(prepared)))
+      throw Error(`${name} 原图或来源发生变化，禁止覆盖旧副本。`);
+  }
+  const journalPath=path.join(workDir,'source-photo-commit.json');
+  const previous=fs.existsSync(journalPath)?JSON.parse(fs.readFileSync(journalPath,'utf8')):null;
+  // PNG/JPEG extension changes genuinely require rename/delete permission.
+  // Preserve the existing verified conversion transaction for these files;
+  // the normal numbered JPG path never needs this permission anymore.
+  const conversions=originals.filter(file=>path.extname(file).toLowerCase()!=='.jpg');
+  if(conversions.length) {
+    const sourcePlan=await planManualNumberedPreparation({photoDir:mirror.sourcePhotoDir,date});
+    if(!sourcePlan.safeToApply)throw Error('原目录转换方案未通过检查，照片未修改。');
+    writeJson(journalPath,{schemaVersion:1,businessDate:date,completedAt:null,files:previous?.files||[],conversionPending:true});
+    const {applyPhotoPreparation}=await import('./photo-prepare.mjs');
+    const receipt=await applyPhotoPreparation({...sourcePlan,assignments:sourcePlan.assignments.filter(item=>conversions.includes(item.source))},workDir);
+    writeJson(path.join(workDir,'source-conversion-receipt.json'),receipt);
+    for(const item of receipt.files)if(sha256(item.target)!==sha256(path.join(mirrorDir,item.targetName)))
+      throw Error('原目录转换结果与上传副本不一致，原图备份保留。');
+    originals=imageFiles(mirror.sourcePhotoDir);
+    mirror.sourceFileHashes=Object.fromEntries(originals.map(file=>[path.basename(file),sha256(file)]));
+  }
+  const backupDir=path.join(workDir,'source-photo-backups',crypto.randomUUID());
+  const entries=[];
+  for(const source of originals) {
+    const name=path.basename(source),prepared=path.join(mirrorDir,`${path.parse(name).name}.jpg`);
+    if(!fs.existsSync(prepared))throw Error(`${name} 缺少压缩成品，原目录未修改。`);
+    const beforeSha256=mirror.sourceFileHashes[name],afterSha256=sha256(prepared),currentHash=sha256(source);
+    const prior=previous?.files?.find(entry=>entry.source===source&&entry.afterSha256===afterSha256&&entry.status==='verified');
+    if(currentHash!==beforeSha256&&currentHash!==afterSha256)throw Error(`${name} 原图发生变化，禁止覆盖旧副本。`);
+    if(currentHash===afterSha256) {
+      entries.push(prior?{...prior,prepared}:{source,prepared,beforeSha256,afterSha256,backup:null,status:'verified'});
+      continue;
+    }
+    entries.push({source,prepared,beforeSha256,afterSha256,backup:path.join(backupDir,name),status:'pending'});
+  }
+  const pending=entries.filter(entry=>entry.status!=='verified');
+  if(pending.length) {
+    if(process.platform!=='win32')throw Error('原目录安全保存需要 Windows 文件共享控制。');
+    fs.mkdirSync(backupDir,{recursive:true});
+    const plan={schemaVersion:1,businessDate:date,journalPath,attempts,delayMs,completedAt:null,files:entries};
+    const planPath=path.join(workDir,`source-photo-save-${crypto.randomUUID()}.json`);
+    writeJson(planPath,plan);
+    writeJson(journalPath,plan);
+    const helper=fileURLToPath(new URL('../ui/Write-PreparedPhotos.ps1',import.meta.url));
+    const result=spawnSync('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',helper,'-PlanPath',planPath],
+      {encoding:'utf8',windowsHide:true,timeout:60000});
+    try {fs.unlinkSync(planPath);} catch {}
+    if(result.error||result.status!==0)throw Error(String(result.stderr||result.error?.message||'原目录安全保存失败，备份已保留。').trim());
+  }
+  const receipt=pending.length?JSON.parse(fs.readFileSync(journalPath,'utf8')):{schemaVersion:1,businessDate:date,files:entries};
+  for(const entry of receipt.files)if(sha256(entry.source)!==entry.afterSha256||sha256(entry.prepared)!==entry.afterSha256)
+    throw Error('原目录或上传成品在保存后发生变化，已停止；原图备份保留。');
+  const sourceFileHashes=Object.fromEntries(imageFiles(mirror.sourcePhotoDir).map(file=>[path.basename(file),sha256(file)]));
+  const expectedSourceHashes=Object.fromEntries(receipt.files.map(entry=>[path.basename(entry.source),entry.afterSha256]));
+  if(JSON.stringify(sourceFileHashes)!==JSON.stringify(expectedSourceHashes))throw Error('原目录文件集合或内容在核验期间发生变化，已停止；请重新检查。');
+  const identity=sourceIdentity(mirror.sourceRoot,date,sourceFileHashes);
+  const marker=path.join(mirror.root,'mirror-source.json'),saved=JSON.parse(fs.readFileSync(marker,'utf8'));
+  saved.sourceWriteback={identity,sourceFileHashes,verifiedAt:new Date().toISOString()};
+  writeJson(marker,saved);
+  writeJson(path.join(path.dirname(mirror.root),'source-bindings',`${identity}.json`),{mirrorIdentity:mirror.identity});
+  mirror.sourceFileHashes=sourceFileHashes;
+  receipt.processedCount=pending.length+conversions.length;
+  receipt.completedAt=new Date().toISOString();
+  writeJson(journalPath,receipt);
+  return receipt;
 }
 
 export async function scanManualNumberedWorkday(root,date) {

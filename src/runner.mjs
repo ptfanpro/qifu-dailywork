@@ -9,7 +9,7 @@ import { Timing } from './timing.mjs';
 import { calculateQuantities, normalizeText, venueMessage } from './quantity.mjs';
 import { assertSceneFilesBelongToBusinessDate, assertUnchangedManifest, dayFolder as photoDayFolder, scanPhotoWorkday, splitUploadBatches } from './photos.mjs';
 import { applyPhotoPreparation, planPhotoPreparation } from './photo-prepare.mjs';
-import {ensureManualPhotoMirror,planManualNumberedPreparation,scanManualNumberedWorkday} from './manual-photo-workflow.mjs';
+import {ensureManualPhotoMirror,planManualNumberedPreparation,scanManualNumberedWorkday,commitManualPhotoSources,manualSourceNormalizationPending} from './manual-photo-workflow.mjs';
 import {createPdfIndexBinding,recognitionSourceFingerprint,canReusePdfIndex,createPhotoInputBinding} from './recognition-provenance.mjs';
 import {mustRebuildPhotoPlan,assertWritePlanReady,photoFilesMatchPlan,photoFilesExactlyMatchPlan,trustedPreparedOutputs,retainVerifiedUploadEvidence,assertPhotoFilesMatchPlan} from './photo-plan-gate.mjs';
 import {reviewExcludedPhotoNames} from './photo-review-isolation.mjs';
@@ -438,7 +438,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
     const manualNumberedMode=!['photo-prepare','photo-recheck'].includes(args.action);
     const mirror=manualNumberedMode?ensureManualPhotoMirror({root,date:photoDate,workDir:photoRunDir}):null;
     const activePhotoRoot=mirror?.root||root;
-    if(mirror)log(`人工编号照片使用本机工作副本${mirror.reused?'（已复用）':''}；原始同步目录照片保持不变。来源：${mirror.sourcePhotoDir}`);
+    if(mirror)log(`人工编号照片使用本机工作副本${mirror.reused?'（已复用）':''}；压缩成品将核验后保存回原目录。来源：${mirror.sourcePhotoDir}`);
     if(args.action==='photo-manual-prepare') {
       if(args.authorized!=='yes')throw Error('人工编号照片规格处理会修改照片目录，缺少本次按钮授权。');
       const photoDir=path.join(photoDayFolder(activePhotoRoot,photoDate),'1');
@@ -454,8 +454,10 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       if(plan.assignments.length) {
         const receipt=await applyPhotoPreparation(plan,photoRunDir);
         atomic(path.join(photoRunDir,'photo-prepare-receipt.json'),receipt);
-        log(`人工编号照片规格处理完成：本机上传副本 ${receipt.processedCount} 张已统一为 1800×1350、JPG、且不超过 1.5 MiB；编号保持不变，原始同步目录照片未修改。`);
-      } else log('人工编号照片已经全部符合 1800×1350、JPG、且不超过 1.5 MiB，本次无需重复压缩。');
+        log(`人工编号照片规格处理完成：本机上传副本 ${receipt.processedCount} 张已统一为 1800×1350、JPG、且不超过 1.5 MiB；正在核验并保存回原目录。`);
+      } else log('本机上传副本已经符合规格；继续核对原目录是否也已完成压缩。');
+      const sourceReceipt=await commitManualPhotoSources({mirror,date:photoDate,workDir:photoRunDir});
+      log(`原目录照片压缩已核验：保存 ${sourceReceipt.processedCount} 张，${sourceReceipt.files.length} 张与上传副本哈希一致；尺寸 1800×1350、JPG、不超过 1.5 MiB；原图备份保存在本机。`);
       photoTiming.end();
     }
     if (args.action === 'photo-prepare' || args.action === 'photo-recheck') {
@@ -564,10 +566,16 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
     if(manualNumberedMode) {
       log(`人工编号模式：发现 ${quickImageCount} 张图片；不运行 OCR，不读取或比对 PDF。`);
       manifest=await scanManualNumberedWorkday(activePhotoRoot,photoDate);
+      if(['photo-upload','photo-scenes'].includes(args.action)&&manifest.uploadReady) {
+        if(args.authorized!=='yes')throw Error('原目录压缩保存缺少本次按钮授权。');
+        const sourceReceipt=await commitManualPhotoSources({mirror,date:photoDate,workDir:photoRunDir});
+        log(`上传前原目录压缩核验通过：保存 ${sourceReceipt.processedCount} 张；原目录与上传副本一致。`);
+      }
       manifest.sourcePhotoDir=mirror.sourcePhotoDir;
       manifest.sourceInputFileHashes=mirror.sourceFileHashes;
       manifest.localMirror=true;
       manifest.mirrorIdentity=mirror.identity;
+      manifest.sourceNormalizationPending=manualSourceNormalizationPending(mirror,photoDate);
     } else {
       log(`照片目录快速清点：发现 ${quickImageCount} 张图片。初始化预检不读取未编号原图做 OCR；正式识别和编号由照片处理阶段完成。`);
       const cachedPlanFile = path.join(photoRunDir,'photo-prepare-plan.json');

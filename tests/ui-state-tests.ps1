@@ -19,7 +19,7 @@ $testBeijingToday = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$testB
 Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.AddDays(-1).ToString('yyyy-MM-dd') '软件启动时照片业务日期必须固定为北京时间昨天'
 Assert-Equal $pdfDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.ToString('yyyy-MM-dd') '软件启动时 PDF 业务日期必须固定为北京时间今天'
 Assert-Equal $photoGroup.Text '照片业务（人工编号后，软件压缩并上传）' '照片界面没有切换到人工编号模式'
-if ($form.Text -notmatch '2026-10-01.6') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
+if ($form.Text -notmatch '2026-10-02.1') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
 Assert-Equal $photoMainButton.Text '一键处理照片' '照片主按钮名称不正确'
 Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称不正确'
 if ($null -ne $photoRefreshButton -or $null -ne $pdfRefreshButton) { throw '照片或 PDF 主区域仍保留重新检查按钮' }
@@ -73,6 +73,23 @@ try {
     })
     Refresh-PhotoCard
     Assert-Equal $script:photoNextAction 'photo-manual-prepare' '人工编号照片不合规格时应允许先压缩'
+    $originalPendingManifest = [ordered]@{
+        businessDate='2026-08-10';manualNumberedMode=$true;blessingReady=$true;uploadReady=$true;fileSetHash='source-save-hash';
+        sourceNormalizationPending=1;counts=[ordered]@{allImages=1;blessing=1;lampScene=0;waterScene=0};
+        inputFileHashes=[ordered]@{'101.jpg'=(Get-FileHash -LiteralPath $manualPhoto -Algorithm SHA256).Hash.ToLowerInvariant()};blockingErrors=@();manualIssues=@()
+    }
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $originalPendingManifest
+    Write-TestJson (Join-Path $photoRunDir 'photo-online-closure.json') ([ordered]@{businessDate='2026-08-10';complete=$true;onlineScopeCount=1;onlineUnfinishedCount=0;checkedAt='2026-08-11T00:00:00Z'})
+    Refresh-PhotoCard
+    Assert-Equal $script:photoNextAction 'photo-manual-prepare' '线上已完成仍应允许补做原目录压缩'
+    Assert-Equal $photoMainButton.Enabled $true '上传副本合格不能遮蔽原目录未压缩状态'
+    $originalPendingManifest.sourceNormalizationPending=0
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $originalPendingManifest
+    Write-TestJson (Join-Path $photoRunDir 'source-photo-commit.json') ([ordered]@{businessDate='2026-08-10';completedAt=$null;files=@()})
+    Refresh-PhotoCard
+    Assert-Equal $script:photoNextAction 'photo-manual-prepare' '原目录保存中断不能被旧线上完成回执禁用'
+    Remove-Item -LiteralPath (Join-Path $photoRunDir 'source-photo-commit.json')
+    Remove-Item -LiteralPath (Join-Path $photoRunDir 'photo-online-closure.json')
     Assert-Equal $photoMainButton.Enabled $true '人工编号照片待压缩时主按钮不能被历史成品规则禁用'
     $mirrorManifest = [pscustomobject]@{
         manualNumberedMode = $true

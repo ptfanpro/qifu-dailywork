@@ -79,6 +79,8 @@ function pruneTimingHistory(root, directory, report, keepCount, dryRun) {
 }
 
 function photoWorkflowCompleted(photoDirectory) {
+  const sourceCommit=readJson(path.join(photoDirectory,'source-photo-commit.json'),null);
+  if(sourceCommit&&(!sourceCommit.completedAt||sourceCommit.files?.some(item=>item.status!=='verified')))return null;
   const onlineClosure = readJson(path.join(photoDirectory, 'photo-online-closure.json'), null);
   if (onlineClosure?.complete === true && onlineClosure.checkedAt) {
     const checkedAtMs = Date.parse(onlineClosure.checkedAt);
@@ -93,7 +95,9 @@ function photoWorkflowCompleted(photoDirectory) {
 function photoPreparationCompleted(photoDirectory) {
   const receipt = readJson(path.join(photoDirectory, 'photo-prepare-receipt.json'), null);
   if (!receipt?.completedAt || (Array.isArray(receipt.cleanupPending) && receipt.cleanupPending.length)) return null;
-  const completedAtMs = Date.parse(receipt.completedAt);
+  const sourceCommit=readJson(path.join(photoDirectory,'source-photo-commit.json'),null);
+  if(sourceCommit&&(!sourceCommit.completedAt||sourceCommit.files?.some(item=>item.status!=='verified')))return null;
+  const completedAtMs = Math.max(Date.parse(receipt.completedAt),sourceCommit?Date.parse(sourceCommit.completedAt):0);
   return Number.isFinite(completedAtMs) ? { completedAtMs } : null;
 }
 
@@ -154,6 +158,11 @@ export function cleanupLocalState(localStateRoot, options = {}) {
       if (preparation && nowMs - preparation.completedAtMs >= backupRetentionMs) {
         const purged = removeTracked(root, path.join(photoDirectory, 'photo-backups'), report, 'committed-photo-preparation-recovery-window-expired', dryRun);
         if (purged && !dryRun) scrubPurgedBackupReferences(photoDirectory, new Date(nowMs).toISOString());
+        const sourcesPurged=removeTracked(root,path.join(photoDirectory,'source-photo-backups'),report,'committed-source-photo-recovery-window-expired',dryRun);
+        if(sourcesPurged&&!dryRun) {
+          const sourceFile=path.join(photoDirectory,'source-photo-commit.json'),sourceReceipt=readJson(sourceFile,null);
+          if(sourceReceipt)writeJsonAtomic(sourceFile,{...sourceReceipt,backupPurgedAt:new Date(nowMs).toISOString(),files:sourceReceipt.files.map(item=>({...item,backup:null}))});
+        }
       }
       const completion = photoWorkflowCompleted(photoDirectory);
       if (completion && nowMs - completion.completedAtMs >= backupRetentionMs) {
