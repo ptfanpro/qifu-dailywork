@@ -13,7 +13,7 @@ import {ensureManualPhotoMirror,planManualNumberedPreparation,scanManualNumbered
 import {createPdfIndexBinding,recognitionSourceFingerprint,canReusePdfIndex,createPhotoInputBinding} from './recognition-provenance.mjs';
 import {mustRebuildPhotoPlan,assertWritePlanReady,photoFilesMatchPlan,photoFilesExactlyMatchPlan,trustedPreparedOutputs,retainVerifiedUploadEvidence,assertPhotoFilesMatchPlan} from './photo-plan-gate.mjs';
 import {reviewExcludedPhotoNames} from './photo-review-isolation.mjs';
-import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch, decideManualPhotoResume, decideManualPhotoUncertainRetry, retainManualPhotoAttemptEvidence, restoreUnusedManualUploadRetryCount, manualPhotoUploadProgress } from './workflow-state.mjs';
+import { ensurePhotoInbox, evaluatePhotoOnlineRecheck, evaluatePhotoOrderClosure, isPdfWorkflowComplete, loadVerifiedPdfWorkflow, markOnlineCompletionVerified, resolveHistoricalPhotoClosureEvidence, resolvePdfBoundPhotoOrderScope, upsertPhotoCompletionBatch, decideManualPhotoResume, decideManualPhotoUncertainRetry, retainManualPhotoAttemptEvidence, restoreUnusedManualUploadRetryCount, retainManualUploadRetryState, reserveManualUploadRetry, markManualUploadRetrySubmitted, manualPhotoUploadProgress } from './workflow-state.mjs';
 import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
 import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
@@ -709,6 +709,8 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         uncertainSubmission:previous?.uncertainSubmission === true,
         uncertainRetryCount:(previous?.fileSetHash === manifest.fileSetHash || (manifest.manualNumberedMode && needsManualUploadRecovery(previous))) ? restoreUnusedManualUploadRetryCount(previous) : 0,
         previousAttempt:retainManualPhotoAttemptEvidence(previous),
+        ...(manifest.manualNumberedMode && needsManualUploadRecovery(previous)
+          ? retainManualUploadRetryState(previous) : {}),
         stage:'not-started'
       };
       if (manifest.manualNumberedMode && manualAttemptFilesVerified(receipt,manifest.fileHashes)) {
@@ -906,12 +908,8 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
               });
               if (recovery.allowed) {
                 manualResume=recovery;
-                receipt.uncertainRetryCount=1;
                 allowOneTimeRetry=true;
-                receipt.uncertainRetryEvidence={checkedAt:new Date().toISOString(),
-                  pendingOrderCount:recovery.pendingOrderRows.length,
-                  pendingOrderIdHash:recovery.pendingOrderIdHash,
-                  originalAttempt:receipt.previousAttempt};
+                reserveManualUploadRetry(receipt,recovery);
                 receipt.stage='manual-photo-one-time-retry-ready';
                 atomic(receiptFile,receipt);
                 log(`上次提交未取得数字回执；超过 15 分钟后两次查询均为 0 条已上传、${recovery.pendingOrderRows.length} 条未上传，订单集合一致。仅允许当前照片集合受控重试一次。`);
@@ -925,14 +923,20 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
               atomic(receiptFile,receipt);
               log(`本机已有 ${verifiedCurrentBlessingCount} 张当前照片的逐文件哈希回执，剩余 ${manualResume.pendingFiles.length} 张；线上还有 ${manualResume.pendingOrderRows.length} 条未上传。本次只提交无回执照片，每批完成后核对线上订单变化。`);
             } else {
-              const bindingLabel = manifest.manualNumberedMode ? '人工编号模式没有 PDF 订单绑定凭据' : '当前 PDF 缺少可验证的订单 ID 绑定凭据';
+              const bindingLabel = manifest.manualNumberedMode ? '上次照片上传结果尚未确认' : '当前 PDF 缺少可验证的订单 ID 绑定凭据';
               const retryReason=receipt.uncertainRetryCount > 0
-                ? '同一图片集合的一次受控重试机会已用完'
+                ? '已有一次受控重试记录，需要核对它的提交结果后才能继续'
                 : receipt.previousAttempt?.uploadedCount != null
                   ? '上次已有上传数量回执，需先核对该回执对应的线上结果'
                   : '提交后状态不明，或两次线上订单集合不一致，尚不满足安全重试条件';
               receipt.stage='manual-photo-retry-evidence-conflict';
               atomic(receiptFile,receipt);
+              if (manifest.manualNumberedMode) {
+                const request=receipt.currentBatchTransportRequestSeen===true || receipt.currentBatchUploadEvidence?.requestStarted===true;
+                const response=receipt.currentBatchTransportResponseSeen===true || receipt.currentBatchUploadEvidence?.responseSeen===true;
+                const stage=receipt.currentBatchSubmissionStage || receipt.previousAttempt?.stage || '旧版未记录';
+                log(`上次上传记录：阶段 ${stage}；上传请求 ${request?'已观察到':'没有可靠记录'}；接口响应 ${response?'已观察到':'没有可靠记录'}。本次只查询状态，没有再次上传。`);
+              }
               throw new Error(`${bindingLabel}，线上供灯/牌位共 ${onlineUploadedCount} 条已上传、${onlinePendingRows.length} 条未上传；${retryReason}，没有再次提交照片。`);
             }
           } else {
@@ -1029,8 +1033,10 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         receipt.currentBatch = index + 1;
         receipt.currentBatchFiles = batches[index].map((file)=>path.basename(file));
         receipt.currentBatchStartedAt = new Date().toISOString();
+        receipt.currentBatchCompletedAt=null;
         receipt.currentBatchUploadEvidence=null;
         receipt.currentBatchSubmissionStage=null;
+        receipt.currentBatchTransportStatus=null;
         receipt.currentBatchTransportOutcome=null;
         receipt.currentBatchTransportRequestSeen=false;
         receipt.currentBatchTransportResponseSeen=false;
@@ -1065,9 +1071,10 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
           try {
             const trackUploadStage = (stage,detail) => {
               receipt.stage = stage;
+              if (manifest.manualNumberedMode && allowOneTimeRetry) markManualUploadRetrySubmitted(receipt,stage);
               // Persist before a potentially asynchronous write, not just in
               // the catch block: a crash/restart must not erase uncertainty.
-              if (['submitting','month-submitted','upload-confirmed','transport-request','transport-response','transport-outcome','transport-receipt','upload-receipt'].includes(stage)) {
+              if (['month-submit-started','submitting','month-submitted','upload-confirmed','transport-request','transport-response','transport-outcome','transport-receipt','upload-receipt'].includes(stage)) {
                 receipt.uncertainSubmission=true;
                 receipt.currentBatchSubmissionStage=stage;
               }

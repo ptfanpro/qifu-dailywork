@@ -1643,7 +1643,7 @@ const weakSingleVotePhoto=[{file:'weak-580.jpg',reliable:false,number:null,paper
 assert.deepEqual(resolveAmbiguousPhotosByGlobalSet(weakSingleVotePhoto,new Set([580]),new Set()),[]);
 assert.match(runnerSource,/schemaVersion:2[\s\S]*stage:'not-started'/);
 assert.match(runnerSource,/needsOnlineRetryCheck[\s\S]*queryPdfBoundPhotoUploadState/);
-assert.match(runnerSource,/本地已有 \$\{Object\.keys\(uploadedFiles\)\.length\} 张回执/);
+assert.match(runnerSource,/当前可复用 \$\{Object\.keys\(uploadedFiles\)\.length\} 张回执/);
 assert.match(runnerSource,/post-upload-order-set-reconciled/);
 assert.match(runnerSource,/queryNotUploadedOrders/);
 assert.match(runnerSource,/pdf-bound-order-set-all-uploaded/);

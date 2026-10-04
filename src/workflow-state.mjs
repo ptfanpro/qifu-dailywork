@@ -217,15 +217,27 @@ export function decideManualPhotoResume({
     : { allowed:false };
 }
 
+const manualUploadSubmissionStages=new Set([
+  'month-submit-started','submitting','month-submitted','upload-confirmed',
+  'transport-request','transport-response','transport-outcome','transport-receipt',
+  'upload-receipt','upload-reconciled',
+]);
+const manualUploadPreparationStages=new Set([
+  'manual-photo-one-time-retry-ready','manual-photo-resume-ready','starting',
+  'staging-local-upload-cache','filechooser-armed','selecting-files','files-selected',
+]);
+const manualUploadUncertainRetryStages=new Set([
+  'month-submit-started','submitting','month-submitted','upload-confirmed',
+  'transport-request','transport-response','transport-outcome',
+]);
+
 export function retainManualPhotoAttemptEvidence(previous) {
   if (previous?.uncertainSubmission !== true) return null;
   const older=previous.previousAttempt || {};
   const currentFiles=Array.isArray(previous.currentBatchFiles) ? previous.currentBatchFiles : [];
-  const submittedStages=['submitting','month-submitted','upload-confirmed','transport-request','transport-response',
-    'transport-receipt','upload-receipt','upload-reconciled'];
   const currentWasSubmitted=currentFiles.length>0 && (
-    submittedStages.includes(previous.stage)
-    || submittedStages.includes(previous.currentBatchSubmissionStage)
+    manualUploadSubmissionStages.has(previous.stage)
+    || manualUploadSubmissionStages.has(previous.currentBatchSubmissionStage)
     || previous.currentBatchTransportRequestSeen===true
     || previous.currentBatchTransportResponseSeen===true
     || previous.currentBatchUploadEvidence?.requestStarted===true
@@ -240,8 +252,10 @@ export function retainManualPhotoAttemptEvidence(previous) {
       stage:previous.currentBatchSubmissionStage || previous.stage || null,
       files:[...currentFiles],
       startedAt:previous.currentBatchStartedAt || null,
-      pendingOrderIdHash:previous.currentBatchPendingOrderIdHash ?? previous.pendingOrderIdHash ?? null,
-      pendingOrderCount:previous.currentBatchPendingOrderCount ?? previous.pendingOrderCount ?? null,
+      pendingOrderIdHash:Object.hasOwn(previous,'currentBatchPendingOrderIdHash')
+        ? previous.currentBatchPendingOrderIdHash ?? null : previous.pendingOrderIdHash ?? null,
+      pendingOrderCount:Object.hasOwn(previous,'currentBatchPendingOrderCount')
+        ? previous.currentBatchPendingOrderCount ?? null : previous.pendingOrderCount ?? null,
       uploadedCount:previous.currentBatchUploadCount ?? null,
     };
   }
@@ -258,10 +272,72 @@ export function retainManualPhotoAttemptEvidence(previous) {
 
 export function restoreUnusedManualUploadRetryCount(previous) {
   const count=Number(previous?.uncertainRetryCount || 0);
+  const retry=previous?.uncertainRetryEvidence;
+  // Persisting the boundary precedes the browser click. A crash between them
+  // is deliberately uncertain; absence of network observations cannot undo it.
+  if (retry?.status==='possibly-submitted') return Math.max(1,count);
+  if (count!==1 || !retry?.originalAttempt) return count;
   const evidence=previous?.currentBatchUploadEvidence;
-  return count===1 && previous?.uncertainRetryEvidence?.originalAttempt
-    && previous?.currentBatchUploadCount == null
-    && evidence?.requestStarted === false && evidence?.responseSeen === false ? 0 : count;
+  const noNetworkObserved=(evidence?.requestStarted===false && evidence?.responseSeen===false)
+    || (previous?.currentBatchTransportRequestSeen===false && previous?.currentBatchTransportResponseSeen===false);
+  const submissionEvidence=manualUploadSubmissionStages.has(previous?.stage)
+    || Boolean(previous?.currentBatchSubmissionStage)
+    || previous?.currentBatchTransportRequestSeen===true || previous?.currentBatchTransportResponseSeen===true
+    || previous?.currentBatchTransportStatus != null || previous?.currentBatchTransportOutcome != null
+    || previous?.currentBatchUploadCount != null
+    || evidence?.requestStarted===true || evidence?.responseSeen===true
+    || evidence?.applicationSuccess===true || evidence?.applicationFailure===true
+    || (Array.isArray(evidence?.responseStatuses) && evidence.responseStatuses.length>0)
+    || (Array.isArray(evidence?.responseOutcomes) && evidence.responseOutcomes.length>0);
+  const knownPreparation=retry.status==='reserved' || manualUploadPreparationStages.has(previous?.stage);
+  return knownPreparation && noNetworkObserved && !submissionEvidence ? 0 : count;
+}
+
+export function retainManualUploadRetryState(previous) {
+  const retained={uncertainRetryCount:restoreUnusedManualUploadRetryCount(previous)};
+  // Keep one attempt's diagnostics and identity together through read-only
+  // restarts, including restarts which stop before a new batch is prepared.
+  for (const key of ['uncertainRetryEvidence','currentBatch','currentBatchFiles','currentBatchStartedAt',
+    'currentBatchPendingOrderIdHash','currentBatchPendingOrderCount','currentBatchSubmissionStage',
+    'currentBatchTransportRequestSeen','currentBatchTransportResponseSeen','currentBatchTransportStatus',
+    'currentBatchTransportOutcome','currentBatchUploadCount','currentBatchUploadEvidence','currentBatchCompletedAt']) {
+    if (previous && Object.hasOwn(previous,key)) retained[key]=structuredClone(previous[key]);
+  }
+  // Legacy receipts scoped the current batch at the top level. Promote that
+  // scope once so repeated restarts cannot reconstruct an unbound attempt.
+  // An explicit per-batch null belongs to a fresh batch and must stay null.
+  if (Array.isArray(previous?.currentBatchFiles) && previous.currentBatchFiles.length) {
+    for (const [batchKey,legacyKey] of [['currentBatchPendingOrderIdHash','pendingOrderIdHash'],
+      ['currentBatchPendingOrderCount','pendingOrderCount']]) {
+      if (!Object.hasOwn(previous,batchKey) && Object.hasOwn(previous,legacyKey)) {
+        retained[batchKey]=structuredClone(previous[legacyKey] ?? null);
+      }
+    }
+  }
+  return retained;
+}
+
+export function reserveManualUploadRetry(receipt,recovery,{now=new Date().toISOString()}={}) {
+  if (!receipt?.previousAttempt || recovery?.allowed!==true || restoreUnusedManualUploadRetryCount(receipt)!==0) {
+    throw new Error('当前凭据不允许预留人工编号照片重试。');
+  }
+  receipt.uncertainRetryCount=0;
+  receipt.uncertainRetryEvidence={
+    status:'reserved',checkedAt:now,pendingOrderCount:recovery.pendingOrderRows.length,
+    pendingOrderIdHash:recovery.pendingOrderIdHash,
+    originalAttempt:structuredClone(receipt.previousAttempt),
+  };
+  return receipt.uncertainRetryEvidence;
+}
+
+export function markManualUploadRetrySubmitted(receipt,stage) {
+  const retry=receipt?.uncertainRetryEvidence;
+  if (!retry?.originalAttempt || !manualUploadSubmissionStages.has(stage)) return false;
+  const first=retry.status!=='possibly-submitted';
+  receipt.uncertainRetryCount=Math.max(1,Number(receipt.uncertainRetryCount || 0));
+  retry.status='possibly-submitted';
+  if (first) retry.submissionStage=stage;
+  return first;
 }
 
 export function decideManualPhotoUncertainRetry({
@@ -277,7 +353,7 @@ export function decideManualPhotoUncertainRetry({
   if (!Number.isInteger(blessingCount) || blessingCount <= 0 || verifiedReceiptCount !== 0
     || filenames.length !== blessingCount || new Set(filenames).size !== filenames.length
     || attemptFiles.length !== filenames.length || !attemptFiles.every((name) => filenames.includes(name))
-    || !['submitting','month-submitted','upload-confirmed','transport-request','transport-response'].includes(previousAttempt?.stage)
+    || !manualUploadUncertainRetryStages.has(previousAttempt?.stage)
     || previousAttempt?.uploadedCount != null || uncertainRetryCount !== 0
     || !Number.isFinite(age) || age < 15 * 60 * 1000
     || onlineUploadedCount !== 0 || secondOnlineUploadedCount !== 0) return rejected;

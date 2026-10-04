@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { PrayerSite } from '../src/site.mjs';
-import { decideManualPhotoResume, decideManualPhotoUncertainRetry, retainManualPhotoAttemptEvidence, restoreUnusedManualUploadRetryCount, manualPhotoUploadProgress } from '../src/workflow-state.mjs';
+import { decideManualPhotoResume, decideManualPhotoUncertainRetry, retainManualPhotoAttemptEvidence, restoreUnusedManualUploadRetryCount, retainManualUploadRetryState, reserveManualUploadRetry, markManualUploadRetrySubmitted, manualPhotoUploadProgress } from '../src/workflow-state.mjs';
 
 for (const method of ['queryUploadedOrders', 'queryNotUploadedOrders']) {
   let call;
@@ -85,14 +85,119 @@ assert.equal(retainManualPhotoAttemptEvidence({
   currentBatchUploadCount:13,
 }).uploadedCount,13);
 console.log('Manual uncertain upload bounded recovery PASS');
-const unused={uncertainRetryCount:1,currentBatchUploadEvidence:{requestStarted:false,responseSeen:false},
+const unused={uncertainRetryCount:1,stage:'files-selected',currentBatchUploadEvidence:{requestStarted:false,responseSeen:false},
   uncertainRetryEvidence:{originalAttempt:zero.previousAttempt}};
 assert.equal(restoreUnusedManualUploadRetryCount(unused),0);
 for(const patch of [
   {currentBatchUploadEvidence:{requestStarted:true,responseSeen:false}},
   {currentBatchUploadEvidence:{requestStarted:false,responseSeen:true}},
   {currentBatchUploadEvidence:null},{currentBatchUploadCount:13},{uncertainRetryEvidence:null},
+  {stage:'not-started'},{stage:'unknown'},{stage:'month-submitted'},
+  {currentBatchSubmissionStage:'submitting'},
+  {currentBatchTransportRequestSeen:true},{currentBatchTransportResponseSeen:true},
+  {currentBatchTransportStatus:200},{currentBatchTransportOutcome:{category:'business-failure'}},
+  {currentBatchUploadEvidence:{requestStarted:false,responseSeen:false,responseStatuses:[200]}},
+  {uncertainRetryEvidence:{originalAttempt:zero.previousAttempt,status:'possibly-submitted'}},
 ]) assert.equal(restoreUnusedManualUploadRetryCount({...unused,...patch}),1);
+
+for (const stage of ['starting','staging-local-upload-cache','filechooser-armed','selecting-files','files-selected']) {
+  assert.equal(restoreUnusedManualUploadRetryCount({...unused,stage,currentBatchUploadEvidence:null,
+    currentBatchTransportRequestSeen:false,currentBatchTransportResponseSeen:false}),0,
+  `an explicitly unsubmitted legacy preparation failure at ${stage} returns its reservation`);
+}
+
+// Reserving a retry must not spend it on cache preparation or browser failures.
+// Reconstruct receipts repeatedly as the runner does during read-only restarts.
+const retryRecovery=decideManualPhotoUncertainRetry(zero);
+let reserved={uncertainSubmission:true,uncertainRetryCount:0,
+  previousAttempt:{...structuredClone(zero.previousAttempt),pendingOrderCount:null,pendingOrderIdHash:null}};
+reserveManualUploadRetry(reserved,retryRecovery,{now});
+assert.equal(reserved.uncertainRetryCount,0);
+assert.equal(reserved.uncertainRetryEvidence.status,'reserved');
+const originalReservedAttempt=structuredClone(reserved.uncertainRetryEvidence.originalAttempt);
+Object.assign(reserved,{stage:'files-selected',currentBatch:1,currentBatchFiles:[...zero.pendingFiles],
+  currentBatchStartedAt:now,currentBatchSubmissionStage:null,currentBatchPendingOrderIdHash:'new-attempt-scope',
+  currentBatchPendingOrderCount:150,currentBatchTransportRequestSeen:false,currentBatchTransportResponseSeen:false,
+  currentBatchTransportStatus:null,currentBatchTransportOutcome:null,currentBatchUploadCount:null,
+  currentBatchUploadEvidence:null});
+for (let restart=0;restart<3;restart++) {
+  const kept=retainManualUploadRetryState(reserved);
+  assert.equal(kept.uncertainRetryCount,0);
+  assert.deepEqual(kept.currentBatchFiles,zero.pendingFiles);
+  assert.equal(kept.currentBatchStartedAt,now);
+  assert.equal(kept.currentBatchPendingOrderIdHash,'new-attempt-scope');
+  assert.equal(kept.currentBatchPendingOrderCount,150);
+  assert.deepEqual(kept.uncertainRetryEvidence.originalAttempt,originalReservedAttempt);
+  reserved={...kept,uncertainSubmission:true,previousAttempt:retainManualPhotoAttemptEvidence(reserved),stage:'not-started'};
+  assert.deepEqual(reserved.previousAttempt,originalReservedAttempt);
+  assert.equal(decideManualPhotoUncertainRetry({...zero,previousAttempt:reserved.previousAttempt,
+    uncertainRetryCount:reserved.uncertainRetryCount}).allowed,true);
+}
+const isolated=retainManualUploadRetryState(reserved);
+isolated.currentBatchFiles.push('not-the-original.jpg');
+isolated.uncertainRetryEvidence.originalAttempt.files.push('not-the-original.jpg');
+assert.deepEqual(reserved.currentBatchFiles,zero.pendingFiles);
+assert.deepEqual(reserved.uncertainRetryEvidence.originalAttempt,originalReservedAttempt);
+assert.equal(markManualUploadRetrySubmitted(reserved,'files-selected'),false);
+assert.equal(reserved.uncertainRetryCount,0);
+
+// Record the boundary before scheduling the click: a crash after this record
+// cannot prove that the server never received the request and must stay spent.
+assert.equal(markManualUploadRetrySubmitted(reserved,'month-submit-started'),true);
+assert.equal(reserved.uncertainRetryCount,1);
+assert.equal(reserved.uncertainRetryEvidence.status,'possibly-submitted');
+assert.equal(reserved.uncertainRetryEvidence.submissionStage,'month-submit-started');
+assert.equal(restoreUnusedManualUploadRetryCount(reserved),1);
+for (const stage of ['submitting','month-submitted','transport-request','transport-response','transport-outcome']) {
+  assert.equal(markManualUploadRetrySubmitted(reserved,stage),false);
+  assert.equal(reserved.uncertainRetryCount,1);
+}
+reserved.currentBatchSubmissionStage='month-submit-started';
+for (let restart=0;restart<3;restart++) {
+  reserved={...retainManualUploadRetryState(reserved),uncertainSubmission:true,
+    previousAttempt:retainManualPhotoAttemptEvidence(reserved),stage:'not-started'};
+  assert.equal(reserved.uncertainRetryCount,1);
+  assert.equal(reserved.previousAttempt.stage,'month-submit-started');
+  assert.equal(reserved.previousAttempt.startedAt,now);
+  assert.equal(decideManualPhotoUncertainRetry({...zero,previousAttempt:reserved.previousAttempt,
+    uncertainRetryCount:reserved.uncertainRetryCount}).allowed,false);
+}
+assert.throws(()=>reserveManualUploadRetry(reserved,retryRecovery,{now}),/重试/);
+const withoutRetry={uncertainRetryCount:0};
+assert.equal(markManualUploadRetrySubmitted(withoutRetry,'submitting'),false);
+assert.equal(withoutRetry.uncertainRetryCount,0);
+const legacyLost={uncertainRetryCount:1,uncertainSubmission:true,stage:'not-started',previousAttempt:zero.previousAttempt};
+assert.equal(retainManualUploadRetryState(legacyLost).uncertainRetryCount,1,
+  'lost legacy evidence cannot be invented to grant another POST');
+// Older receipts kept the submitted batch's order scope only at the top level.
+// Rebuilding both the batch and previousAttempt must preserve it on every restart.
+let legacyScope={uncertainSubmission:true,uncertainRetryCount:0,stage:'month-submitted',
+  currentBatchFiles:['11.jpg'],currentBatchStartedAt:'2026-10-01T12:00:00.000Z',
+  currentBatchSubmissionStage:'month-submitted',currentBatchTransportRequestSeen:true,
+  pendingOrderIdHash:'original-order-set',pendingOrderCount:310};
+for (let restart=0;restart<3;restart++) {
+  legacyScope={uncertainSubmission:true,previousAttempt:retainManualPhotoAttemptEvidence(legacyScope),
+    ...retainManualUploadRetryState(legacyScope),stage:'not-started'};
+  assert.equal(legacyScope.previousAttempt.pendingOrderIdHash,'original-order-set');
+  assert.equal(legacyScope.previousAttempt.pendingOrderCount,310);
+  assert.equal(legacyScope.currentBatchPendingOrderIdHash,'original-order-set');
+  assert.equal(legacyScope.currentBatchPendingOrderCount,310);
+  assert.equal(decideManualPhotoUncertainRetry({...zero,blessingCount:1,pendingFiles:['11.jpg'],
+    previousAttempt:legacyScope.previousAttempt}).allowed,false,
+  'a changed online order set cannot gain permission because a restart lost the original scope');
+}
+const freshUnboundScope={...legacyScope,pendingOrderIdHash:'stale-older-scope',pendingOrderCount:310,
+  currentBatchPendingOrderIdHash:null,currentBatchPendingOrderCount:null};
+assert.equal(retainManualPhotoAttemptEvidence(freshUnboundScope).pendingOrderIdHash,null,
+  'an explicitly unbound fresh batch must not inherit an older top-level scope');
+assert.equal(retainManualPhotoAttemptEvidence(freshUnboundScope).pendingOrderCount,null);
+assert.equal(retainManualUploadRetryState(freshUnboundScope).currentBatchPendingOrderIdHash,null);
+assert.equal(retainManualUploadRetryState(freshUnboundScope).currentBatchPendingOrderCount,null);
+for (const stage of ['month-submit-started','transport-outcome']) {
+  assert.equal(decideManualPhotoUncertainRetry({...zero,previousAttempt:{...zero.previousAttempt,stage}}).allowed,true);
+  assert.equal(decideManualPhotoUncertainRetry({...zero,previousAttempt:{...zero.previousAttempt,stage,uploadedCount:13}}).allowed,false);
+}
+console.log('Manual upload retry reservation and evidence retention regression PASS');
 
 // A newly submitted retry is a new attempt. Its timestamp, filenames and order
 // scope must stay together rather than inheriting old metadata or an old count.
