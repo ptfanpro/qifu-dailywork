@@ -93,3 +93,34 @@ for(const patch of [
   {currentBatchUploadEvidence:{requestStarted:false,responseSeen:true}},
   {currentBatchUploadEvidence:null},{currentBatchUploadCount:13},{uncertainRetryEvidence:null},
 ]) assert.equal(restoreUnusedManualUploadRetryCount({...unused,...patch}),1);
+
+// A newly submitted retry is a new attempt. Its timestamp, filenames and order
+// scope must stay together rather than inheriting old metadata or an old count.
+const olderAttempt = {stage:'month-submitted',files:['old.jpg'],startedAt:'2026-10-01T12:00:00.000Z',
+  pendingOrderIdHash:'old-scope',pendingOrderCount:12,uploadedCount:12};
+const currentSubmission = {uncertainSubmission:true,previousAttempt:olderAttempt,
+  stage:'transport-response',currentBatchFiles:['new.jpg'],currentBatchStartedAt:'2026-10-01T12:59:00.000Z',
+  pendingOrderIdHash:'new-scope',pendingOrderCount:3,currentBatchTransportResponseSeen:true,
+  currentBatchUploadCount:null};
+const newest = retainManualPhotoAttemptEvidence(currentSubmission);
+assert.deepEqual(newest,{stage:'transport-response',files:['new.jpg'],startedAt:'2026-10-01T12:59:00.000Z',
+  pendingOrderIdHash:'new-scope',pendingOrderCount:3,uploadedCount:null});
+assert.equal(retainManualPhotoAttemptEvidence({...currentSubmission,currentBatchUploadCount:1}).uploadedCount,1);
+assert.equal(retainManualPhotoAttemptEvidence({...currentSubmission,pendingOrderIdHash:null,pendingOrderCount:null}).pendingOrderIdHash,null,
+  'a missing current scope cannot be borrowed from a different attempt');
+const restarted = retainManualPhotoAttemptEvidence({uncertainSubmission:true,stage:'not-started',previousAttempt:newest});
+assert.deepEqual(restarted,newest,'a later read-only restart retains the same exact attempt');
+const notSubmitted = retainManualPhotoAttemptEvidence({...currentSubmission,stage:'starting',
+  currentBatchTransportResponseSeen:false,currentBatchTransportRequestSeen:false});
+assert.deepEqual(notSubmitted,olderAttempt,'preparing a retry does not replace an earlier unresolved submission');
+const withFreshCount = {...currentSubmission,stage:'manual-photo-online-unconfirmed',currentBatchUploadCount:1};
+assert.equal(retainManualPhotoAttemptEvidence(withFreshCount).startedAt,currentSubmission.currentBatchStartedAt);
+const afterDiagnostic = {...currentSubmission,stage:'manual-photo-online-image-readback-incomplete',
+  currentBatchSubmissionStage:'month-submitted',currentBatchTransportResponseSeen:false};
+assert.deepEqual(retainManualPhotoAttemptEvidence(afterDiagnostic),{...newest,stage:'month-submitted'},
+  'a later diagnostic stage cannot erase a known current submission boundary');
+assert.deepEqual(retainManualPhotoAttemptEvidence({...currentSubmission,
+  currentBatchPendingOrderIdHash:'batch-scope',currentBatchPendingOrderCount:2}),
+  {...newest,pendingOrderIdHash:'batch-scope',pendingOrderCount:2});
+assert.equal(retainManualPhotoAttemptEvidence({...currentSubmission,uncertainSubmission:false}),null);
+console.log('Manual upload attempt identity retention regression PASS');

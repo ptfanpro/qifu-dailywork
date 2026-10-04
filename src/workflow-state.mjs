@@ -220,10 +220,35 @@ export function decideManualPhotoResume({
 export function retainManualPhotoAttemptEvidence(previous) {
   if (previous?.uncertainSubmission !== true) return null;
   const older=previous.previousAttempt || {};
+  const currentFiles=Array.isArray(previous.currentBatchFiles) ? previous.currentBatchFiles : [];
+  const submittedStages=['submitting','month-submitted','upload-confirmed','transport-request','transport-response',
+    'transport-receipt','upload-receipt','upload-reconciled'];
+  const currentWasSubmitted=currentFiles.length>0 && (
+    submittedStages.includes(previous.stage)
+    || submittedStages.includes(previous.currentBatchSubmissionStage)
+    || previous.currentBatchTransportRequestSeen===true
+    || previous.currentBatchTransportResponseSeen===true
+    || previous.currentBatchUploadEvidence?.requestStarted===true
+    || previous.currentBatchUploadEvidence?.responseSeen===true
+    || previous.currentBatchUploadCount != null
+  );
+  if (currentWasSubmitted) {
+    // Keep one submission's identity together. In particular, an absent new
+    // count is not the older batch's successful numeric receipt, and a recent
+    // retry must not inherit the first attempt's already-expired waiting time.
+    return {
+      stage:previous.currentBatchSubmissionStage || previous.stage || null,
+      files:[...currentFiles],
+      startedAt:previous.currentBatchStartedAt || null,
+      pendingOrderIdHash:previous.currentBatchPendingOrderIdHash ?? previous.pendingOrderIdHash ?? null,
+      pendingOrderCount:previous.currentBatchPendingOrderCount ?? previous.pendingOrderCount ?? null,
+      uploadedCount:previous.currentBatchUploadCount ?? null,
+    };
+  }
   return {
     stage:older.stage || previous.stage || null,
     files:Array.isArray(older.files) && older.files.length ? older.files
-      : Array.isArray(previous.currentBatchFiles) ? previous.currentBatchFiles : [],
+      : currentFiles,
     startedAt:older.startedAt || previous.currentBatchStartedAt || previous.startedAt || null,
     pendingOrderIdHash:older.pendingOrderIdHash || previous.pendingOrderIdHash || null,
     pendingOrderCount:older.pendingOrderCount ?? previous.pendingOrderCount ?? null,

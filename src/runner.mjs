@@ -18,7 +18,8 @@ import { verifyPdf } from './pdf.mjs';
 import { cleanupLocalState } from './cleanup.mjs';
 import { AutomationApiClient, readEncryptedAutomationCredential } from './automation-auth.mjs';
 import {beijingDateToken,buildHistoricalBacklogReport,HISTORICAL_RANGE_START} from './historical-backlog.mjs';
-import {buildPhotoReadbackRaster,inspectUploadedPhotoRaster} from './photo-readback.mjs';
+import {reconcileManualUploadedPhotos} from './manual-upload-reconciliation.mjs';
+import {uploadManualBatchWithRecovery,needsManualUploadRecovery,manualAttemptFilesVerified,assertManualAttemptResolved} from './manual-upload-attempt.mjs';
 
 function parseArgs(argv) { const out = { action: argv[2] }; for (let i=3;i<argv.length;i+=2) out[argv[i].replace(/^--/,'')] = argv[i+1]; return out; }
 function atomic(file, value) {
@@ -678,16 +679,17 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             if (manifest.fileHashes?.[name]) uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:previous.completedAt || previous.startedAt,evidence:'migrated-receipt'};
           }
         }
-        if (previous.fileSetHash === manifest.fileSetHash && !previous.complete) {
+        if ((previous.fileSetHash === manifest.fileSetHash && !previous.complete)
+            || (manifest.manualNumberedMode && needsManualUploadRecovery(previous))) {
           const untouched = Number(previous.uploadedCount || 0) === 0 && (!Array.isArray(previous.batches) || previous.batches.length === 0);
           needsOnlineRetryCheck = true;
           log(untouched
             ? `检测到上次福单图上传中断（阶段：${previous.stage || '旧版未记录'}）；将先查询线上“福单已上传”状态，再决定是否允许重试。`
-            : `检测到相同图片集合上次在 ${previous.stage || '未知阶段'} 中断，本地已有 ${Object.keys(uploadedFiles).length} 张回执；将先只读核对线上状态，不会盲目重传。`);
+            : `检测到上次在 ${previous.stage || '未知阶段'} 中断，当前可复用 ${Object.keys(uploadedFiles).length} 张回执；将先只读核对线上状态，不会盲目重传。`);
         }
       }
       let pendingFiles = manifest.files.blessing.filter((file) => uploadedFiles[path.basename(file)]?.sha256 !== manifest.fileHashes?.[path.basename(file)]);
-      const verifiedCurrentBlessingCount = manifest.files.blessing.length - pendingFiles.length;
+      let verifiedCurrentBlessingCount = manifest.files.blessing.length - pendingFiles.length;
       const isSupplementRun = previous?.complete === true && Object.keys(uploadedFiles).length > 0 && pendingFiles.length > 0;
       let batches = splitUploadBatches(pendingFiles);
       const receipt = {
@@ -705,11 +707,15 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         uploadedFiles,
         batches:Array.isArray(previous?.batches) ? previous.batches : [],
         uncertainSubmission:previous?.uncertainSubmission === true,
-        uncertainRetryCount:previous?.fileSetHash === manifest.fileSetHash ? restoreUnusedManualUploadRetryCount(previous) : 0,
+        uncertainRetryCount:(previous?.fileSetHash === manifest.fileSetHash || (manifest.manualNumberedMode && needsManualUploadRecovery(previous))) ? restoreUnusedManualUploadRetryCount(previous) : 0,
         previousAttempt:retainManualPhotoAttemptEvidence(previous),
         stage:'not-started'
       };
+      if (manifest.manualNumberedMode && manualAttemptFilesVerified(receipt,manifest.fileHashes)) {
+        receipt.uncertainSubmission=false;
+      }
       if (!pendingFiles.length) {
+        if (manifest.manualNumberedMode) assertManualAttemptResolved(receipt,manifest.fileHashes);
         receipt.complete = true;
         receipt.batchCompleteReady = manifest.batchCompleteReady === true;
         receipt.stage = manifest.batchCompleteReady ? 'complete' : 'available-files-complete-waiting-for-supplement';
@@ -757,6 +763,24 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
           receipt.uploadedFiles[name] = {sha256:manifest.fileHashes[name],uploadedAt:at,evidence};
         }
         receipt.uploadedCount = manifest.counts.blessing;
+      };
+      const persistReadbackMatch = async (item) => {
+        if (!manifest.fileHashes[item.name] || item.sha256 !== manifest.fileHashes[item.name]) {
+          throw new Error('线上图片核对返回了清单外或哈希不一致的文件，已停止。');
+        }
+        receipt.uploadedFiles[item.name] = {
+          sha256:item.sha256,uploadedAt:new Date().toISOString(),evidence:'online-image-readback',
+          onlineOrderIdHash:item.onlineOrderIdHash,onlineImageSha256:item.onlineImageSha256,
+          minimumDetailSeparation:item.minimumDetailSeparation,
+        };
+        receipt.uploadedCount=manifest.files.blessing.filter(file=>
+          receipt.uploadedFiles[path.basename(file)]?.sha256 === manifest.fileHashes[path.basename(file)]).length;
+        if (manualAttemptFilesVerified(receipt,manifest.fileHashes)) {
+          receipt.uncertainSubmission=false;
+          receipt.currentBatchReconciledAt=new Date().toISOString();
+        }
+        // A later failed download or process exit cannot erase files already proved online.
+        atomic(receiptFile,receipt);
       };
       if (needsOnlineRetryCheck) {
         const historicalManifestFile = path.join(workdaysRoot,photoDate,'order-manifest.json');
@@ -822,85 +846,42 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             ...notUploaded.map((row) => ({ ...row,kind:'lamp' })),
             ...notUploadedTablet.map((row) => ({ ...row,kind:'tablet' })),
           ];
-          if (manifest.manualNumberedMode && onlineUploadedCount > 0 && onlinePendingRows.length === 0 && pendingFiles.length) {
-            const candidates=[];
-            for (const file of manifest.files.blessing) {
-              const name=path.basename(file);
-              const bytes=fs.readFileSync(file);
-              if (crypto.createHash('sha256').update(bytes).digest('hex') !== manifest.fileHashes[name]) {
-                throw new Error(`${name} 与预检文件哈希不同；未回读线上照片，也未上传。`);
-              }
-              candidates.push({name,raster:await buildPhotoReadbackRaster(bytes)});
+          if (manifest.manualNumberedMode && onlineUploadedCount > 0 && pendingFiles.length) {
+            log(`正在只读核对 ${pendingFiles.length} 张缺回执照片；同日仍有待补订单时也逐张保存已上传证据。`);
+            const readback=await reconcileManualUploadedPhotos({
+              site:photoSite,date:photoDate,files:pendingFiles,allFiles:manifest.files.blessing,
+              fileHashes:manifest.fileHashes,onMatch:persistReadbackMatch,
+            });
+            receipt.readbackScannedImageCount=readback.scanned;
+            receipt.readbackDiagnostics={...readback.diagnostics,missingNames:readback.missingNames};
+            receipt.readbackMatchedCount=readback.matched.length;
+            pendingFiles=manifest.files.blessing.filter(file=>
+              receipt.uploadedFiles[path.basename(file)]?.sha256!==manifest.fileHashes[path.basename(file)]);
+            verifiedCurrentBlessingCount=manifest.files.blessing.length-pendingFiles.length;
+            batches=splitUploadBatches(pendingFiles);
+            if (!pendingFiles.length) {
+              assertManualAttemptResolved(receipt,manifest.fileHashes);
+              receipt.batches.push({uploadedCount:readback.matched.length,
+                files:readback.matched.map(item=>item.name),evidence:'online-image-readback'});
+              receipt.complete=true;
+              receipt.batchCompleteReady=manifest.batchCompleteReady===true;
+              receipt.onlineClosureCheckReady=onlinePendingRows.length===0;
+              receipt.uncertainSubmission=false;
+              receipt.stage='manual-photo-online-image-readback-complete';
+              receipt.completedAt=new Date().toISOString();
+              atomic(receiptFile,receipt);
+              photoTiming.end();
+              log(`线上图片核对通过：本机 ${manifest.counts.blessing} 张福单图均已确认上传；线上仍有 ${onlinePendingRows.length} 条未上传订单，继续处理已有照片对应的场景图。本次没有重复上传。`);
+              await photoSite.close();
+              photoTiming.finish();
+              process.exit(0);
             }
-            const missingNames=new Set(pendingFiles.map((file)=>path.basename(file)));
-            const matched=[];
-            const seenUrls=new Set();
-            const readbackDiagnostics={reasons:{},images:[]};
-            const recordReason=(reason)=>{readbackDiagnostics.reasons[reason]=(readbackDiagnostics.reasons[reason]||0)+1;};
-            let scanned=0;
-            try {
-              for (const kind of ['tablet','lamp']) {
-                const references=await photoSite.queryUploadedPhotoReferences(photoDate,kind);
-                for (const reference of references) {
-                  if (!reference.url) {recordReason('missing-preview');continue;}
-                  // Many orders share one photo. Read and compare each unique
-                  // image once instead of fetching it once for every order.
-                  if(seenUrls.has(reference.url))continue;
-                  seenUrls.add(reference.url);
-                  scanned++;
-                  let onlineBytes;
-                  try { onlineBytes=await photoSite.readUploadedPhotoBytes(reference.url); }
-                  catch {recordReason('read-failed');continue;}
-                  let comparison;
-                  try {comparison=await inspectUploadedPhotoRaster(onlineBytes,candidates,missingNames);}
-                  catch {recordReason('invalid-image');continue;}
-                  recordReason(comparison.reason);
-                  readbackDiagnostics.images.push({name:comparison.name,reason:comparison.reason,score:comparison.score,secondScore:comparison.secondScore});
-                  const match=comparison.match;
-                  if (!match) continue;
-                  missingNames.delete(match.name);
-                  matched.push({name:match.name,orderIdHash:crypto.createHash('sha256')
-                    .update(`${reference.kind}:${reference.id}`).digest('hex'),
-                  onlineImageSha256:crypto.createHash('sha256').update(onlineBytes).digest('hex'),minimumDetailSeparation:match.minimumDetailSeparation});
-                  if (!missingNames.size) break;
-                }
-                if (!missingNames.size) break;
-              }
-            } finally {
-              await photoSite.closePhotoReadback();
-            }
-            const matchedAt=new Date().toISOString();
-            for (const item of matched) receipt.uploadedFiles[item.name]={
-              sha256:manifest.fileHashes[item.name],uploadedAt:matchedAt,evidence:'online-image-readback',
-              onlineOrderIdHash:item.orderIdHash,onlineImageSha256:item.onlineImageSha256,
-              minimumDetailSeparation:item.minimumDetailSeparation,
-            };
-            receipt.uploadedCount=manifest.files.blessing.filter((file)=>
-              receipt.uploadedFiles[path.basename(file)]?.sha256===manifest.fileHashes[path.basename(file)]).length;
-            receipt.readbackScannedImageCount=scanned;
-            receipt.readbackDiagnostics={...readbackDiagnostics,missingNames:[...missingNames]};
-            receipt.readbackMatchedCount=matched.length;
-            if (missingNames.size) {
+            if (receipt.uncertainSubmission || onlinePendingRows.length===0) {
               receipt.stage='manual-photo-online-image-readback-incomplete';
               atomic(receiptFile,receipt);
-              const reasonLabels={'missing-preview':'缺少线上图片地址','read-failed':'线上图片读取失败','invalid-image':'线上图片规格异常','insufficient-candidates':'对照照片不足','different-image':'图片内容不一致','detail-mismatch':'图片细节不一致','invalid-candidate':'本机对照图片异常','indistinguishable-candidates':'本机照片无法区分','ambiguous-detail':'图片细节无法唯一对应'};
-              const problems=Object.entries(readbackDiagnostics.reasons).filter(([reason])=>reasonLabels[reason]).map(([reason,count])=>`${reasonLabels[reason]} ${count} 张`).join('、');
-              throw new Error(`线上 ${onlineUploadedCount} 条福单已上传、0 条未上传；回读线上图片后仍有 ${missingNames.size} 张本机照片缺少唯一匹配（${[...missingNames].join('、')}；${problems||'缺少对应图片'}）。没有重传，不能将这些照片记为完成。`);
+              throw new Error(`线上图片核对：已保存 ${receipt.uploadedCount} 张照片的凭据，仍需核对 ${readback.missingNames.join('、')}。没有再次上传；缺少逐张确认的照片不会被误记为完成。`);
             }
-            if (receipt.uploadedCount !== manifest.counts.blessing) throw new Error('线上照片回读后，本地逐文件哈希回执仍不完整；已停止。');
-            receipt.batches.push({uploadedCount:matched.length,files:matched.map((item)=>item.name),evidence:'online-image-readback'});
-            receipt.complete=true;
-            receipt.batchCompleteReady=manifest.batchCompleteReady===true;
-            receipt.onlineClosureCheckReady=true;
-            receipt.uncertainSubmission=false;
-            receipt.stage='manual-photo-online-image-readback-complete';
-            receipt.completedAt=matchedAt;
             atomic(receiptFile,receipt);
-            photoTiming.end();
-            log(`线上图片回读核对通过：${matched.length} 张本机缺回执照片逐张找到唯一对应图片，已补记哈希回执；线上未上传为 0，本次没有重复上传。`);
-            await photoSite.close();
-            photoTiming.finish();
-            process.exit(0);
           }
           if (onlineUploadedCount !== 0 || onlinePendingRows.length !== 0) {
             manualResume = manifest.manualNumberedMode
@@ -1049,9 +1030,14 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         receipt.currentBatchFiles = batches[index].map((file)=>path.basename(file));
         receipt.currentBatchStartedAt = new Date().toISOString();
         receipt.currentBatchUploadEvidence=null;
+        receipt.currentBatchSubmissionStage=null;
+        receipt.currentBatchTransportOutcome=null;
         receipt.currentBatchTransportRequestSeen=false;
         receipt.currentBatchTransportResponseSeen=false;
         receipt.currentBatchUploadCount=null;
+        receipt.currentBatchPendingOrderCount=manualResume?.pendingOrderRows?.length ?? null;
+        receipt.currentBatchPendingOrderIdHash=manualResume?.pendingOrderRows
+          ? crypto.createHash('sha256').update(manualResume.pendingOrderRows.map(row=>`${row.kind}:${row.id}`).sort().join('\n')).digest('hex') : null;
         receipt.stage = 'starting';
         let beforeOrderState = null;
         if (uploadOrderScope.proven) {
@@ -1077,20 +1063,44 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         } : null;
         if (!allFilesReconciled) {
           try {
-            result = await photoSite.uploadBlessingBatch(batches[index],photoDate,(stage,detail) => {
+            const trackUploadStage = (stage,detail) => {
               receipt.stage = stage;
               // Persist before a potentially asynchronous write, not just in
               // the catch block: a crash/restart must not erase uncertainty.
-              if (['submitting','month-submitted','upload-confirmed','transport-request','transport-response','transport-receipt','upload-receipt'].includes(stage)) receipt.uncertainSubmission=true;
+              if (['submitting','month-submitted','upload-confirmed','transport-request','transport-response','transport-outcome','transport-receipt','upload-receipt'].includes(stage)) {
+                receipt.uncertainSubmission=true;
+                receipt.currentBatchSubmissionStage=stage;
+              }
               if (stage==='transport-request') receipt.currentBatchTransportRequestSeen=true;
               if (stage==='transport-response') {
                 receipt.currentBatchTransportResponseSeen=true;
                 receipt.currentBatchTransportStatus=detail?.status;
               }
-              if (stage==='transport-receipt' || stage==='upload-receipt') receipt.currentBatchUploadCount=detail?.uploadedCount;
+              if (stage==='transport-outcome') receipt.currentBatchTransportOutcome=detail;
+              if (stage==='transport-receipt' || stage==='upload-receipt' || stage==='upload-reconciled') receipt.currentBatchUploadCount=detail?.uploadedCount;
               atomic(receiptFile,receipt);
-            });
+            };
+            result = manifest.manualNumberedMode
+              ? await uploadManualBatchWithRecovery({
+                site:photoSite,date:photoDate,files:batches[index],allFiles:manifest.files.blessing,
+                fileHashes:manifest.fileHashes,onStage:trackUploadStage,onMatch:persistReadbackMatch,
+                onReconciliation:async (error)=>{
+                  receipt.stage='manual-photo-reconciling-submitted-batch';
+                  receipt.uncertainSubmission=true;
+                  receipt.currentBatchUploadEvidence=error.uploadEvidence;
+                  atomic(receiptFile,receipt);
+                  log('后台未提供本批数字回执，正在自动回读同日线上图片逐张核对；核对后继续，不会再次提交。');
+                },
+              })
+              : await photoSite.uploadBlessingBatch(batches[index],photoDate,trackUploadStage);
           } catch (uploadError) {
+            if (uploadError?.readback) {
+              receipt.stage='manual-photo-online-image-readback-incomplete';
+              receipt.readbackDiagnostics={...uploadError.readback.diagnostics,missingNames:uploadError.readback.missingNames};
+              receipt.readbackScannedImageCount=uploadError.readback.scanned;
+              receipt.readbackMatchedCount=uploadError.readback.matched.length;
+              atomic(receiptFile,receipt);
+            }
             if (uploadError?.uploadEvidence) {
               receipt.currentBatchUploadEvidence=uploadError.uploadEvidence;
               atomic(receiptFile,receipt);
@@ -1143,7 +1153,15 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             }
           }
         }
-        if (manualResume?.allowed) {
+        if (manualResume?.allowed && result?.evidence==='online-image-readback') {
+          // Per-file content evidence confirms these files, even if other orders
+          // still need photos. Whole-day completion belongs to the scene phase.
+          const after=await queryManualUploadState();
+          manualResume.pendingOrderRows=after.pendingRows;
+          receipt.remainingPendingOrderCount=after.pendingRows.length;
+          receipt.onlineVerifiedAt=new Date().toISOString();
+          log(`本批 ${result.uploadedCount} 张已逐张回读确认；仍有 ${after.pendingRows.length} 条线上订单待补照片。`);
+        } else if (manualResume?.allowed) {
           if (Number(result?.uploadedCount) !== batches[index].length) {
             receipt.stage='manual-photo-upload-count-unconfirmed';
             receipt.uncertainSubmission=true;

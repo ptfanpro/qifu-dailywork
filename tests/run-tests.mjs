@@ -81,6 +81,8 @@ import './manual-photo-source-commit-regression.mjs';
 import './manual-source-backup-retention-regression.mjs';
 import './manual-photo-resume-regression.mjs';
 import './manual-photo-readback-regression.mjs';
+import './upload-outcome-regression.mjs';
+import './manual-upload-reconciliation-regression.mjs';
 import './pdf-before-ten-regression.mjs';
 import './confirmation-navigation-regression.mjs';
 import './login-navigation-regression.mjs';

@@ -180,6 +180,10 @@ export function resolveBlessingUploadCount(messages, expectedCount) {
   };
 }
 export function resolveBlessingUploadResponseCount(payload, expectedCount) {
+  const { uploadedCount, numericMessages } = resolveBlessingUploadResponseOutcome(payload, expectedCount);
+  return { uploadedCount, numericMessages };
+}
+export function resolveBlessingUploadResponseOutcome(payload, expectedCount) {
   let parsed = payload;
   if (Buffer.isBuffer(parsed)) parsed = parsed.toString('utf8');
   if (typeof parsed === 'string') {
@@ -188,6 +192,22 @@ export function resolveBlessingUploadResponseCount(payload, expectedCount) {
     catch { parsed = text; }
   }
   const candidates = [];
+  const envelopes = parsed && typeof parsed === 'object'
+    ? [parsed, parsed.result, parsed.data, parsed.data?.result].filter((item) => item && typeof item === 'object') : [];
+  const messages = envelopes.map((item) => item.message).filter((item) => typeof item === 'string');
+  if (typeof parsed === 'string') messages.push(parsed);
+  // Upload uses result.state=1 for acceptance. Explicit rejection always wins
+  // over a coincidental number, selected-file count or generic success message.
+  const isFalse = (value) => value === false || value === 0 || /^(?:false|0)$/i.test(String(value).trim());
+  const explicitFailure = envelopes.some((item) =>
+    ['state','success','ok'].some((key) => Object.hasOwn(item,key) && isFalse(item[key]))
+    || (Object.hasOwn(item,'state') && item.state !== null && String(item.state).trim() !== ''
+      && Number.isFinite(Number(item.state)) && Number(item.state) !== 1)
+    || item.error === true)
+    || messages.some((message) => /^(?:(?:图片|福单图)?上传)?失败(?:[！!。.:：]|$)/.test(normalizeText(message)));
+  const accepted = !explicitFailure && (envelopes.some((item) =>
+    item.state === 1 || item.state === '1' || item.success === true || item.ok === true)
+    || messages.some((message) => /^(?:(?:图片|福单图)?上传)?成功[！!。.]?$|^success$/i.test(normalizeText(message))));
   const push = (value) => {
     if (typeof value === 'string' || typeof value === 'number') candidates.push(String(value));
   };
@@ -207,7 +227,14 @@ export function resolveBlessingUploadResponseCount(payload, expectedCount) {
   } else {
     push(parsed);
   }
-  return resolveBlessingUploadCount(candidates, expectedCount);
+  const numeric = resolveBlessingUploadCount(candidates, expectedCount);
+  const uploadedCount = explicitFailure ? undefined : numeric.uploadedCount;
+  return {
+    uploadedCount,
+    numericMessages:numeric.numericMessages,
+    category:explicitFailure ? 'business-failure' : uploadedCount !== undefined ? 'count-confirmed'
+      : accepted ? 'success-without-count' : 'unrecognized-response',
+  };
 }
 export function isBlessingUploadTransport(method, url) {
   let pathname = '';
@@ -256,23 +283,33 @@ export function resolveBlessingOrderSetUploadState(expectedRows, uploadedRows, n
 }
 export function watchBlessingUploadTransport(page, expectedCount, onEvidence = () => {}) {
   const state = { requestCount:0, responseCount:0, receipts:[], tasks:[] };
+  const observedRequests = new Set();
+  let stopped = false;
   const onRequest = (request) => {
     if (isBlessingUploadTransport(request.method(), request.url())) {
+      observedRequests.add(request);
       state.requestCount += 1;
       onEvidence('transport-request');
     }
   };
   const onResponse = (response) => {
-    if (!isBlessingUploadTransport(response.request().method(), response.url())) return;
+    // A previous transaction may finish after this watcher starts. Only the
+    // request objects observed by this watcher belong to its transaction.
+    if (!observedRequests.has(response.request())
+      || !isBlessingUploadTransport(response.request().method(), response.url())) return;
     state.responseCount += 1;
     onEvidence('transport-response',{status:response.status()});
     const task = (async () => {
       const body = await response.text().catch(() => '');
+      if (stopped) return;
       const receipt = response.ok()
-        ? resolveBlessingUploadResponseCount(body, expectedCount)
-        : { uploadedCount:undefined, numericMessages:[] };
+        ? resolveBlessingUploadResponseOutcome(body, expectedCount)
+        : { uploadedCount:undefined, numericMessages:[], category:'http-failure' };
       state.receipts.push({ ...receipt, ok:response.ok(), status:response.status() });
       if (receipt.uploadedCount === Number(expectedCount)) onEvidence('transport-receipt',{uploadedCount:receipt.uploadedCount});
+      else if (receipt.category !== 'unrecognized-response') onEvidence('transport-outcome',{
+        category:receipt.category,status:response.status(),numericCountSeen:receipt.numericMessages.length > 0,
+      });
     })();
     state.tasks.push(task);
   };
@@ -281,10 +318,14 @@ export function watchBlessingUploadTransport(page, expectedCount, onEvidence = (
   return {
     state,
     async uploadedCount() {
-      await Promise.allSettled([...state.tasks]);
+      // An unfinished response body must not suspend the caller's deadline.
+      await Promise.race([Promise.allSettled([...state.tasks]), sleep(100)]);
+      if (state.requestCount !== 1 || state.receipts.some((receipt) =>
+        ['business-failure','http-failure'].includes(receipt.category))) return undefined;
       return state.receipts.find((receipt) => receipt.uploadedCount === Number(expectedCount))?.uploadedCount;
     },
     stop() {
+      stopped = true;
       page.off('request', onRequest);
       page.off('response', onResponse);
     },
@@ -1284,16 +1325,23 @@ export class PrayerSite {
         for (const message of resultMessages.map((value) => normalizeText(value)).filter(Boolean)) {
           if (!this.layerMessages.includes(message)) this.layerMessages.push(message);
         }
-        if (uploadedCount === undefined && uploadTransport.state.receipts.some((receipt)=>receipt.ok)) {
-          // This backend alerts the selected file count twice BEFORE the POST.
-          // Those alerts are never upload success evidence.
-          const result = resolveBlessingUploadCount(resultMessages, files.length);
-          uploadedCount = result.uploadedCount;
-        }
+        // Native alerts and visible layers can contain the selected-file count
+        // from before submission. Keep them for diagnostics only. A success
+        // response without a count must be checked against online photos by
+        // the caller; it must not wait 60 seconds or borrow a preflight number.
+        if (uploadedCount === undefined && uploadTransport.state.receipts.some((receipt) =>
+          ['success-without-count','business-failure','http-failure'].includes(receipt.category))) break;
         if (uploadedCount === undefined) await sleep(100);
       }
       if (uploadedCount !== files.length) {
         const summary = [...this.dialogs,...this.layerMessages].join('；');
+        const responseOutcomes = uploadTransport.state.receipts.map((item) => ({
+          status:item.status,category:item.category,
+          numericCountSeen:item.numericMessages.length > 0,
+          countMatchesExpected:item.uploadedCount === files.length,
+        }));
+        const applicationFailure = responseOutcomes.some((item) => ['business-failure','http-failure'].includes(item.category));
+        const applicationSuccess = !applicationFailure && responseOutcomes.some((item) => item.category === 'success-without-count');
         if (uploadTransport.state.requestCount === 0) {
           // Do not leave a live selection behind an unaccepted confirmation:
           // clicking that stale dialog after the runner stops could submit it.
@@ -1302,13 +1350,19 @@ export class PrayerSite {
             .locator('.layui-layer-btn1').first();
           if (await cancel.count().catch(()=>0)) await scheduleSiteClick(cancel,{allowMissing:true,timeoutMs:750});
         }
-        const error = new Error(`系统没有返回与本批一致的上传数量：本批 ${files.length} 张${summary ? `，提示：${summary}` : ''}。本次结果尚未确认。`);
+        const reason = applicationFailure ? '上传接口返回失败，本批结果需要核对'
+          : applicationSuccess ? '上传接口已返回成功，未返回本批照片数量，需要核对线上照片'
+            : '系统没有返回与本批一致的上传数量';
+        const error = new Error(`${reason}：本批 ${files.length} 张${summary ? `，提示：${summary}` : ''}。本次结果尚未确认。`);
         error.code = 'BLESSING_UPLOAD_OUTCOME_UNCONFIRMED';
         error.uploadEvidence = {
           confirmationSeen,
           requestStarted:uploadTransport.state.requestCount > 0,
           responseSeen:uploadTransport.state.responseCount > 0,
           responseStatuses:uploadTransport.state.receipts.map((item)=>item.status),
+          applicationSuccess,
+          applicationFailure,
+          responseOutcomes,
         };
         throw error;
       }
