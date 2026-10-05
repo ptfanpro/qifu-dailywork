@@ -29,6 +29,7 @@ try {
     {delay:0,success:false,count:12,payload:{result:{state:1,message:'成功'}},expectedOutcome:'success-without-count'},
     {delay:0,success:false,count:12,payload:{result:{state:0,message:'12'}},expectedOutcome:'business-failure'},
     {delay:0,success:false,count:12,payload:{result:{state:0,message:'上传失败'}},expectedOutcome:'business-failure',postAlert:true},
+    {delay:0,success:false,count:12,payload:{result:{message:'该图片已上传'}},expectedOutcome:'business-failure'},
     {delay:0,success:false,count:12,payload:{result:{state:1,message:'成功'}},expectedOutcome:'success-without-count',postAlert:true},
   ]) {
     const page=await browser.newPage();

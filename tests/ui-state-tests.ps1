@@ -19,7 +19,7 @@ $testBeijingToday = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$testB
 Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.AddDays(-1).ToString('yyyy-MM-dd') '软件启动时照片业务日期必须固定为北京时间昨天'
 Assert-Equal $pdfDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.ToString('yyyy-MM-dd') '软件启动时 PDF 业务日期必须固定为北京时间今天'
 Assert-Equal $photoGroup.Text '照片业务（人工编号后，软件压缩并上传）' '照片界面没有切换到人工编号模式'
-if ($form.Text -notmatch '2026-10-05.1') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
+if ($form.Text -notmatch '2026-10-05.2') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
 Assert-Equal $photoMainButton.Text '一键处理照片' '照片主按钮名称不正确'
 Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称不正确'
 if ($null -ne $photoRefreshButton -or $null -ne $pdfRefreshButton) { throw '照片或 PDF 主区域仍保留重新检查按钮' }
@@ -266,6 +266,111 @@ try {
     Assert-Equal $script:pdfNextAction 'renewal-state-change' '续费自动状态变更中断后应进入补做阶段'
     Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称在状态补做阶段发生变化'
 
+    # A corrected duplicate batch needs one explicit decision after the current
+    # runner produced a matching review. No dialog in these tests touches a user.
+    $correctionReviewPath = Join-Path $photoRunDir 'photo-upload-correction-review.json'
+    $correctionToken = 'a' * 64
+    $reviewCreated = [DateTime]::UtcNow
+    $script:activeAction = 'photo-upload'
+    $script:activeFlow = 'photo'
+    $script:activeStartedAtUtc = $reviewCreated.AddSeconds(-5)
+    $script:activePhotoBusinessDate = '2026-08-10'
+    $script:activeBusinessRoot = $testRoot
+    $script:activeCorrectionSubmitted = $false
+    [IO.File]::WriteAllBytes($manualPhoto,[byte[]](1,2,3))
+    $correctionManifest = [ordered]@{
+        businessDate='2026-08-10';manualNumberedMode=$true;blessingReady=$true;fileSetHash='correction-files';
+        counts=[ordered]@{allImages=1;blessing=1;lampScene=0;waterScene=0};
+        files=[ordered]@{blessing=@($manualPhoto)};
+        inputFileHashes=[ordered]@{'101.jpg'=$manualHash};fileHashes=[ordered]@{'101.jpg'=$manualHash}
+    }
+    $correctionReview = [ordered]@{
+        schemaVersion=1;kind='duplicate-content-correction';eligible=$true;
+        businessDate='2026-08-10';fileSetHash='correction-files';confirmationToken=$correctionToken;
+        createdAt=$reviewCreated.ToString('o');oldAttempt=[ordered]@{files=@('101.jpg','102.jpg')};
+        currentFiles=@('101.jpg');currentFileHashes=[ordered]@{'101.jpg'=$manualHash};
+        removedFiles=@([ordered]@{name='102.jpg';duplicateOf='101.jpg';sha256=$manualHash});pendingOrderCount=12
+    }
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $correctionManifest
+    Write-TestJson $correctionReviewPath $correctionReview
+    Assert-Equal (Get-PendingUploadCorrectionReview).confirmationToken $correctionToken '本次有效修正方案未识别'
+    foreach ($invalid in @(
+        @{field='createdAt';value=$reviewCreated.AddMinutes(-2).ToString('o')},
+        @{field='businessDate';value='2026-08-09'},
+        @{field='fileSetHash';value='outdated-files'},
+        @{field='confirmationToken';value='not-a-token'},
+        @{field='eligible';value=$false},
+        @{field='eligible';value='true'}
+    )) {
+        $validValue=$correctionReview[$invalid.field]
+        $correctionReview[$invalid.field]=$invalid.value
+        Write-TestJson $correctionReviewPath $correctionReview
+        Assert-Equal (Get-PendingUploadCorrectionReview) $null '过期或不匹配修正方案不得弹出重新提交确认'
+        $correctionReview[$invalid.field]=$validValue
+    }
+    Write-TestJson $correctionReviewPath $correctionReview
+    [IO.File]::WriteAllBytes($manualPhoto,[byte[]](4,5,6))
+    Assert-Equal (Get-PendingUploadCorrectionReview) $null '修正方案生成后原照片变动必须失效'
+    [IO.File]::WriteAllBytes($manualPhoto,[byte[]](1,2,3))
+    $correctionReview.currentFileHashes['101.jpg']='b'*64
+    Write-TestJson $correctionReviewPath $correctionReview
+    Assert-Equal (Get-PendingUploadCorrectionReview) $null '修正清单图片哈希不一致必须失效'
+    $correctionReview.currentFileHashes['101.jpg']=$manualHash
+    Write-TestJson $correctionReviewPath $correctionReview
+    Assert-Equal @(Get-UploadCorrectionArguments 'photo-upload' $true '').Count 0 '普通启动不得沿用修正确认参数'
+    $confirmedArgs=@(Get-UploadCorrectionArguments 'photo-upload' $true $correctionToken)
+    Assert-Equal $confirmedArgs.Count 2 '修正授权必须只添加本次token参数'
+    Assert-Equal $confirmedArgs[0] '--confirm-upload-correction' '修正确认参数名称错误'
+    Assert-Equal $confirmedArgs[1] $correctionToken '修正确认token丢失'
+    foreach ($badArgs in @(@('export',$true,$correctionToken),@('photo-upload',$false,$correctionToken),@('photo-upload',$true,'invalid'))) {
+        $wasRejected=$false
+        try { Get-UploadCorrectionArguments $badArgs[0] $badArgs[1] $badArgs[2] | Out-Null } catch { $wasRejected=$true }
+        Assert-Equal $wasRejected $true '修正授权不得传给其他操作或接受非法token'
+    }
+    $savedCorrectionStartRunner=(Get-Command Start-Runner).ScriptBlock
+    $savedCorrectionDialog=(Get-Command Show-UploadCorrectionConfirmation).ScriptBlock
+    try {
+        $script:testCorrectionDialogs=0
+        $script:testCorrectionStarts=0
+        $script:testCorrectionAnswer=[System.Windows.Forms.DialogResult]::No
+        function Show-UploadCorrectionConfirmation($review) {
+            $script:testCorrectionDialogs+=1
+            return $script:testCorrectionAnswer
+        }
+        function Start-Runner {
+            $script:testCorrectionStarts+=1
+            $script:testCorrectionArgs=@($args)
+        }
+        Complete-Runner 1
+        Assert-Equal $script:testCorrectionDialogs 1 '本次修正方案应弹出一次确认'
+        Assert-Equal $script:testCorrectionStarts 0 '选择否不得再次启动上传'
+        Assert-Equal (Read-JsonFile (Join-Path $photoRunDir 'ui-workflow-state.json')).state 'waiting-review' '取消后应保持等待核对'
+        Complete-Runner 1
+        Assert-Equal $script:testCorrectionDialogs 1 '同一失败回调不得重复弹窗'
+        $script:activeCorrectionSubmitted=$false
+        $script:testCorrectionAnswer=[System.Windows.Forms.DialogResult]::Yes
+        Complete-Runner 1
+        Assert-Equal $script:testCorrectionDialogs 2 '用户新的主动运行可以重新确认'
+        Assert-Equal $script:testCorrectionStarts 1 '选择是只允许启动一次'
+        Assert-Equal $script:testCorrectionArgs[0] 'photo-upload' '确认后只能重启照片上传'
+        Assert-Equal $script:testCorrectionArgs[2] 'photo' '确认后应继续原照片流程'
+        Assert-Equal $script:testCorrectionArgs[4] $correctionToken '确认token必须作为单次实参传入'
+        Complete-Runner 1
+        Assert-Equal $script:testCorrectionDialogs 2 '确认提交再次失败不得循环弹窗'
+        Assert-Equal $script:testCorrectionStarts 1 '确认提交再次失败不得循环上传'
+        $script:activeCorrectionSubmitted=$false
+        function Show-UploadCorrectionConfirmation($review) {
+            $script:testCorrectionDialogs+=1
+            [IO.File]::WriteAllBytes($manualPhoto,[byte[]](4,5,6))
+            return [System.Windows.Forms.DialogResult]::Yes
+        }
+        Complete-Runner 1
+        Assert-Equal $script:testCorrectionStarts 1 '确认期间照片变动必须阻止再次启动'
+        if ($globalStatus.Text -notmatch '发生变化') { throw '确认期间变动缺少明确暂停说明' }
+    } finally {
+        Set-Item Function:Start-Runner $savedCorrectionStartRunner
+        Set-Item Function:Show-UploadCorrectionConfirmation $savedCorrectionDialog
+    }
     'UI state tests passed'
 } finally {
     $script:running = $true

@@ -251,6 +251,7 @@ export function retainManualPhotoAttemptEvidence(previous) {
     return {
       stage:previous.currentBatchSubmissionStage || previous.stage || null,
       files:[...currentFiles],
+      ...(previous.currentBatchFileHashes ? {fileHashes:structuredClone(previous.currentBatchFileHashes)} : {}),
       startedAt:previous.currentBatchStartedAt || null,
       pendingOrderIdHash:Object.hasOwn(previous,'currentBatchPendingOrderIdHash')
         ? previous.currentBatchPendingOrderIdHash ?? null : previous.pendingOrderIdHash ?? null,
@@ -263,6 +264,7 @@ export function retainManualPhotoAttemptEvidence(previous) {
     stage:older.stage || previous.stage || null,
     files:Array.isArray(older.files) && older.files.length ? older.files
       : currentFiles,
+    ...(older.fileHashes ? {fileHashes:structuredClone(older.fileHashes)} : {}),
     startedAt:older.startedAt || previous.currentBatchStartedAt || previous.startedAt || null,
     pendingOrderIdHash:older.pendingOrderIdHash || previous.pendingOrderIdHash || null,
     pendingOrderCount:older.pendingOrderCount ?? previous.pendingOrderCount ?? null,
@@ -297,7 +299,7 @@ export function retainManualUploadRetryState(previous) {
   const retained={uncertainRetryCount:restoreUnusedManualUploadRetryCount(previous)};
   // Keep one attempt's diagnostics and identity together through read-only
   // restarts, including restarts which stop before a new batch is prepared.
-  for (const key of ['uncertainRetryEvidence','currentBatch','currentBatchFiles','currentBatchStartedAt',
+  for (const key of ['uncertainRetryEvidence','currentBatch','currentBatchFiles','currentBatchFileHashes','currentBatchStartedAt',
     'currentBatchPendingOrderIdHash','currentBatchPendingOrderCount','currentBatchSubmissionStage',
     'currentBatchTransportRequestSeen','currentBatchTransportResponseSeen','currentBatchTransportStatus',
     'currentBatchTransportOutcome','currentBatchUploadCount','currentBatchUploadEvidence','currentBatchCompletedAt']) {
@@ -343,6 +345,7 @@ export function markManualUploadRetrySubmitted(receipt,stage) {
 export function decideManualPhotoUncertainRetry({
   blessingCount = 0, verifiedReceiptCount = 0, pendingFiles = [],
   previousAttempt = null, uncertainRetryCount = 0,
+  correctionSubmissionPending = false,
   onlineUploadedCount = 0, secondOnlineUploadedCount = 0,
   firstPendingRows = [], secondPendingRows = [], now = new Date().toISOString(),
 } = {}) {
@@ -350,7 +353,7 @@ export function decideManualPhotoUncertainRetry({
   const filenames = Array.isArray(pendingFiles) ? pendingFiles.map((file) => path.basename(String(file))) : [];
   const attemptFiles = Array.isArray(previousAttempt?.files) ? previousAttempt.files : [];
   const age = Date.parse(now) - Date.parse(previousAttempt?.startedAt || '');
-  if (!Number.isInteger(blessingCount) || blessingCount <= 0 || verifiedReceiptCount !== 0
+  if (correctionSubmissionPending || !Number.isInteger(blessingCount) || blessingCount <= 0 || verifiedReceiptCount !== 0
     || filenames.length !== blessingCount || new Set(filenames).size !== filenames.length
     || attemptFiles.length !== filenames.length || !attemptFiles.every((name) => filenames.includes(name))
     || !manualUploadUncertainRetryStages.has(previousAttempt?.stage)

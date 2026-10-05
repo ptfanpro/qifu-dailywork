@@ -199,7 +199,8 @@ export function resolveBlessingUploadResponseOutcome(payload, expectedCount) {
   // Upload uses result.state=1 for acceptance. Explicit rejection always wins
   // over a coincidental number, selected-file count or generic success message.
   const isFalse = (value) => value === false || value === 0 || /^(?:false|0)$/i.test(String(value).trim());
-  const explicitFailure = envelopes.some((item) =>
+  const duplicateImage = messages.some(message=>/^(?:该)?图片已上传[！!。.]?$/.test(normalizeText(message)));
+  const explicitFailure = duplicateImage || envelopes.some((item) =>
     ['state','success','ok'].some((key) => Object.hasOwn(item,key) && isFalse(item[key]))
     || (Object.hasOwn(item,'state') && item.state !== null && String(item.state).trim() !== ''
       && Number.isFinite(Number(item.state)) && Number(item.state) !== 1)
@@ -232,6 +233,7 @@ export function resolveBlessingUploadResponseOutcome(payload, expectedCount) {
   return {
     uploadedCount,
     numericMessages:numeric.numericMessages,
+    ...(duplicateImage ? {reason:'duplicate-image'} : {}),
     category:explicitFailure ? 'business-failure' : uploadedCount !== undefined ? 'count-confirmed'
       : accepted ? 'success-without-count' : 'unrecognized-response',
   };
@@ -309,6 +311,7 @@ export function watchBlessingUploadTransport(page, expectedCount, onEvidence = (
       if (receipt.uploadedCount === Number(expectedCount)) onEvidence('transport-receipt',{uploadedCount:receipt.uploadedCount});
       else if (receipt.category !== 'unrecognized-response') onEvidence('transport-outcome',{
         category:receipt.category,status:response.status(),numericCountSeen:receipt.numericMessages.length > 0,
+        ...(receipt.reason ? {reason:receipt.reason} : {}),
       });
     })();
     state.tasks.push(task);
@@ -1337,6 +1340,7 @@ export class PrayerSite {
         const summary = [...this.dialogs,...this.layerMessages].join('；');
         const responseOutcomes = uploadTransport.state.receipts.map((item) => ({
           status:item.status,category:item.category,
+          ...(item.reason ? {reason:item.reason} : {}),
           numericCountSeen:item.numericMessages.length > 0,
           countMatchesExpected:item.uploadedCount === files.length,
         }));
@@ -1350,7 +1354,9 @@ export class PrayerSite {
             .locator('.layui-layer-btn1').first();
           if (await cancel.count().catch(()=>0)) await scheduleSiteClick(cancel,{allowMissing:true,timeoutMs:750});
         }
-        const reason = applicationFailure ? '上传接口返回失败，本批结果需要核对'
+        const duplicateImage = responseOutcomes.some(item=>item.reason==='duplicate-image');
+        const reason = duplicateImage ? '后台提示“该图片已上传”，本批是否部分保存仍需核对'
+          : applicationFailure ? '上传接口返回失败，本批结果需要核对'
           : applicationSuccess ? '上传接口已返回成功，未返回本批照片数量，需要核对线上照片'
             : '系统没有返回与本批一致的上传数量';
         const error = new Error(`${reason}：本批 ${files.length} 张${summary ? `，提示：${summary}` : ''}。本次结果尚未确认。`);

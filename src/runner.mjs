@@ -20,6 +20,7 @@ import { AutomationApiClient, readEncryptedAutomationCredential } from './automa
 import {beijingDateToken,buildHistoricalBacklogReport,HISTORICAL_RANGE_START} from './historical-backlog.mjs';
 import {reconcileManualUploadedPhotos} from './manual-upload-reconciliation.mjs';
 import {uploadManualBatchWithRecovery,needsManualUploadRecovery,manualAttemptFilesVerified,assertManualAttemptResolved} from './manual-upload-attempt.mjs';
+import {prepareManualUploadCorrectionReview,approveManualUploadCorrection,markManualUploadCorrectionSubmitted,confirmManualUploadCorrection,retainManualUploadCorrectionState,hasPendingManualUploadCorrection,finalizeManualUploadCorrection} from './manual-upload-correction.mjs';
 
 function parseArgs(argv) { const out = { action: argv[2] }; for (let i=3;i<argv.length;i+=2) out[argv[i].replace(/^--/,'')] = argv[i+1]; return out; }
 function atomic(file, value) {
@@ -567,7 +568,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
     if(manualNumberedMode) {
       log(`人工编号模式：发现 ${quickImageCount} 张图片；不运行 OCR，不读取或比对 PDF。`);
       manifest=await scanManualNumberedWorkday(activePhotoRoot,photoDate);
-      if(['photo-upload','photo-scenes'].includes(args.action)&&manifest.uploadReady) {
+      if(['photo-upload','photo-scenes'].includes(args.action)&&manifest.normalizationReady) {
         if(args.authorized!=='yes')throw Error('原目录压缩保存缺少本次按钮授权。');
         const sourceReceipt=await commitManualPhotoSources({mirror,date:photoDate,workDir:photoRunDir});
         log(`上传前原目录压缩核验通过：保存 ${sourceReceipt.processedCount} 张；原目录与上传副本一致。`);
@@ -711,6 +712,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         previousAttempt:retainManualPhotoAttemptEvidence(previous),
         ...(manifest.manualNumberedMode && needsManualUploadRecovery(previous)
           ? retainManualUploadRetryState(previous) : {}),
+        ...retainManualUploadCorrectionState(previous),
         stage:'not-started'
       };
       if (manifest.manualNumberedMode && manualAttemptFilesVerified(receipt,manifest.fileHashes)) {
@@ -718,6 +720,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       }
       if (!pendingFiles.length) {
         if (manifest.manualNumberedMode) assertManualAttemptResolved(receipt,manifest.fileHashes);
+        finalizeManualUploadCorrection(receipt);
         receipt.complete = true;
         receipt.batchCompleteReady = manifest.batchCompleteReady === true;
         receipt.stage = manifest.batchCompleteReady ? 'complete' : 'available-files-complete-waiting-for-supplement';
@@ -740,6 +743,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       let latestOrderState = null;
       let manualResume = null;
       let allowOneTimeRetry = false;
+      let uploadCorrectionId = null;
       const queryManualUploadState = async () => {
         const uploadedLamp=await photoSite.queryUploadedOrders(photoDate,{productMode:'all',allStates:true});
         const pendingLamp=await photoSite.queryNotUploadedOrders(photoDate,{productMode:'all',allStates:true});
@@ -863,6 +867,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             batches=splitUploadBatches(pendingFiles);
             if (!pendingFiles.length) {
               assertManualAttemptResolved(receipt,manifest.fileHashes);
+              finalizeManualUploadCorrection(receipt);
               receipt.batches.push({uploadedCount:readback.matched.length,
                 files:readback.matched.map(item=>item.name),evidence:'online-image-readback'});
               receipt.complete=true;
@@ -903,6 +908,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
                 verifiedReceiptCount:verifiedCurrentBlessingCount,
                 pendingFiles,previousAttempt:receipt.previousAttempt,
                 uncertainRetryCount:receipt.uncertainRetryCount,
+                correctionSubmissionPending:hasPendingManualUploadCorrection(receipt),
                 onlineUploadedCount,secondOnlineUploadedCount:second.uploadedCount,
                 firstPendingRows:onlinePendingRows,secondPendingRows:second.pendingRows,
               });
@@ -913,6 +919,32 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
                 receipt.stage='manual-photo-one-time-retry-ready';
                 atomic(receiptFile,receipt);
                 log(`上次提交未取得数字回执；超过 15 分钟后两次查询均为 0 条已上传、${recovery.pendingOrderRows.length} 条未上传，订单集合一致。仅允许当前照片集合受控重试一次。`);
+              }
+              if (!manualResume?.allowed) {
+                const review=prepareManualUploadCorrectionReview({
+                  businessDate:photoDate,receipt,
+                  currentFiles:pendingFiles.map(file=>path.basename(file)),currentFileHashes:manifest.fileHashes,
+                  preparationReceipt:readJson(path.join(photoRunDir,'photo-prepare-receipt.json'),null),
+                  firstOnline:{uploadedCount:onlineUploadedCount,pendingRows:onlinePendingRows},secondOnline:second,
+                });
+                if (review.eligible) {
+                  const savedApproval=receipt.correctedAttempts?.[review.correctionId];
+                  const token=args['confirm-upload-correction'] || (savedApproval?.status==='approved' ? review.confirmationToken : '');
+                  if (!token) {
+                    atomic(path.join(photoRunDir,'photo-upload-correction-review.json'),{...review,fileSetHash:manifest.fileSetHash});
+                    receipt.stage='manual-photo-correction-awaiting-confirmation';
+                    atomic(receiptFile,receipt);
+                    throw new Error(`已核对修正后的照片：原 ${review.oldAttempt.files.length} 张，当前 ${review.currentFiles.length} 张，移除项均为重复内容。旧上传结果仍未确认；请在软件提示中确认是否按当前清单重新提交一次。尚未重新上传。`);
+                  }
+                  approveManualUploadCorrection(receipt,review,{confirmationToken:token,confirmed:true});
+                  uploadCorrectionId=review.correctionId;
+                  manualResume={allowed:true,pendingFiles:review.currentFiles,pendingOrderRows:second.pendingRows};
+                  receipt.stage='manual-photo-correction-approved';
+                  atomic(receiptFile,receipt);
+                  log(`已确认按修正后的 ${review.currentFiles.length} 张照片重新提交一次；保留旧 ${review.oldAttempt.files.length} 张的未知结果记录，移除的重复照片不记为上传成功。`);
+                } else if (args['confirm-upload-correction']) {
+                  throw new Error('照片、旧记录或线上订单状态已变化，本次修正确认已失效；没有重新上传。');
+                }
               }
             }
             if (manualResume?.allowed) {
@@ -1019,7 +1051,10 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         log(`上传前已记录同业务日期 ${manualResume.pendingOrderRows.length} 条未上传订单的 ID 集合哈希；完成后将核对订单变化。`);
       }
       let allFilesReconciled = false;
-      if (receipt.uncertainSubmission && !allowOneTimeRetry) {
+      if (args['confirm-upload-correction'] && !uploadCorrectionId) {
+        throw new Error('本次修正确认与当前上传恢复条件不匹配；没有重新上传。');
+      }
+      if (receipt.uncertainSubmission && !allowOneTimeRetry && !uploadCorrectionId) {
         atomic(receiptFile,receipt);
         throw new Error('存在未确认的上传提交，当前证据不足以安全重传；请先复核线上状态。');
       }
@@ -1032,6 +1067,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         log(`正在上传第 ${index+1}/${batches.length} 批，共 ${batches[index].length} 张。`);
         receipt.currentBatch = index + 1;
         receipt.currentBatchFiles = batches[index].map((file)=>path.basename(file));
+        receipt.currentBatchFileHashes = Object.fromEntries(receipt.currentBatchFiles.map(name=>[name,manifest.fileHashes[name]]));
         receipt.currentBatchStartedAt = new Date().toISOString();
         receipt.currentBatchCompletedAt=null;
         receipt.currentBatchUploadEvidence=null;
@@ -1072,6 +1108,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             const trackUploadStage = (stage,detail) => {
               receipt.stage = stage;
               if (manifest.manualNumberedMode && allowOneTimeRetry) markManualUploadRetrySubmitted(receipt,stage);
+              if (uploadCorrectionId) markManualUploadCorrectionSubmitted(receipt,uploadCorrectionId,stage);
               // Persist before a potentially asynchronous write, not just in
               // the catch block: a crash/restart must not erase uncertainty.
               if (['month-submit-started','submitting','month-submitted','upload-confirmed','transport-request','transport-response','transport-outcome','transport-receipt','upload-receipt'].includes(stage)) {
@@ -1210,6 +1247,9 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
           }
         }
         receipt.uploadedCount = Object.keys(receipt.uploadedFiles).length;
+        if (uploadCorrectionId) confirmManualUploadCorrection(receipt,uploadCorrectionId,{
+          uploadedFileHashes:Object.fromEntries(Object.entries(receipt.uploadedFiles).map(([name,item])=>[name,item.sha256])),
+        });
         receipt.stage = 'batch-verified';
         receipt.currentBatchFiles = [];
         receipt.currentBatchUploadCount = null;
@@ -1220,6 +1260,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       const currentManifestUploadedCount=manifest.files.blessing.filter((file)=>
         receipt.uploadedFiles[path.basename(file)]?.sha256===manifest.fileHashes[path.basename(file)]).length;
       if (currentManifestUploadedCount !== manifest.counts.blessing) throw new Error(`当前清单已有上传凭据 ${currentManifestUploadedCount} 张，与福单图 ${manifest.counts.blessing} 张不一致。`);
+      finalizeManualUploadCorrection(receipt);
       receipt.complete = true;
       receipt.batchCompleteReady = manifest.batchCompleteReady === true;
       receipt.stage = manifest.batchCompleteReady ? 'complete' : 'available-files-complete-waiting-for-supplement';

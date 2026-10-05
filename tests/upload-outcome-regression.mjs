@@ -2,6 +2,13 @@ import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {resolveBlessingUploadResponseCount,resolveBlessingUploadResponseOutcome,watchBlessingUploadTransport} from '../src/site.mjs';
 
+for (const payload of [{result:{message:'该图片已上传'}},{result:{state:1,message:'该图片已上传',uploadedCount:12}},'该图片已上传']) {
+  const duplicate=resolveBlessingUploadResponseOutcome(payload,12);
+  assert.equal(duplicate.category,'business-failure');
+  assert.equal(duplicate.reason,'duplicate-image');
+  assert.equal(duplicate.uploadedCount,undefined,'a duplicate-image rejection is never a numeric success receipt');
+}
+
 for (const payload of [
   {result:{state:0,message:'12'}},
   {result:{state:false,message:'12'}},

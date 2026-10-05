@@ -111,11 +111,11 @@ export async function planManualNumberedPreparation({photoDir,date}) {
   };
 }
 
-function hashManifestFiles(files) {
+function hashManifestFiles(files,fileHashes) {
   const hash=crypto.createHash('sha256');
   for(const file of [...files].sort(byName)) {
     const stat=fs.statSync(file);
-    hash.update(`${path.basename(file)}\0${stat.size}\0${sha256(file)}\n`);
+    hash.update(`${path.basename(file)}\0${stat.size}\0${fileHashes[path.basename(file)]}\n`);
   }
   return hash.digest('hex');
 }
@@ -186,7 +186,7 @@ export function manualSourceNormalizationPending(mirror,date) {
 export async function commitManualPhotoSources({mirror,date,workDir,attempts=8,delayMs=500}) {
   const mirrorDir=path.join(dayFolder(mirror.root,date),'1');
   const manifest=await scanManualNumberedWorkday(mirror.root,date);
-  if(!manifest.uploadReady)throw Error('上传副本尚未通过规格检查，原目录未修改。');
+  if(!manifest.normalizationReady)throw Error('上传副本尚未通过规格检查，原目录未修改。');
   let originals=imageFiles(mirror.sourcePhotoDir);
   const originalNames=originals.map(file=>path.basename(file));
   if(JSON.stringify(originalNames)!==JSON.stringify(Object.keys(mirror.sourceFileHashes)))throw Error('原目录文件集合发生变化，请重新检查；未写回照片。');
@@ -270,12 +270,24 @@ export async function scanManualNumberedWorkday(root,date) {
   if(!groups.blessing.length)blockingErrors.push('没有发现人工编号的纯数字福单照片。');
   const conflicts=targetConflicts([...groups.blessing,...groups.lampScenes,...groups.waterScenes]);
   if(conflicts.size)blockingErrors.push(`人工编号重复：${[...conflicts].join('、')}。`);
+  // Content conflicts prevent uploading ambiguous manual numbers, but do not
+  // prevent the same verified normalization from being saved to originals.
+  const normalizationReady=blockingErrors.length===0&&groups.blessing.length>0;
   const sceneManualIssues=[];
   if(groups.lampScenes.length>2)sceneManualIssues.push(`供灯场景图超过平台允许的2张：${groups.lampScenes.map(file=>path.basename(file)).join('、')}。`);
   if(groups.waterScenes.length>2)sceneManualIssues.push(`供水场景图超过平台允许的2张：${groups.waterScenes.map(file=>path.basename(file)).join('、')}。`);
   const digestFiles=[...groups.blessing,...groups.lampScenes,...groups.waterScenes];
-  const fileHashes=Object.fromEntries(digestFiles.map(file=>[path.basename(file),sha256(file)]));
   const inputFileHashes=Object.fromEntries(files.map(file=>[path.basename(file),sha256(file)]));
+  const fileHashes=Object.fromEntries(digestFiles.map(file=>[path.basename(file),inputFileHashes[path.basename(file)]]));
+  const blessingNamesByHash=new Map();
+  for(const file of groups.blessing) {
+    const name=path.basename(file),hash=fileHashes[name];
+    if(!blessingNamesByHash.has(hash))blessingNamesByHash.set(hash,[]);
+    blessingNamesByHash.get(hash).push(name);
+  }
+  const duplicateBlessingGroups=[...blessingNamesByHash.values()].filter(names=>names.length>1);
+  for(const names of duplicateBlessingGroups)blockingErrors.push(
+    `不同编号的福单照片内容完全相同：${names.join('、')}。请人工核对照片和编号后再上传；软件未删除照片，也未自动选择编号。`);
   return {
     schemaVersion:4,manualNumberedMode:true,recognitionDisabled:true,businessDate:date,createdAt:new Date().toISOString(),folder,photoDir,
     expectedPrintedPrefix:null,
@@ -285,8 +297,9 @@ export async function scanManualNumberedWorkday(root,date) {
       unclassifiedFiles:groups.unexpected.map(file=>path.basename(file)),summary:'人工编号模式不读取或比对 PDF。'},
     files:{blessing:groups.blessing,lampScenes:groups.lampScenes,waterScenes:groups.waterScenes,unexpected:groups.unexpected,foreignBlessing:[],reviewExcluded:[]},
     inspections,ocrSuggestions:[],pdfs:[],errors:[...blockingErrors,...sceneManualIssues],blockingErrors,manualIssues:[...sceneManualIssues],sceneManualIssues,
-    requiredSceneModes:[],warnings:[],blessingReady:blockingErrors.length===0,uploadReady:blockingErrors.length===0&&groups.blessing.length>0,
+    requiredSceneModes:[],warnings:[],normalizationReady,duplicateBlessingGroups,
+    blessingReady:blockingErrors.length===0,uploadReady:blockingErrors.length===0&&groups.blessing.length>0,
     batchCompleteReady:blockingErrors.length===0&&sceneManualIssues.length===0,fileHashes,inputFileHashes,
-    fileSetHash:digestFiles.length?hashManifestFiles(digestFiles):null,
+    fileSetHash:digestFiles.length?hashManifestFiles(digestFiles,fileHashes):null,
   };
 }

@@ -57,7 +57,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-05.1（人工编号·自动压缩上传）'
+$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-05.2（人工编号·自动压缩上传）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -205,6 +205,10 @@ $script:running = $false
 $script:activeAction = $null
 $script:activeFlow = $null
 $script:activeProcess = $null
+$script:activeStartedAtUtc = $null
+$script:activePhotoBusinessDate = $null
+$script:activeBusinessRoot = $null
+$script:activeCorrectionSubmitted = $false
 $script:initQueue = New-Object System.Collections.Queue
 $script:initFailures = New-Object System.Collections.Generic.List[string]
 $script:photoNextAction = $null
@@ -731,12 +735,96 @@ function Test-ShouldAutoResumePhoto {
         (@('photo-upload','photo-scenes') -contains [string]$checkpoint.lastAction))
 }
 
-function Start-Runner([string]$action, [bool]$authorized, [string]$flow, [bool]$clearLog) {
+function Get-UploadCorrectionArguments([string]$action, [bool]$authorized, [string]$token = '') {
+    if ([string]::IsNullOrWhiteSpace($token)) { return @() }
+    if ($action -ne 'photo-upload' -or -not $authorized -or $token -cnotmatch '^[a-f0-9]{64}$') {
+        throw '照片修正确认仅适用于本次已授权的照片上传。'
+    }
+    return @('--confirm-upload-correction', $token)
+}
+function Get-PendingUploadCorrectionReview {
+    if ($null -eq $script:activeStartedAtUtc -or [string]::IsNullOrWhiteSpace($script:activePhotoBusinessDate)) { return $null }
+    if ($photoDate.Value.ToString('yyyy-MM-dd') -ne $script:activePhotoBusinessDate -or
+        $rootBox.Text.Trim() -ne $script:activeBusinessRoot) { return $null }
+    try {
+        $runDir = Join-Path (Get-WorkdayRoot $script:activePhotoBusinessDate) 'photos'
+        $review = Read-JsonFile (Join-Path $runDir 'photo-upload-correction-review.json')
+        $manifest = Read-JsonFile (Join-Path $runDir 'photo-manifest.json')
+        if ($null -eq $review -or $null -eq $manifest -or $review.schemaVersion -ne 1 -or
+            $review.kind -ne 'duplicate-content-correction' -or $review.eligible -isnot [bool] -or $review.eligible -ne $true -or
+            $review.businessDate -ne $script:activePhotoBusinessDate -or $manifest.businessDate -ne $review.businessDate -or
+            $manifest.manualNumberedMode -ne $true -or [string]::IsNullOrWhiteSpace([string]$review.fileSetHash) -or
+            [string]$review.fileSetHash -cne [string]$manifest.fileSetHash -or
+            [string]$review.confirmationToken -cnotmatch '^[a-f0-9]{64}$') { return $null }
+        $created = [DateTimeOffset]::Parse([string]$review.createdAt, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        if ($created -lt $script:activeStartedAtUtc -or $created -gt [DateTime]::UtcNow.AddSeconds(5)) { return $null }
+        $oldNames = @($review.oldAttempt.files)
+        $currentNames = @($review.currentFiles)
+        $removed = @($review.removedFiles)
+        if ($currentNames.Count -lt 1 -or $currentNames.Count -gt 50 -or $oldNames.Count -le $currentNames.Count -or
+            $removed.Count -ne ($oldNames.Count - $currentNames.Count) -or [int]$review.pendingOrderCount -lt 1) { return $null }
+        $manifestNames = @($manifest.files.blessing | ForEach-Object { [IO.Path]::GetFileName([string]$_) })
+        if ($manifestNames.Count -ne $currentNames.Count -or @($currentNames | Select-Object -Unique).Count -ne $currentNames.Count) { return $null }
+        foreach ($name in $currentNames) {
+            if ($manifestNames -notcontains $name -or [string]$review.currentFileHashes.$name -cnotmatch '^[a-f0-9]{64}$' -or
+                [string]$review.currentFileHashes.$name -cne [string]$manifest.fileHashes.$name) { return $null }
+        }
+        foreach ($item in $removed) {
+            if ([string]$item.name -notmatch '^\d+\.jpg$' -or [string]$item.duplicateOf -notmatch '^\d+\.jpg$' -or
+                $oldNames -notcontains $item.name -or $currentNames -contains $item.name -or
+                $currentNames -notcontains $item.duplicateOf) { return $null }
+        }
+        $inbox = Get-PhotoInboxForBusinessDate $review.businessDate
+        if (-not (Test-Path -LiteralPath $inbox -PathType Container) -or (Test-PhotoInboxHasPendingWork $inbox $manifest)) { return $null }
+        return $review
+    } catch { return $null }
+}
+function Show-UploadCorrectionConfirmation($review) {
+    $removedText = (@($review.removedFiles | ForEach-Object { "$($_.name) 与 $($_.duplicateOf) 内容相同，当前清单已移除 $($_.name)" }) -join "`r`n")
+    $message = "业务日期：$($review.businessDate)`r`n旧批次：$(@($review.oldAttempt.files).Count) 张；当前修正后：$(@($review.currentFiles).Count) 张。`r`n$removedText`r`n`r`n线上仍有 $($review.pendingOrderCount) 条未上传订单。旧批次的提交结果仍未确认，后台可能已保存部分图片但尚未关联订单。`r`n`r`n选择【是】将重新提交当前修正后的照片清单一次；不会删除原照片。提交前会再次核对清单和线上状态。选择【否】保持暂停。`r`n`r`n是否确认重新提交？"
+    return [System.Windows.Forms.MessageBox]::Show($form, $message, '确认修正后的照片重新提交',
+        [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning,
+        [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+}
+function Try-ConfirmUploadCorrection([string]$completedAction, [string]$completedFlow, [int]$code) {
+    if ($code -eq 0 -or $completedAction -ne 'photo-upload' -or $script:activeCorrectionSubmitted -or
+        @('photo','backlog-photo','manual') -notcontains $completedFlow) { return $false }
+    $review = Get-PendingUploadCorrectionReview
+    if ($null -eq $review) { return $false }
+    # This flag belongs only to the completed process. The token is passed
+    # explicitly to one new process and never stored as a reusable setting.
+    $script:activeCorrectionSubmitted = $true
+    Set-Running $true
+    try { $answer = Show-UploadCorrectionConfirmation $review } finally { Set-Running $false }
+    if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+        $fresh = Get-PendingUploadCorrectionReview
+        if ($null -ne $fresh -and [string]$fresh.confirmationToken -ceq [string]$review.confirmationToken) {
+            Append-Log "[$(Get-Date -Format HH:mm:ss)] 已确认 $($review.businessDate) 修正后的 $(@($review.currentFiles).Count) 张照片重新提交一次；正在重新核对。"
+            Start-Runner 'photo-upload' $true $completedFlow $false ([string]$review.confirmationToken)
+            return $true
+        }
+        $message = '确认期间照片清单或核对结果发生变化；本次没有重新提交，请再次点击一键处理照片检查。'
+    } else {
+        $message = '已取消修正照片重新提交；没有再次上传，原照片和旧记录均保留。'
+    }
+    Write-WorkflowCheckpoint 'photo' 'waiting-review' 'photo-upload' $code
+    if ($completedFlow -eq 'backlog-photo') { Restore-BacklogPhotoDate }
+    Refresh-AllCards
+    $globalStatus.Text = $message
+    $globalStatus.ForeColor = [System.Drawing.Color]::DarkOrange
+    return $true
+}
+function Start-Runner([string]$action, [bool]$authorized, [string]$flow, [bool]$clearLog, [string]$uploadCorrectionToken = '') {
     if ($script:running -or -not (Validate-Root)) { return }
+    $correctionArguments = @(Get-UploadCorrectionArguments $action $authorized $uploadCorrectionToken)
     try { $runtime = Find-PrayerNodeRuntime } catch { [System.Windows.Forms.MessageBox]::Show($_.Exception.Message) | Out-Null; return }
     if ($runtime.NodePath) { $env:NODE_PATH = $runtime.NodePath }
     $script:activeAction = $action
     $script:activeFlow = $flow
+    $script:activeStartedAtUtc = [DateTime]::UtcNow
+    $script:activePhotoBusinessDate = $photoDate.Value.ToString('yyyy-MM-dd')
+    $script:activeBusinessRoot = $rootBox.Text.Trim()
+    $script:activeCorrectionSubmitted = -not [string]::IsNullOrWhiteSpace($uploadCorrectionToken)
     if (@('photo','backlog','backlog-photo') -contains $flow -or ($flow -eq 'manual' -and $action.StartsWith('photo-'))) { Write-WorkflowCheckpoint 'photo' 'running' $action }
     if ($flow -eq 'pdf' -or ($flow -eq 'manual' -and -not $action.StartsWith('photo-'))) { Write-WorkflowCheckpoint 'pdf' 'running' $action }
     $argsList = @(
@@ -748,6 +836,7 @@ function Start-Runner([string]$action, [bool]$authorized, [string]$flow, [bool]$
         '--ui-log', ('"' + $script:uiLogPath + '"')
     )
     if ($authorized) { $argsList += @('--authorized','yes') }
+    $argsList += $correctionArguments
     if ($flow -eq 'initialize') {
         # 初始化也允许本人完整输入账号、密码和验证码；失效 DPAPI 凭据会
         # 自动降级为手动登录，不再因旧版 5 秒窗口直接终止。
@@ -862,6 +951,7 @@ function Complete-Runner([int]$code) {
     $completedFlow = $script:activeFlow
     Set-Running $false
     Refresh-AllCards
+    if (Try-ConfirmUploadCorrection $completedAction $completedFlow $code) { return }
     if ($completedFlow -eq 'initialize') {
         if ($code -ne 0) { $script:initFailures.Add($completedAction) }
         if ($code -eq 0 -and $completedAction -eq 'photo-scan' -and (Test-ShouldAutoResumePhoto)) {

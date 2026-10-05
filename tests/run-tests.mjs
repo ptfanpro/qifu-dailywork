@@ -80,6 +80,7 @@ import './manual-photo-mirror-regression.mjs';
 import './manual-photo-source-commit-regression.mjs';
 import './manual-source-backup-retention-regression.mjs';
 import './manual-photo-resume-regression.mjs';
+import './manual-upload-correction-regression.mjs';
 import './manual-photo-readback-regression.mjs';
 import './upload-outcome-regression.mjs';
 import './manual-upload-reconciliation-regression.mjs';
