@@ -57,7 +57,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-06.1（人工编号·自动压缩上传）'
+$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-06.2（人工编号·自动压缩上传）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -473,13 +473,43 @@ function Set-Running([bool]$value) {
     Update-CredentialButtons
 }
 function Set-PhotoResult([string]$text, [System.Drawing.Color]$color, [int]$progress, [string]$buttonText, [bool]$enabled, [string]$nextAction) {
-    $photoStatus.Text = $text
+    $script:photoProblemDetails = $text
+    $photoLines = @($text -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $photoStatus.Text = if ($photoLines.Count -gt 1 -and $photoLines[0] -match '[：:]$') { "$($photoLines[0])$($photoLines[1])" } else { $photoLines[0] }
     $photoStatusToolTip.SetToolTip($photoStatus,$text)
     $photoStatus.ForeColor = $color
     $photoProgress.Value = [Math]::Max(0,[Math]::Min(100,$progress))
     $photoMainButton.Text = '一键处理照片'
     $photoMainButton.Enabled = ($enabled -and -not $script:running)
     $script:photoNextAction = $nextAction
+}
+function Get-CurrentPhotoError {
+    if (-not (Test-Path -LiteralPath $script:uiLogPath)) { return $null }
+    $content = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:uiLogPath
+    $offset = [int]$script:activeUiLogOffset
+    if ($null -eq $content -or $offset -gt $content.Length) { return $null }
+    $match = [regex]::Match($content.Substring($offset),'(?ms)^错误：(.+?)(?=^(?:\[\d{2}:\d{2}:\d{2}\]|错误：)|\z)')
+    if ($match.Success) { return $match.Groups[1].Value.Trim() }
+    return $null
+}
+function Show-PhotoProblemDetails {
+    if ([string]::IsNullOrWhiteSpace($script:photoProblemDetails)) { return }
+    if ($env:PRAYER_UI_SMOKE_TEST -eq 'yes') {
+        $script:lastPhotoProblemDialog = $script:photoProblemDetails
+        return
+    }
+    [System.Windows.Forms.MessageBox]::Show($form,$script:photoProblemDetails,'照片处理提示（文件名和编号）',
+        [System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+}
+$photoStatus.Cursor = [System.Windows.Forms.Cursors]::Hand
+$photoStatus.Add_Click({ Show-PhotoProblemDetails })
+function Get-SavedPhotoProblem($manifest, [string]$photoRunDir) {
+    $problem = Read-JsonFile (Join-Path $photoRunDir 'photo-problem.json')
+    if ($problem -and -not $problem.resolvedAt -and $manifest.fileSetHash -and
+        [string]$problem.fileSetHash -eq [string]$manifest.fileSetHash -and
+        [string]$problem.businessDate -eq $photoDate.Value.ToString('yyyy-MM-dd') -and
+        [string]$problem.sourceRoot -eq $rootBox.Text.Trim() -and $problem.message) { return $problem }
+    return $null
 }
 function Get-FirstPhotoIssue($manifest) {
     foreach ($property in @('blockingErrors','sceneManualIssues','manualIssues')) {
@@ -568,6 +598,7 @@ function Refresh-PhotoCard {
         } else { "$missingCount 个 PDF 页面尚未匹配已确认福单图，请核对原图与 PDF 批次" }
     } else { '请核对尚未确认的图片及场景类别' }
     $firstPhotoIssue = Get-FirstPhotoIssue $manifest
+    $savedProblem = Get-SavedPhotoProblem $manifest $photoRunDir
     if ($sceneReceipt -and $sceneReceipt.complete -eq $true -and [string]$sceneReceipt.fileSetHash -eq $manifestHash -and $blockingErrorCount -eq 0 -and $manualIssueCount -eq 0) {
         if ($sceneReceipt.onlineVerifiedAt -and [int]$sceneReceipt.completedOrderCount -gt 0 -and [int]$sceneReceipt.onlineNotUploadedCount -eq 0) {
             Set-PhotoResult "$date 照片业务线上完成：福单图 $blessingCount 张，场景图 $sceneCount 张，已完成 $([int]$sceneReceipt.completedOrderCount) 条订单。" ([System.Drawing.Color]::DarkGreen) 100 '照片业务已完成' $false $null
@@ -605,11 +636,22 @@ function Refresh-PhotoCard {
     if ($blockingErrorCount -gt 0 -or $manifest.blessingReady -ne $true) {
         $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
         $nextStep = if ($manifest.manualNumberedMode -eq $true -and [int]$manifest.counts.unexpected -eq 0) { '点击“一键处理照片”统一规格，然后继续上传；不会读取 PDF。' } else { '请先人工完成编号，软件只负责压缩和上传，不读取 PDF。' }
-        Set-PhotoResult "$prefix 具体问题：$firstPhotoIssue $nextStep" ([System.Drawing.Color]::DarkOrange) 15 '检查并压缩照片' $true 'photo-manual-prepare'
+        $allPhotoIssues = @($manifest.blockingErrors) + @($manifest.sceneManualIssues) + @($manifest.manualIssues)
+        $allPhotoIssues = @($allPhotoIssues | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+        if ($allPhotoIssues.Count -eq 0) { $allPhotoIssues = @($firstPhotoIssue) }
+        if (($allPhotoIssues -join ' ') -match '编号.*重复|内容完全相同') {
+            $nextStep = '请对照纸面右上角末号修改文件名，改好后再点击“一键处理照片”。'
+        }
+        $details = "请检查照片：$($allPhotoIssues -join "`r`n")`r`n$nextStep"
+        Set-PhotoResult $details ([System.Drawing.Color]::DarkOrange) 15 '检查并压缩照片' $true 'photo-manual-prepare'
         return
     }
     $uploadReceipt = Read-JsonFile (Join-Path $photoRunDir 'photo-upload-receipt.json')
     if (-not ($uploadReceipt -and $uploadReceipt.complete -eq $true -and [string]$uploadReceipt.fileSetHash -eq $manifestHash -and [int]$uploadReceipt.uploadedCount -eq $blessingCount)) {
+        if ($savedProblem -and [string]$savedProblem.action -eq 'photo-upload') {
+            Set-PhotoResult ([string]$savedProblem.message) ([System.Drawing.Color]::DarkRed) 40 '查看照片问题' $true 'photo-upload'
+            return
+        }
         $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
         $manualText = if ($manualIssueCount -gt 0) { "待人工处理：$firstPhotoIssue" } else { '' }
         $preparedText = if ($manifest.manualNumberedMode) { '照片预检通过（上传前核验原目录压缩）' } else { '预检通过' }
@@ -625,6 +667,10 @@ function Refresh-PhotoCard {
         return
     }
     $prefix = if ($checkpoint -and ($checkpoint.state -eq 'failed' -or $checkpoint.state -eq 'running')) { "上次中断在$(Get-ActionLabel $checkpoint.lastAction)；" } else { '' }
+    if ($savedProblem -and [string]$savedProblem.action -eq 'photo-scenes') {
+        Set-PhotoResult ([string]$savedProblem.message) ([System.Drawing.Color]::DarkRed) 70 '继续处理照片' $true 'photo-scenes'
+        return
+    }
     Set-PhotoResult "$prefix 福单图 $blessingCount 张已上传；下一步处理供水、供灯场景图，并直接完成已上传牌位图的牌位订单。" ([System.Drawing.Color]::DarkBlue) 70 '继续照片：场景图/牌位并完成' $true 'photo-scenes'
 }
 function Refresh-PdfCard {
@@ -872,6 +918,7 @@ function Start-Runner([string]$action, [bool]$authorized, [string]$flow, [bool]$
     } elseif (Test-Path -LiteralPath $script:uiLogPath) {
         $script:uiLogLength = (Get-Content -Raw -Encoding UTF8 -LiteralPath $script:uiLogPath).Length
     }
+    $script:activeUiLogOffset = $script:uiLogLength
     $script:activeProcess = New-Object System.Diagnostics.Process
     $script:activeProcess.StartInfo = $processInfo
     Set-Running $true
@@ -1065,8 +1112,13 @@ function Complete-Runner([int]$code) {
         if ($code -ne 0) {
             Write-WorkflowCheckpoint 'photo' 'failed' $completedAction $code
             Refresh-PhotoCard
-            $globalStatus.Text = "照片流程中断在【$(Get-ActionLabel $completedAction)】。$($photoStatus.Text)"
+            $currentError = Get-CurrentPhotoError
+            if ($currentError) {
+                Set-PhotoResult $currentError ([System.Drawing.Color]::DarkRed) $photoProgress.Value '检查照片问题' $photoMainButton.Enabled $script:photoNextAction
+            }
+            $globalStatus.Text = $photoStatus.Text
             $globalStatus.ForeColor = [System.Drawing.Color]::DarkRed
+            Show-PhotoProblemDetails
             return
         }
         Write-WorkflowCheckpoint 'photo' 'stage-completed' $completedAction 0

@@ -1,5 +1,6 @@
 import path from 'node:path';
 import {reconcileManualUploadedPhotos} from './manual-upload-reconciliation.mjs';
+import {formatManualUploadProblem} from './photo-problem.mjs';
 
 // An upload without a numeric receipt is uncertain, not a failed submission.
 // Recover from the same date's actual pictures within this click, without POSTing again.
@@ -14,10 +15,7 @@ export async function uploadManualBatchWithRecovery({
     await onReconciliation(error);
     const readback = await reconcileManualUploadedPhotos({site,date,files,allFiles,fileHashes,onMatch});
     if (readback.missingNames.length) {
-      const duplicateImage=error.uploadEvidence?.responseOutcomes?.some(item=>item.reason==='duplicate-image');
-      const cause=duplicateImage ? '后台提示“该图片已上传”；本批可能存在编号或已有图片冲突，尚未证明照片已关联订单。'
-        : error.uploadEvidence?.applicationFailure===true ? '上传接口返回失败；尚未证明本批照片已关联订单。' : '';
-      const stopped = new Error(`${cause}上传后的线上图片核对尚未完成：本批 ${files.length} 张，已确认 ${readback.matched.length} 张，仍需核对 ${readback.missingNames.join('、')}。${readback.scanned===0?'同日没有可回读的已上传订单图片。':''}已保存确认结果，没有再次上传；再次点击将先核对线上照片。`);
+      const stopped = new Error(formatManualUploadProblem({files,readback,uploadEvidence:error.uploadEvidence}));
       stopped.code = 'MANUAL_UPLOAD_READBACK_INCOMPLETE';
       stopped.uploadEvidence = error.uploadEvidence;
       stopped.readback = readback;

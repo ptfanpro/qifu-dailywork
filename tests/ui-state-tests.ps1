@@ -19,7 +19,7 @@ $testBeijingToday = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$testB
 Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.AddDays(-1).ToString('yyyy-MM-dd') '软件启动时照片业务日期必须固定为北京时间昨天'
 Assert-Equal $pdfDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.ToString('yyyy-MM-dd') '软件启动时 PDF 业务日期必须固定为北京时间今天'
 Assert-Equal $photoGroup.Text '照片业务（人工编号后，软件压缩并上传）' '照片界面没有切换到人工编号模式'
-if ($form.Text -notmatch '2026-10-06.1') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
+if ($form.Text -notmatch '2026-10-06.2') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
 Assert-Equal $photoMainButton.Text '一键处理照片' '照片主按钮名称不正确'
 Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称不正确'
 if ($null -ne $photoRefreshButton -or $null -ne $pdfRefreshButton) { throw '照片或 PDF 主区域仍保留重新检查按钮' }
@@ -73,6 +73,61 @@ try {
     })
     Refresh-PhotoCard
     Assert-Equal $script:photoNextAction 'photo-manual-prepare' '人工编号照片不合规格时应允许先压缩'
+    $problemManifest = [ordered]@{
+        businessDate='2026-08-10';manualNumberedMode=$true;blessingReady=$true;uploadReady=$true;fileSetHash='problem-hash';
+        counts=[ordered]@{allImages=1;blessing=1;lampScene=0;waterScene=0};
+        inputFileHashes=[ordered]@{'101.jpg'=$manualHash};blockingErrors=@();manualIssues=@()
+    }
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $problemManifest
+    $problemRecord = [ordered]@{businessDate='2026-08-10';sourceRoot=$testRoot;fileSetHash='problem-hash';action='photo-upload';
+        message="后台没有指出具体文件。`n101.jpg（文件编号 101）：还没确认对应订单收到这张照片。`n请对照纸面右上角末号检查文件名。"}
+    Write-TestJson (Join-Path $photoRunDir 'photo-problem.json') $problemRecord
+    # Startup scanning updates UI checkpoints but must not hide the real error.
+    Write-WorkflowCheckpoint 'photo' 'stage-completed' 'photo-scan' 0
+    Refresh-PhotoCard
+    Assert-Equal $photoStatus.Text '后台没有指出具体文件。' '照片卡片仍用预检通过掩盖真实错误'
+    Show-PhotoProblemDetails
+    if ($script:lastPhotoProblemDialog -notmatch '101.jpg（文件编号 101）') { throw '完整照片提示没有列出文件和编号' }
+    Assert-Equal $script:photoNextAction 'photo-upload' '清晰提示不能改变上传续跑与防重复规则'
+    $script:activeAction='photo-upload'; $script:activeFlow='photo'
+    $script:lastPhotoProblemDialog=$null
+    Complete-Runner 1
+    Assert-Equal $globalStatus.Text '后台没有指出具体文件。' '失败时全局提示必须显示原因而非阶段名称'
+    if ($script:lastPhotoProblemDialog -notmatch '101.jpg（文件编号 101）') { throw '照片操作失败后没有显示完整文件清单' }
+    $problemRecord.businessDate='2026-08-09'
+    Write-TestJson (Join-Path $photoRunDir 'photo-problem.json') $problemRecord
+    Assert-Equal (Get-SavedPhotoProblem $problemManifest $photoRunDir) $null '不能显示其他日期错误'
+    $problemRecord.businessDate='2026-08-10'; $problemRecord.sourceRoot='X:\another-folder'
+    Write-TestJson (Join-Path $photoRunDir 'photo-problem.json') $problemRecord
+    Assert-Equal (Get-SavedPhotoProblem $problemManifest $photoRunDir) $null '不能显示其他来源目录错误'
+    $problemRecord.sourceRoot=$testRoot; $problemRecord.fileSetHash='old-hash'
+    Write-TestJson (Join-Path $photoRunDir 'photo-problem.json') $problemRecord
+    Refresh-PhotoCard
+    if ($photoStatus.Text -match '后台没有指出') { throw '改过照片后仍显示旧图片集合错误' }
+    $problemRecord.fileSetHash='problem-hash'; $problemRecord.resolvedAt='2026-08-11T00:00:00Z'
+    Write-TestJson (Join-Path $photoRunDir 'photo-problem.json') $problemRecord
+    Assert-Equal (Get-SavedPhotoProblem $problemManifest $photoRunDir) $null '已解决的错误不得继续显示'
+    Remove-Item -LiteralPath (Join-Path $photoRunDir 'photo-problem.json')
+    Remove-Item -LiteralPath (Join-Path $photoRunDir 'ui-workflow-state.json')
+    $problemManifest.blessingReady=$false
+    $problemManifest.blockingErrors=@('编号 101 重复：101.jpg、101.png。','102.jpg：图片无法读取。')
+    Write-TestJson (Join-Path $photoRunDir 'photo-manifest.json') $problemManifest
+    Refresh-PhotoCard
+    Show-PhotoProblemDetails
+    if ($script:lastPhotoProblemDialog -notmatch '101.png' -or $script:lastPhotoProblemDialog -notmatch '102.jpg') { throw '照片提示遗漏第二个问题文件' }
+    $savedProblemLog=$script:uiLogPath
+    $script:uiLogPath=Join-Path $testRoot 'test-errors.log'
+    try {
+        $oldLog="错误：旧错误不应显示。`n"
+        [IO.File]::WriteAllText($script:uiLogPath,$oldLog+"[12:00:01] 开始：照片检查`n错误：编号 101 重复：101.jpg、101.png。`n请对照纸面末号。`n错误：关闭浏览器失败。",(New-Object Text.UTF8Encoding -ArgumentList $false))
+        $script:activeUiLogOffset=$oldLog.Length
+        Assert-Equal (Get-CurrentPhotoError) "编号 101 重复：101.jpg、101.png。`n请对照纸面末号。" '当前多行照片问题被旧日志或清理错误替换'
+        Complete-Runner 1
+        if ($script:lastPhotoProblemDialog -notmatch '请对照纸面末号' -or $script:lastPhotoProblemDialog -match '关闭浏览器|旧错误') { throw '具体编号错误没有完整显示' }
+    } finally {
+        $script:uiLogPath=$savedProblemLog
+        $script:activeUiLogOffset=0
+    }
     $originalPendingManifest = [ordered]@{
         businessDate='2026-08-10';manualNumberedMode=$true;blessingReady=$true;uploadReady=$true;fileSetHash='source-save-hash';
         sourceNormalizationPending=1;counts=[ordered]@{allImages=1;blessing=1;lampScene=0;waterScene=0};

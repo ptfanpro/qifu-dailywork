@@ -84,6 +84,7 @@ import './manual-upload-correction-regression.mjs';
 import './manual-photo-readback-regression.mjs';
 import './upload-outcome-regression.mjs';
 import './manual-upload-reconciliation-regression.mjs';
+import './photo-problem-regression.mjs';
 import './pdf-before-ten-regression.mjs';
 import './confirmation-navigation-regression.mjs';
 import './login-navigation-regression.mjs';

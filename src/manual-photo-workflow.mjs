@@ -75,6 +75,12 @@ function targetConflicts(files) {
   }
   return new Set([...counts].filter(([,count])=>count>1).map(([name])=>name));
 }
+function numberConflictMessages(files, conflicts) {
+  return [...conflicts].map(target => {
+    const names=files.filter(file=>targetName(file).toLowerCase()===target).map(file=>path.basename(file));
+    return `编号 ${path.parse(target).name} 重复：${names.join('、')}。每个编号只能上传一张福单照片，请对照纸面右上角末号修改文件名。`;
+  });
+}
 
 export async function planManualNumberedPreparation({photoDir,date}) {
   const files=imageFiles(photoDir),groups=classify(files),accepted=[...groups.blessing,...groups.lampScenes,...groups.waterScenes];
@@ -82,7 +88,7 @@ export async function planManualNumberedPreparation({photoDir,date}) {
   if(groups.unexpected.length)issues.push(`以下照片尚未人工编号：${groups.unexpected.map(file=>path.basename(file)).join('、')}。请先改成纯数字编号；供灯使用 2.1/2.2，供水使用 2.5/2.6。`);
   if(!groups.blessing.length)issues.push('没有发现人工编号的纯数字福单照片。');
   const conflicts=targetConflicts(accepted);
-  if(conflicts.size)issues.push(`以下人工编号存在同名目标冲突：${[...conflicts].join('、')}。请只保留每个编号的一张照片。`);
+  issues.push(...numberConflictMessages(accepted,conflicts));
   const assignments=[];
   for(const file of accepted) {
     let metadata;
@@ -269,7 +275,7 @@ export async function scanManualNumberedWorkday(root,date) {
   if(groups.unexpected.length)blockingErrors.push(`以下照片尚未人工编号，未进入上传清单：${groups.unexpected.map(file=>path.basename(file)).join('、')}。`);
   if(!groups.blessing.length)blockingErrors.push('没有发现人工编号的纯数字福单照片。');
   const conflicts=targetConflicts([...groups.blessing,...groups.lampScenes,...groups.waterScenes]);
-  if(conflicts.size)blockingErrors.push(`人工编号重复：${[...conflicts].join('、')}。`);
+  blockingErrors.push(...numberConflictMessages([...groups.blessing,...groups.lampScenes,...groups.waterScenes],conflicts));
   // Content conflicts prevent uploading ambiguous manual numbers, but do not
   // prevent the same verified normalization from being saved to originals.
   const normalizationReady=blockingErrors.length===0&&groups.blessing.length>0;

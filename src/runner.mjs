@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { PrayerSite, resolveBlessingOrderSetUploadState } from './site.mjs';
+import {formatManualUploadProblem} from './photo-problem.mjs';
 import {finishScenePasses,waitForUploadOrderOutcome} from './photo-online.mjs';
 import {getMachineLocalStateRoot} from './runtime-paths.mjs';
 import { Timing } from './timing.mjs';
@@ -451,7 +452,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       photoTiming.setCount('pdf_page_count',0);
       if(!plan.safeToApply) {
         for(const issue of plan.issues)log(`需人工处理：${issue}`);
-        throw Error('人工编号照片检查未通过；未压缩、未打开后台、未上传。');
+        throw Error(`请检查以下照片：\n${plan.issues.join('\n')}\n改好文件名后，再点击“一键处理照片”。本次没有上传。`);
       }
       if(plan.assignments.length) {
         const receipt=await applyPhotoPreparation(plan,photoRunDir);
@@ -644,9 +645,9 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       for (const message of manualIssues) log(`待人工处理（已确认照片继续）：${message}`);
     }
     if (blockingErrors.length) {
-      for (const message of blockingErrors) log(`硬性阻断：${message}`);
-      if (args.action === 'photo-manual-prepare' || args.action === 'photo-upload' || args.action === 'photo-scenes') throw new Error('人工编号照片的安全预检未通过，未打开上传页面。');
-      log('照片预检完成：没有可安全上传的福单图。处理硬性问题后重新预检。');
+      for (const message of blockingErrors) log(`请检查照片：${message}`);
+      if (args.action === 'photo-manual-prepare' || args.action === 'photo-upload' || args.action === 'photo-scenes') throw new Error(`请检查以下照片：\n${blockingErrors.join('\n')}\n修改提示的问题后，再点击“一键处理照片”。本次没有上传。`);
+      log('请按上面的文件名修改照片问题，再点击“一键处理照片”。');
     } else {
       log(manifest.manualNumberedMode ? '人工编号照片预检通过：文件名和上传规格均合格，未读取 PDF。' : manifest.counts.missingBlessing > 0
         ? `照片增量预检通过：现有 ${manifest.counts.blessing} 张可先上传；${manifest.photoAvailability.summary}。`
@@ -886,7 +887,9 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             if (receipt.uncertainSubmission || onlinePendingRows.length===0) {
               receipt.stage='manual-photo-online-image-readback-incomplete';
               atomic(receiptFile,receipt);
-              throw new Error(`线上图片核对：已保存 ${receipt.uploadedCount} 张照片的凭据，仍需核对 ${readback.missingNames.join('、')}。没有再次上传；缺少逐张确认的照片不会被误记为完成。`);
+              throw new Error(formatManualUploadProblem({files:manifest.files.blessing,
+                readback:{...readback,confirmedCount:receipt.uploadedCount},
+                uploadEvidence:receipt.currentBatchUploadEvidence}));
             }
             atomic(receiptFile,receipt);
           }
@@ -971,6 +974,12 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
                 const response=receipt.currentBatchTransportResponseSeen===true || receipt.currentBatchUploadEvidence?.responseSeen===true;
                 const stage=receipt.currentBatchSubmissionStage || receipt.previousAttempt?.stage || '旧版未记录';
                 log(`上次上传记录：阶段 ${stage}；上传请求 ${request?'已观察到':'没有可靠记录'}；接口响应 ${response?'已观察到':'没有可靠记录'}。本次只查询状态，没有再次上传。`);
+              }
+              if (manifest.manualNumberedMode) {
+                throw new Error(formatManualUploadProblem({files:manifest.files.blessing,
+                  readback:{confirmedCount:verifiedCurrentBlessingCount,missingNames:pendingFiles.map(file=>path.basename(file))},
+                  uploadEvidence:receipt.currentBatchUploadEvidence})
+                  + `\n后台该日期显示：${onlineUploadedCount} 条订单有福单图，${onlinePendingRows.length} 条订单还没有。订单数量与照片张数不是一一对应，不能用这个数量确定哪张编号错误。`);
               }
               throw new Error(`${bindingLabel}，线上供灯/牌位共 ${onlineUploadedCount} 条已上传、${onlinePendingRows.length} 条未上传；${retryReason}，没有再次提交照片。`);
             }
@@ -1475,11 +1484,26 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
         : `已分批完成现有已上传订单：供灯/供水 ${regularCompletedOrderCount} 条、牌位 ${tabletCompletedOrderCount} 条；线上仍有 ${onlineNotUploadedCount} 条福单未上传或本地有 ${manualReviewCount} 项待人工确认，补录后只处理剩余订单。`);
       await photoSite.close();
     }
+    const problemFile=path.join(photoRunDir,'photo-problem.json');
+    const previousProblem=readJson(problemFile);
+    if (!blockingErrors.length && previousProblem?.action===args.action) {
+      atomic(problemFile,{...previousProblem,resolvedAt:new Date().toISOString()});
+    }
     photoTiming.finish();
     process.exit(blockingErrors.length ? 1 : 0);
   } catch (error) {
     fail(cleanErrorMessage(error));
     const failedPhase = photoTiming.current?.phase ?? null;
+    // Startup scans must not hide the actual upload problem. Bind it to the
+    // date, source and exact photo set so changed files don't inherit it.
+    try {
+      const problemManifest=readJson(path.join(photoRunDir,'photo-manifest.json'));
+      atomic(path.join(photoRunDir,'photo-problem.json'),{
+        schemaVersion:1,businessDate:photoDate,sourceRoot:root,action:args.action,
+        fileSetHash:problemManifest?.fileSetHash || null,
+        message:cleanErrorMessage(error),createdAt:new Date().toISOString(),
+      });
+    } catch {}
     try { if (photoTiming.current) photoTiming.end('failed',String(error.message).slice(0,80)); photoTiming.event('blocked',failedPhase,0); } catch {}
     if (photoSite) await photoSite.close().catch(()=>{});
     try { photoTiming.finish(); } catch {}
