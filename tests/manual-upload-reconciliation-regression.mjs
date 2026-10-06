@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
 import {reconcileManualUploadedPhotos} from '../src/manual-upload-reconciliation.mjs';
+import {uploadManualBatchWithRecovery} from '../src/manual-upload-attempt.mjs';
 
 const require = createRequire(import.meta.url), sharp = require('sharp');
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
@@ -65,6 +66,16 @@ try {
   assert.deepEqual(singleton.missingNames,[]);
   assert.equal(singleton.matched[0].matchMethod,'sha256');
   assert.deepEqual(single.calls,[[date,'tablet']],'complete evidence needs no further page queries');
+
+  const rejected=makeSite({},{});
+  rejected.uploadBlessingBatch=async()=>{const error=new Error('后台提示“该图片已上传”，本批是否部分保存仍需核对');
+    error.code='BLESSING_UPLOAD_OUTCOME_UNCONFIRMED';
+    error.uploadEvidence={applicationFailure:true,responseOutcomes:[{category:'business-failure',reason:'duplicate-image'}]};
+    throw error;};
+  await assert.rejects(uploadManualBatchWithRecovery({site:rejected,date,files:allFiles,allFiles,fileHashes}),
+    error=>error.code==='MANUAL_UPLOAD_READBACK_INCOMPLETE' && /该图片已上传/.test(error.message)
+      && error.readback.scanned===0 && error.uploadEvidence.applicationFailure===true,
+    'readback must retain the backend rejection instead of replacing it with a generic pending message');
 
   const duplicatePath = path.join(temp,'duplicate.jpg');
   fs.writeFileSync(duplicatePath,bytes[0]);

@@ -934,14 +934,17 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
                     atomic(path.join(photoRunDir,'photo-upload-correction-review.json'),{...review,fileSetHash:manifest.fileSetHash});
                     receipt.stage='manual-photo-correction-awaiting-confirmation';
                     atomic(receiptFile,receipt);
-                    throw new Error(`已核对修正后的照片：原 ${review.oldAttempt.files.length} 张，当前 ${review.currentFiles.length} 张，移除项均为重复内容。旧上传结果仍未确认；请在软件提示中确认是否按当前清单重新提交一次。尚未重新上传。`);
+                    const changes=review.renamedFiles?.length
+                      ? `仅修改文件名：${review.renamedFiles.map(item=>`${item.name} → ${item.renamedTo}`).join('、')}；图片内容未变`
+                      : '移除项均为重复内容';
+                    throw new Error(`已核对修正后的照片：原 ${review.oldAttempt.files.length} 张，当前 ${review.currentFiles.length} 张，${changes}。旧上传结果仍未确认；请在软件提示中确认是否按当前清单重新提交一次。尚未重新上传。`);
                   }
                   approveManualUploadCorrection(receipt,review,{confirmationToken:token,confirmed:true});
                   uploadCorrectionId=review.correctionId;
                   manualResume={allowed:true,pendingFiles:review.currentFiles,pendingOrderRows:second.pendingRows};
                   receipt.stage='manual-photo-correction-approved';
                   atomic(receiptFile,receipt);
-                  log(`已确认按修正后的 ${review.currentFiles.length} 张照片重新提交一次；保留旧 ${review.oldAttempt.files.length} 张的未知结果记录，移除的重复照片不记为上传成功。`);
+                  log(`已确认按修正后的 ${review.currentFiles.length} 张照片重新提交一次；保留旧 ${review.oldAttempt.files.length} 张的未知结果记录。`);
                 } else if (args['confirm-upload-correction']) {
                   throw new Error('照片、旧记录或线上订单状态已变化，本次修正确认已失效；没有重新上传。');
                 }
@@ -1133,7 +1136,10 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
                   receipt.uncertainSubmission=true;
                   receipt.currentBatchUploadEvidence=error.uploadEvidence;
                   atomic(receiptFile,receipt);
-                  log('后台未提供本批数字回执，正在自动回读同日线上图片逐张核对；核对后继续，不会再次提交。');
+                  const duplicate=error.uploadEvidence?.responseOutcomes?.some(item=>item.reason==='duplicate-image');
+                  log(duplicate ? '后台提示“该图片已上传”；正在只读检查是否部分保存并关联订单，不能按成功记账。'
+                    : error.uploadEvidence?.applicationFailure===true ? '后台返回上传失败；正在只读检查是否有部分照片已关联订单。'
+                      : '后台未提供本批数字回执，正在自动回读同日线上图片逐张核对；核对后继续，不会再次提交。');
                 },
               })
               : await photoSite.uploadBlessingBatch(batches[index],photoDate,trackUploadStage);

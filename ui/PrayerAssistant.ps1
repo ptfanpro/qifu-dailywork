@@ -57,7 +57,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-05.2（人工编号·自动压缩上传）'
+$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-06.1（人工编号·自动压缩上传）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -761,7 +761,9 @@ function Get-PendingUploadCorrectionReview {
         $oldNames = @($review.oldAttempt.files)
         $currentNames = @($review.currentFiles)
         $removed = @($review.removedFiles)
-        if ($currentNames.Count -lt 1 -or $currentNames.Count -gt 50 -or $oldNames.Count -le $currentNames.Count -or
+        $renamed = @($review.renamedFiles | Where-Object { $null -ne $_ })
+        if ($currentNames.Count -lt 1 -or $currentNames.Count -gt 50 -or $oldNames.Count -lt $currentNames.Count -or
+            ($oldNames.Count -eq $currentNames.Count -and $renamed.Count -lt 1) -or
             $removed.Count -ne ($oldNames.Count - $currentNames.Count) -or [int]$review.pendingOrderCount -lt 1) { return $null }
         $manifestNames = @($manifest.files.blessing | ForEach-Object { [IO.Path]::GetFileName([string]$_) })
         if ($manifestNames.Count -ne $currentNames.Count -or @($currentNames | Select-Object -Unique).Count -ne $currentNames.Count) { return $null }
@@ -774,6 +776,17 @@ function Get-PendingUploadCorrectionReview {
                 $oldNames -notcontains $item.name -or $currentNames -contains $item.name -or
                 $currentNames -notcontains $item.duplicateOf) { return $null }
         }
+        foreach ($item in $renamed) {
+            if ([string]$item.name -notmatch '^\d+\.jpg$' -or [string]$item.renamedTo -notmatch '^\d+\.jpg$' -or
+                $oldNames -notcontains $item.name -or $currentNames -contains $item.name -or
+                $currentNames -notcontains $item.renamedTo -or $oldNames -contains $item.renamedTo -or
+                [string]$item.sha256 -cne [string]$review.oldFileHashes.($item.name) -or
+                [string]$item.sha256 -cne [string]$review.currentFileHashes.($item.renamedTo)) { return $null }
+        }
+        if ($renamed.Count -gt 0 -and ($removed.Count -gt 0 -or
+            @($renamed.name | Select-Object -Unique).Count -ne $renamed.Count -or
+            @($renamed.renamedTo | Select-Object -Unique).Count -ne $renamed.Count -or
+            @($currentNames | Where-Object { $oldNames -notcontains $_ }).Count -ne $renamed.Count)) { return $null }
         $inbox = Get-PhotoInboxForBusinessDate $review.businessDate
         if (-not (Test-Path -LiteralPath $inbox -PathType Container) -or (Test-PhotoInboxHasPendingWork $inbox $manifest)) { return $null }
         return $review
@@ -781,6 +794,9 @@ function Get-PendingUploadCorrectionReview {
 }
 function Show-UploadCorrectionConfirmation($review) {
     $removedText = (@($review.removedFiles | ForEach-Object { "$($_.name) 与 $($_.duplicateOf) 内容相同，当前清单已移除 $($_.name)" }) -join "`r`n")
+    if (@($review.renamedFiles | Where-Object { $null -ne $_ }).Count -gt 0) {
+        $removedText = (@($review.renamedFiles | ForEach-Object { "$($_.name) → $($_.renamedTo)，图片内容未变；请核对新文件名与您手工编号一致" }) -join "`r`n")
+    }
     $message = "业务日期：$($review.businessDate)`r`n旧批次：$(@($review.oldAttempt.files).Count) 张；当前修正后：$(@($review.currentFiles).Count) 张。`r`n$removedText`r`n`r`n线上仍有 $($review.pendingOrderCount) 条未上传订单。旧批次的提交结果仍未确认，后台可能已保存部分图片但尚未关联订单。`r`n`r`n选择【是】将重新提交当前修正后的照片清单一次；不会删除原照片。提交前会再次核对清单和线上状态。选择【否】保持暂停。`r`n`r`n是否确认重新提交？"
     return [System.Windows.Forms.MessageBox]::Show($form, $message, '确认修正后的照片重新提交',
         [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning,

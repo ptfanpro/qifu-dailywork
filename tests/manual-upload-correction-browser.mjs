@@ -26,10 +26,11 @@ try {
   for(const [name,color] of [['11.jpg','#aa3355'],['12.jpg','#55bbcc']]) {
     await sharp({create:{width:1800,height:1350,channels:3,background:color}}).jpeg().toFile(path.join(temp,name));
   }
+  for (const correctionMode of ['duplicate','rename']) {
   const currentFiles=['11.jpg','12.jpg'];
   const currentFileHashes=Object.fromEntries(currentFiles.map(name=>[name,hash(path.join(temp,name))]));
   const oldFileHashes={...currentFileHashes,'111.jpg':currentFileHashes['11.jpg']};
-  const oldFiles=['11.jpg','111.jpg','12.jpg'];
+  const oldFiles=correctionMode==='rename' ? ['111.jpg','12.jpg'] : ['11.jpg','111.jpg','12.jpg'];
   const preparationReceipt={businessDate,completedAt:'2026-10-02T02:00:00.000Z',
     files:oldFiles.map(targetName=>({targetName,kind:'blessing',afterSha256:oldFileHashes[targetName]}))};
   let receipt={businessDate,complete:false,uncertainSubmission:true,uncertainRetryCount:1,
@@ -57,7 +58,8 @@ try {
   persist();
   const firstReview=reviewNow();
   assert.equal(firstReview.eligible,true);
-  assert.deepEqual(firstReview.removedFiles,[{name:'111.jpg',duplicateOf:'11.jpg',sha256:currentFileHashes['11.jpg']}]);
+  assert.deepEqual(firstReview.removedFiles,correctionMode==='rename' ? [] : [{name:'111.jpg',duplicateOf:'11.jpg',sha256:currentFileHashes['11.jpg']}]);
+  if(correctionMode==='rename')assert.deepEqual(firstReview.renamedFiles,[{name:'111.jpg',renamedTo:'11.jpg',sha256:currentFileHashes['11.jpg']}]);
   assert.equal(firstReview.oldUncertainRetryCount,1);
   const correctionId=firstReview.correctionId;
   let posts=0,mode='missing-month-button',diskAtPost;
@@ -158,7 +160,8 @@ try {
   assert.equal(receipt.correctedAttempts[correctionId].status,'submitting');
   assert.equal(posts,1);
   await page.close();
-  console.log('Manual upload correction browser PASS: explicit confirmation, preparatory failure resume, one corrected POST, old budget/history and exact file hashes survive restart');
+  }
+  console.log('Manual upload correction browser PASS: duplicate removal and manual rename, explicit confirmation, preparatory failure resume, one corrected POST, old budget/history and exact file hashes survive restart');
 } finally {
   await browser.close();
   const actual=fs.realpathSync(temp),parent=fs.realpathSync(os.tmpdir());

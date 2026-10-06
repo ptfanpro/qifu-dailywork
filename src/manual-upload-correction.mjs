@@ -75,6 +75,7 @@ function binding(review) {
     oldAttempt:review.oldAttempt,oldUncertainRetryCount:review.oldUncertainRetryCount,
     oldFileHashes:review.oldFileHashes,currentFiles:review.currentFiles,currentFileHashes:review.currentFileHashes,
     removedFiles:review.removedFiles,
+    ...(review.renamedFiles?.length ? {renamedFiles:review.renamedFiles} : {}),
     pendingOrderIdHash:review.pendingOrderIdHash,pendingOrderCount:review.pendingOrderCount};
 }
 
@@ -90,8 +91,12 @@ export function prepareManualUploadCorrectionReview({businessDate,receipt,curren
     || prior.currentBatchUploadCount != null || !safeNames(attempt.files)) return refused('old-attempt-incomplete');
   const age=Date.parse(now)-Date.parse(attempt.startedAt);
   if (!Number.isFinite(age) || age<15*60*1000) return refused('old-attempt-too-recent');
-  if (!safeNames(currentFiles) || currentFiles.length>50 || currentFiles.length>=attempt.files.length
-    || currentFiles.some(name=>!attempt.files.includes(name))) return refused('current-batch-is-not-a-proper-subset');
+  if (!safeNames(currentFiles) || currentFiles.length>50 || currentFiles.length>attempt.files.length)
+    return refused('current-batch-is-not-a-proper-subset');
+  const newNames=currentFiles.filter(name=>!attempt.files.includes(name));
+  const renameOnly=currentFiles.length===attempt.files.length && newNames.length>0;
+  if (!renameOnly && (currentFiles.length===attempt.files.length || newNames.length))
+    return refused('current-batch-is-not-a-proper-subset');
   if (currentFiles.some(name=>!validHash(currentFileHashes?.[name]))) return refused('current-file-hashes-incomplete');
   const currentHashes=normalizedHashes(currentFiles,currentFileHashes);
   if (new Set(Object.values(currentHashes)).size!==currentFiles.length) return refused('current-batch-still-has-duplicates');
@@ -115,9 +120,21 @@ export function prepareManualUploadCorrectionReview({businessDate,receipt,curren
     oldHashes[name]=direct?.toLowerCase() || prepared[name];
     if (!validHash(oldHashes[name])) return refused('old-file-hashes-incomplete');
   }
-  if (currentFiles.some(name=>oldHashes[name]!==currentHashes[name])) return refused('retained-file-content-changed');
+  if (currentFiles.some(name=>attempt.files.includes(name) && oldHashes[name]!==currentHashes[name]))
+    return refused('retained-file-content-changed');
   const removedFiles=[];
-  for (const name of attempt.files.filter(name=>!currentFiles.includes(name))) {
+  const renamedFiles=[];
+  const oldMissing=attempt.files.filter(name=>!currentFiles.includes(name));
+  if (renameOnly) {
+    for (const renamedTo of newNames) {
+      const matches=oldMissing.filter(name=>oldHashes[name]===currentHashes[renamedTo]);
+      if (matches.length!==1 || renamedFiles.some(item=>item.name===matches[0]))
+        return refused('renamed-file-not-an-exact-unique-match');
+      renamedFiles.push({name:matches[0],renamedTo,sha256:currentHashes[renamedTo]});
+    }
+    if (renamedFiles.length!==oldMissing.length) return refused('rename-mapping-incomplete');
+  }
+  for (const name of renameOnly ? [] : oldMissing) {
     const matches=currentFiles.filter(retained=>oldHashes[name]===currentHashes[retained]);
     if (matches.length!==1) return refused('removed-file-not-an-exact-duplicate');
     removedFiles.push({name,duplicateOf:matches[0],sha256:oldHashes[name]});
@@ -127,10 +144,13 @@ export function prepareManualUploadCorrectionReview({businessDate,receipt,curren
     || !validHash(attempt.pendingOrderIdHash) || first.hash!==attempt.pendingOrderIdHash
     || first.count!==attempt.pendingOrderCount) return refused('online-order-scope-changed');
   const review={eligible:true,schemaVersion:1,kind:'duplicate-content-correction',businessDate,createdAt:now,
-    warning:'上次提交的最终结果仍不明确。以下重复内容已从当前批次移除；只有人工确认后，才允许将修正批次提交一次。',
+    warning:renameOnly
+      ? '上次提交的最终结果仍不明确。当前仅手工修改了文件名，图片内容不变；只有人工确认编号和提交后，才允许将修正批次提交一次。'
+      : '上次提交的最终结果仍不明确。以下重复内容已从当前批次移除；只有人工确认后，才允许将修正批次提交一次。',
     oldAttempt:structuredClone(attemptIdentity(attempt)),oldUncertainRetryCount:Number(prior.uncertainRetryCount || 0),
     oldFileHashes:normalizedHashes(attempt.files,oldHashes),currentFiles:[...currentFiles].sort(),
     currentFileHashes:currentHashes,removedFiles:removedFiles.sort((a,b)=>a.name.localeCompare(b.name)),
+    ...(renamedFiles.length ? {renamedFiles:renamedFiles.sort((a,b)=>a.name.localeCompare(b.name))} : {}),
     pendingOrderIdHash:first.hash,pendingOrderCount:first.count};
   review.correctionId=digest(binding(review));
   review.confirmationToken=digest({kind:'confirm-duplicate-content-correction',correctionId:review.correctionId});

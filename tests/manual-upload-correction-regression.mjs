@@ -32,6 +32,27 @@ assert.equal(prepareManualUploadCorrectionReview({...input,now:'2026-10-05T04:01
 assert.deepEqual(receipt.uploadedFiles,{});
 assert.equal(receipt.correctedAttempts,undefined,'preparing a review must not mutate the receipt');
 
+// A manually corrected filename must keep the original image and order scope.
+const renameHashes={'73.jpg':sha('paper-73'),'772.jpg':sha('paper-72')};
+const renameReceipt={...receipt,previousAttempt:{...receipt.previousAttempt,
+  files:['73.jpg','772.jpg'],fileHashes:renameHashes}};
+const renameInput={...input,receipt:renameReceipt,preparationReceipt:null,
+  currentFiles:['73.jpg','72.jpg'],currentFileHashes:{'73.jpg':renameHashes['73.jpg'],'72.jpg':renameHashes['772.jpg']}};
+const renamedReview=prepareManualUploadCorrectionReview(renameInput);
+assert.equal(renamedReview.eligible,true,'a content-preserving manual rename has a separately confirmed recovery');
+assert.deepEqual(renamedReview.renamedFiles,[{name:'772.jpg',renamedTo:'72.jpg',sha256:renameHashes['772.jpg']}]);
+assert.deepEqual(renamedReview.removedFiles,[]);
+assert.equal(prepareManualUploadCorrectionReview({...renameInput,
+  currentFileHashes:{...renameInput.currentFileHashes,'72.jpg':sha('different-paper')}}).eligible,false);
+assert.equal(prepareManualUploadCorrectionReview({...renameInput,currentFiles:['73.jpg','772.jpg'],currentFileHashes:renameHashes}).eligible,false,
+  'an unchanged batch does not gain a correction retry');
+const renamedReceiptCopy=structuredClone(renameReceipt);
+assert.throws(()=>approveManualUploadCorrection(renamedReceiptCopy,renamedReview,{confirmed:true,confirmationToken:'wrong',now}));
+approveManualUploadCorrection(renamedReceiptCopy,renamedReview,{confirmed:true,confirmationToken:renamedReview.confirmationToken,now});
+markManualUploadCorrectionSubmitted(renamedReceiptCopy,renamedReview.correctionId,'month-submit-started',{now});
+assert.equal(prepareManualUploadCorrectionReview({...renameInput,receipt:renamedReceiptCopy}).eligible,false);
+assert.equal(renamedReceiptCopy.uncertainRetryCount,1,'a filename correction never resets the old retry budget');
+
 for (const [reason,patch] of [
   ['bad date',{businessDate:'2026-02-30'}],
   ['other date',{businessDate:'2026-10-03'}],
