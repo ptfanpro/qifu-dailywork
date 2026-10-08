@@ -57,7 +57,7 @@ $photoDateDefault = $today.AddDays(-1)
 $pdfDateDefault = $today
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-06.2（人工编号·自动压缩上传）'
+$form.Text = '祈福本地执行器 V9.6.8-rc.5 · 2026-10-08.1（人工编号·自动压缩上传）'
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $preferredClientHeight = [Math]::Min(760, [Math]::Max(680, $workingArea.Height - 90))
 $form.ClientSize = New-Object System.Drawing.Size(880, $preferredClientHeight)
@@ -472,7 +472,14 @@ function Set-Running([bool]$value) {
     foreach ($button in @($manualPhotoPrepare,$manualPhotoScan,$manualPhotoUpload,$manualSceneUpload,$manualPdfInspect,$manualPdfExport,$manualState,$credentialButton)) { $button.Enabled = -not $value }
     Update-CredentialButtons
 }
+function ConvertTo-ReadablePhotoProblem([string]$text) {
+    if ($text -match 'Unable to adopt element handle from a different document|Execution context was destroyed|Cannot find context with specified id') {
+        return '后台页面切换时，软件暂时没能核对本步结果。已保存进度；再次点击“一键处理照片”会先检查线上状态再继续，已上传的照片不会重复上传。'
+    }
+    return $text
+}
 function Set-PhotoResult([string]$text, [System.Drawing.Color]$color, [int]$progress, [string]$buttonText, [bool]$enabled, [string]$nextAction) {
+    $text = ConvertTo-ReadablePhotoProblem $text
     $script:photoProblemDetails = $text
     $photoLines = @($text -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $photoStatus.Text = if ($photoLines.Count -gt 1 -and $photoLines[0] -match '[：:]$') { "$($photoLines[0])$($photoLines[1])" } else { $photoLines[0] }

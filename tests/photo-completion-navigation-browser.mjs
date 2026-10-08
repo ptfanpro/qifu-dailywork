@@ -4,7 +4,10 @@ import {PrayerSite} from '../src/site.mjs';
 const {chromium}=createRequire(import.meta.url)('playwright');
 const browser=await chromium.launch({channel:'msedge',headless:true});
 try {
-  for(const [kind,changesState] of [['lamp',true],['tablet',true],['lamp',false]]){
+  const destroyed='locator.elementHandles: Execution context was destroyed, most likely because of a navigation';
+  const adopted='locator.elementHandles: Unable to adopt element handle from a different document';
+  for(const [kind,changesState,raceMessage] of [['lamp',true,destroyed],['tablet',true,destroyed],['lamp',false,destroyed],
+    ['lamp',true,adopted],['tablet',true,adopted],['lamp',false,adopted]]){
     const page=await browser.newPage();
     let requests=0,completed=false,queries=0,injected=false;
     const row={id:'synthetic-order',productName:kind==='tablet'?'长生禄位':'祈福灯'};
@@ -23,7 +26,7 @@ try {
     await page.goto('http://fixture.test/list');
     const query=async()=>{
       queries++;
-      if(completed&&queries===2)throw Error('Execution context was destroyed, most likely because of a navigation');
+      if(completed&&queries===2)throw Error(raceMessage);
       return completed?[]:[row];
     };
     site.queryUploadedOrders=query;site.queryUploadedTabletOrders=query;
@@ -38,7 +41,7 @@ try {
             assert.equal(requests,1,'batch was already submitted before the context race');
             injected=true;
             await page.goto('http://fixture.test/done');
-            throw Error('locator.elementHandles: Execution context was destroyed, most likely because of a navigation');
+            throw Error(raceMessage);
           }
           return target.elementHandles();
         };

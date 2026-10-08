@@ -19,7 +19,15 @@ $testBeijingToday = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$testB
 Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.AddDays(-1).ToString('yyyy-MM-dd') '软件启动时照片业务日期必须固定为北京时间昨天'
 Assert-Equal $pdfDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.ToString('yyyy-MM-dd') '软件启动时 PDF 业务日期必须固定为北京时间今天'
 Assert-Equal $photoGroup.Text '照片业务（人工编号后，软件压缩并上传）' '照片界面没有切换到人工编号模式'
-if ($form.Text -notmatch '2026-10-06.2') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
+if ($form.Text -notmatch '2026-10-08.1') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
+foreach ($navigationMessage in @('locator.elementHandles: Unable to adopt element handle from a different document','Execution context was destroyed, most likely because of a navigation')) {
+    Set-PhotoResult $navigationMessage ([System.Drawing.Color]::DarkRed) 70 '继续处理照片' $true 'photo-scenes'
+    if ($photoStatus.Text -notmatch '后台页面切换' -or $photoStatus.Text -match 'elementHandles|Execution context') { throw '页面切换错误仍直接显示英文技术信息' }
+    Show-PhotoProblemDetails
+    if ($script:lastPhotoProblemDialog -notmatch '先检查线上状态' -or $script:lastPhotoProblemDialog -match '编号错误') { throw '页面切换提示缺少续跑说明或误报编号问题' }
+    Assert-Equal $script:photoNextAction 'photo-scenes' '中文提示不能改变场景图断点'
+}
+Assert-Equal (ConvertTo-ReadablePhotoProblem '72.jpg：编号重复。') '72.jpg：编号重复。' '具体编号错误不得被页面切换通用提示替代'
 Assert-Equal $photoMainButton.Text '一键处理照片' '照片主按钮名称不正确'
 Assert-Equal $pdfMainButton.Text '一键处理 PDF' 'PDF 主按钮名称不正确'
 if ($null -ne $photoRefreshButton -or $null -ne $pdfRefreshButton) { throw '照片或 PDF 主区域仍保留重新检查按钮' }

@@ -93,7 +93,7 @@ export function isClosedBrowserError(error) {
   return /target page, context or browser has been closed|target closed|browser has been closed|connection closed/i.test(String(error?.message || error || ''));
 }
 export function isNavigationRaceError(error) {
-  return /execution context was destroyed|cannot find context with specified id|interrupted by another navigation|ERR_ABORTED|navigation/i.test(String(error?.message || error || ''));
+  return /execution context was destroyed|cannot find context with specified id|unable to adopt element handle from a different document|interrupted by another navigation|ERR_ABORTED|navigation/i.test(String(error?.message || error || ''));
 }
 export function matchesBusinessPageIdentity(targetUrl, currentUrl, title = '') {
   let target, current;
@@ -1639,7 +1639,7 @@ export class PrayerSite {
     try {
       await scheduleSiteClick(button);
     } catch (error) {
-      if (!/Execution context was destroyed|navigation|Target page, context or browser has been closed/i.test(String(error.message || error))) throw error;
+      if (!isNavigationRaceError(error) && !isClosedBrowserError(error)) throw error;
     }
     this.timing.count('browser_action_count');
     await sleep(150);
@@ -1690,7 +1690,7 @@ export class PrayerSite {
     try {
       await scheduleSiteClick(button);
     } catch (error) {
-      if (!/Execution context was destroyed|navigation|Target page, context or browser has been closed/i.test(String(error.message || error))) throw error;
+      if (!isNavigationRaceError(error) && !isClosedBrowserError(error)) throw error;
     }
     this.timing.count('browser_action_count');
     await sleep(150);
