@@ -19,7 +19,7 @@ $testBeijingToday = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow,$testB
 Assert-Equal $photoDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.AddDays(-1).ToString('yyyy-MM-dd') '软件启动时照片业务日期必须固定为北京时间昨天'
 Assert-Equal $pdfDate.Value.ToString('yyyy-MM-dd') $testBeijingToday.ToString('yyyy-MM-dd') '软件启动时 PDF 业务日期必须固定为北京时间今天'
 Assert-Equal $photoGroup.Text '照片业务（人工编号后，软件压缩并上传）' '照片界面没有切换到人工编号模式'
-if ($form.Text -notmatch '2026-10-08.1') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
+if ($form.Text -notmatch '2026-10-15.1') { throw '主窗口标题必须显示本次修复标记，便于区分仍在运行的旧版本' }
 foreach ($navigationMessage in @('locator.elementHandles: Unable to adopt element handle from a different document','Execution context was destroyed, most likely because of a navigation')) {
     Set-PhotoResult $navigationMessage ([System.Drawing.Color]::DarkRed) 70 '继续处理照片' $true 'photo-scenes'
     if ($photoStatus.Text -notmatch '后台页面切换' -or $photoStatus.Text -match 'elementHandles|Execution context') { throw '页面切换错误仍直接显示英文技术信息' }

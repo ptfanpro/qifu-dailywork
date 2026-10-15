@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import { listFilesRecursive, waitForNewPdf, verifyPdf } from './pdf.mjs';
 import { normalizeText } from './quantity.mjs';
 import { parseUploadedPhotoPreview } from './photo-readback.mjs';
+import { validateRenewalPhotoScope } from './renewal-photo-scope.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
@@ -353,6 +354,7 @@ export class PrayerSite {
     this.credentialHelperPath = options.credentialHelperPath || null;
     this.credentialReader = options.credentialReader || readEncryptedWindowsCredential;
     this.autoLoginAttempted = false;
+    this.renewalPhotoScope = options.renewalPhotoScope || null;
   }
   async tryStoredLogin() {
     if (this.autoLoginAttempted || !this.credentialPath || !fs.existsSync(this.credentialPath)) return false;
@@ -1436,10 +1438,34 @@ export class PrayerSite {
     return this.queryOrdersByBlessingUploadStatus(date, '未上传', { url:TABLET_LIST_URL, allStates:true });
   }
   async queryUploadedPhotoReferences(date, kind) {
+    if (kind === 'renewal') return this.queryUploadedRenewalPhotoReferences(date);
     if (!['lamp','tablet'].includes(kind)) throw new Error('照片回读业务类别无效。');
     const rows = kind === 'tablet'
       ? await this.queryUploadedTabletPhotoOrders(date)
       : await this.queryUploadedOrders(date,{productMode:'all',allStates:true});
+    return this.readUploadedPhotoReferences(rows,kind);
+  }
+  async queryUploadedRenewalPhotoReferences(date) {
+    if (!this.renewalPhotoScope) return [];
+    const scope=validateRenewalPhotoScope(this.renewalPhotoScope,date);
+    this.log(`正在只读核对当天续费清单的 ${scope.rows.length} 条记录；按原订单 ID 定位，不按开始日期或“未处理”状态过滤。`);
+    await this.page.goto(TABLET_URL,{waitUntil:'domcontentloaded',timeout:30000});
+    this.timing.count('browser_action_count');
+    await this.waitForLogin(TABLET_URL);
+    await this.preparePageSize1000();
+    const references=[];
+    for (const expected of scope.rows) {
+      await this.page.locator('#bCode').fill(expected.blessingCode);
+      await this.submitListSearch();
+      const rows=await this.readRows();
+      const total=await this.readListPageTotal();
+      if (total===null || total!==rows.length) throw new Error('续费照片查询结果不完整；没有再次上传。');
+      const matched=rows.filter(row=>String(row.id)===expected.id && row.blessingCode===expected.blessingCode);
+      references.push(...await this.readUploadedPhotoReferences(matched,'renewal'));
+    }
+    return references;
+  }
+  async readUploadedPhotoReferences(rows,kind) {
     const previews = await this.page.locator('table').evaluateAll((tables) => {
       const table = tables.find((candidate) => {
         const headers = [...candidate.querySelectorAll('th')].map((th) => (th.innerText || '').trim());

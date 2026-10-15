@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { PrayerSite, resolveBlessingOrderSetUploadState } from './site.mjs';
 import {formatManualUploadProblem} from './photo-problem.mjs';
+import {loadRenewalPhotoScope} from './renewal-photo-scope.mjs';
 import {finishScenePasses,waitForUploadOrderOutcome} from './photo-online.mjs';
 import {getMachineLocalStateRoot} from './runtime-paths.mjs';
 import { Timing } from './timing.mjs';
@@ -198,7 +199,7 @@ async function exportRenewals(site, runDir, folder, pdfDate, initialRows, initia
   timing.start('pdf-finalize');
   const allOutputs=[...(previousReceipt?.outputs || []),...outputs];
   const allCovered=[...new Map([...coveredRows,...newRows].map((row)=>[String(row.id),row])).values()];
-  const receipt={schemaVersion:2,businessDate:pdfDate,orderIdHash:initialManifest.orderIdHash,orderCount:initialRows.length,outputs:allOutputs,coveredRows:allCovered,latestBatch:{orderCount:newRows.length,orderIdHash:PrayerSite.manifest(newRows,pdfDate).orderIdHash,outputs,exportedAt:new Date().toISOString()},verifiedAt:new Date().toISOString()};
+  const receipt={schemaVersion:2,businessDate:pdfDate,orderIdHash:initialManifest.orderIdHash,orderCount:initialRows.length,outputs:allOutputs,coveredRows:allCovered,coveredOrderIdHash:PrayerSite.manifest(allCovered,pdfDate).orderIdHash,latestBatch:{orderCount:newRows.length,orderIdHash:PrayerSite.manifest(newRows,pdfDate).orderIdHash,outputs,exportedAt:new Date().toISOString()},verifiedAt:new Date().toISOString()};
   atomic(receiptFile,receipt);
   atomic(path.join(runDir,'renewal-manifest.json'),initialManifest);
   atomic(stateFile,{pdfDate,inspected:true,pdfVerified:true,stateChanged:false,orderIdHash:initialManifest.orderIdHash,orderCount:initialRows.length,verifiedAt:receipt.verifiedAt});
@@ -735,7 +736,9 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
       }
       atomic(receiptFile,receipt);
       photoTiming.start('upload');
-      photoSite = new PrayerSite(photoRunDir,photoTiming,log,siteOptions);
+      const renewalPhotoScope=manifest.manualNumberedMode
+        ? loadRenewalPhotoScope(path.join(workdaysRoot,photoDate),photoDate) : null;
+      photoSite = new PrayerSite(photoRunDir,photoTiming,log,{...siteOptions,renewalPhotoScope});
       await photoSite.open();
       const pdfReceipt = manifest.manualNumberedMode?null:readJson(path.join(workdaysRoot,photoDate,'pdf-receipt.json'),null);
       const uploadOrderScope = manifest.manualNumberedMode
@@ -853,7 +856,7 @@ if (args.action === 'photo-manual-prepare' || args.action === 'photo-prepare' ||
             ...notUploaded.map((row) => ({ ...row,kind:'lamp' })),
             ...notUploadedTablet.map((row) => ({ ...row,kind:'tablet' })),
           ];
-          if (manifest.manualNumberedMode && onlineUploadedCount > 0 && pendingFiles.length) {
+          if (manifest.manualNumberedMode && (onlineUploadedCount > 0 || renewalPhotoScope?.rows.length) && pendingFiles.length) {
             log(`正在只读核对 ${pendingFiles.length} 张缺回执照片；同日仍有待补订单时也逐张保存已上传证据。`);
             const readback=await reconcileManualUploadedPhotos({
               site:photoSite,date:photoDate,files:pendingFiles,allFiles:manifest.files.blessing,

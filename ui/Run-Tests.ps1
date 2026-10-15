@@ -46,4 +46,6 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $runtime.Node (Join-Path $root 'tests\manual-upload-correction-browser.mjs')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $runtime.Node (Join-Path $root 'tests\photo-completion-navigation-browser.mjs')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $runtime.Node (Join-Path $root 'tests\renewal-photo-query-browser.mjs')
 exit $LASTEXITCODE

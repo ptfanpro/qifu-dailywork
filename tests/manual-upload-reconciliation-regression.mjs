@@ -67,6 +67,18 @@ try {
   assert.equal(singleton.matched[0].matchMethod,'sha256');
   assert.deepEqual(single.calls,[[date,'tablet']],'complete evidence needs no further page queries');
 
+  // Renewal orders exported for this day may start tomorrow and no longer
+  // appear in either of the normal same-date lists after processing.
+  const renewal = makeSite({lamp:[{id:'l1',kind:'lamp',url:'ordinary'}],
+    renewal:[{id:'r1',kind:'renewal',url:'renewed-a'},{id:'r2',kind:'renewal',url:'renewed-b'}]},
+    {'ordinary':bytes[0],'renewed-a':bytes[1],'renewed-b':bytes[2]});
+  renewal.renewalPhotoScope={businessDate:date,rows:[{id:'r1'},{id:'r2'}]};
+  const renewed = await reconcileManualUploadedPhotos({site:renewal,date,files:allFiles,allFiles,fileHashes});
+  assert.deepEqual(renewed.missingNames,[],'same-day renewal export evidence must be checked despite the next-day start date');
+  assert.deepEqual(renewal.calls,[[date,'tablet'],[date,'lamp'],[date,'renewal']]);
+  assert.equal(renewed.matched[1].onlineOrderIdHash,hash('renewal:r1'));
+  assert.equal(renewal.closed,1);
+
   const rejected=makeSite({},{});
   rejected.uploadBlessingBatch=async()=>{const error=new Error('后台提示“该图片已上传”，本批是否部分保存仍需核对');
     error.code='BLESSING_UPLOAD_OUTCOME_UNCONFIRMED';

@@ -45,7 +45,7 @@ export async function reconcileManualUploadedPhotos({
   };
   let scanned = 0;
   try {
-    for (const kind of ['tablet', 'lamp']) {
+    for (const kind of ['tablet', 'lamp', ...(site.renewalPhotoScope?.rows?.length ? ['renewal'] : [])]) {
       if (!missingNames.size) break;
       const references = await site.queryUploadedPhotoReferences(date, kind);
       for (const reference of references) {
